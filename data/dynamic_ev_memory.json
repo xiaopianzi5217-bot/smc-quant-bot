@@ -1,0 +1,10 @@
+{
+    "TRANSITION_HIGH_LOW_HIGH": {
+        "ev": 0.0775,
+        "trades": 1
+    },
+    "TREND_HIGH_LOW_HIGH": {
+        "ev": 0.0775,
+        "trades": 1
+    }
+}

@@ -1,0 +1,22 @@
+{
+  "mode": "dry_run",
+  "risk_pct": 0.01,
+  "max_positions": 3,
+  "max_same_direction": 2,
+  "max_daily_loss_usdt": 100,
+  "max_consecutive_losses": 3,
+  "alert_cooldown_sec": 600,
+  "fee_rate": 0.0006,
+  "slippage_bps": 3,
+  "regime": {
+    "min_adx_open": 20,
+    "block_squeeze_building": true,
+    "block_chaos": true
+  },
+  "lifecycle": {
+    "move_sl_to_be_after_tp1": true,
+    "partial_tp1_pct": 0.33,
+    "partial_tp2_pct": 0.33,
+    "trail_after_tp2": true
+  }
+}

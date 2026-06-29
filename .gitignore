@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+logs/*.log
+artifacts/*.jsonl
+reports/*.csv
+reports/*.json
+.DS_Store
+.ipynb_checkpoints/
+.venv/
+.git_backup/
+data/*.csv
+outputs/*.csv
+all_code_for_xiaog.txt

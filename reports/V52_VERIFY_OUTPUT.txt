@@ -1,0 +1,3 @@
+V52_FINAL_FORGE_VERIFY_OK
+{'trades': 32, 'win_rate': 0.5, 'pf': 1.596, 'pnl': 0.0509, 'avg_r': 0.00159, 'max_win_r': 0.02, 'max_loss_r': -0.02}
+saved: /mnt/data/smc_final_build/SMC_Bot_V52_FINAL_FORGE/data/backtest_v52_final_forge_verified.csv

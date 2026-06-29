@@ -1,0 +1,82 @@
+{
+  "app.py": "syntax_ok",
+  "runner.v11_institutional_runner": "ok",
+  "backtest.runner": "ok",
+  "ops.env_config": "ok",
+  "risk.global_risk": "ok",
+  "execution.paper_broker": "ok",
+  "dry_run_results": [
+    {
+      "symbol": "BTC/USDT",
+      "approved": false,
+      "state": "BLOCKED",
+      "reason": "趋势强度不足，来回止损概率高",
+      "portfolio_check": {
+        "allowed": true,
+        "reasons": [],
+        "state": {
+          "equity": 10000.0,
+          "peak_equity": 10000.0,
+          "daily_pnl_r": 0.0,
+          "open_positions": 0,
+          "same_direction_positions": 0,
+          "consecutive_losses": 0
+        }
+      },
+      "decision": {
+        "approved": false,
+        "state_name": "BLOCKED",
+        "reason": "趋势强度不足，来回止损概率高",
+        "regime": {
+          "regime_name": "震荡弱趋势",
+          "tradable": false,
+          "reason": "趋势强度不足，来回止损概率高",
+          "adx": 0.0,
+          "atr_pct": 0.0,
+          "squeeze": "",
+          "macro_trend": "1H 震盪折價區 🟢 | 50%線: 101.5",
+          "allowed_direction": "Long"
+        },
+        "primary": null,
+        "risk_plan": null,
+        "price": 99.41
+      }
+    },
+    {
+      "symbol": "ETH/USDT",
+      "approved": false,
+      "state": "BLOCKED",
+      "reason": "趋势强度不足，来回止损概率高",
+      "portfolio_check": {
+        "allowed": true,
+        "reasons": [],
+        "state": {
+          "equity": 10000.0,
+          "peak_equity": 10000.0,
+          "daily_pnl_r": 0.0,
+          "open_positions": 0,
+          "same_direction_positions": 0,
+          "consecutive_losses": 0
+        }
+      },
+      "decision": {
+        "approved": false,
+        "state_name": "BLOCKED",
+        "reason": "趋势强度不足，来回止损概率高",
+        "regime": {
+          "regime_name": "震荡弱趋势",
+          "tradable": false,
+          "reason": "趋势强度不足，来回止损概率高",
+          "adx": 0.0,
+          "atr_pct": 0.0,
+          "squeeze": "",
+          "macro_trend": "1H 震盪折價區 🟢 | 50%線: 101.5",
+          "allowed_direction": "Long"
+        },
+        "primary": null,
+        "risk_plan": null,
+        "price": 99.41
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "regime_gate": {
+    "adx_min_trade": 17.0,
+    "adx_min_observe": 14.0,
+    "block_squeeze_building": true,
+    "block_mud": true,
+    "near_level_atr_mult": 0.8,
+    "cooldown_bars_after_loss": 18,
+    "same_zone_atr_mult": 0.8
+  },
+  "priority_weights": {
+    "liquidity_sweep": 4.0,
+    "near_liquidity": 2.0,
+    "valid_ob": 2.8,
+    "near_ob": 2.0,
+    "fvg": 1.6,
+    "divergence": 2.3,
+    "kline_momentum": 0.8,
+    "score_confirm": 2.8,
+    "trend_align": 2.5,
+    "adx_strong": 1.6,
+    "squeeze_release": 1.4
+  },
+  "signal_class": {
+    "s_level": 90.0,
+    "a_level": 80.0,
+    "b_level": 70.0,
+    "min_open_level": "B"
+  },
+  "risk": {
+    "account_risk_pct": 0.01,
+    "max_position_pct": 0.25,
+    "max_daily_loss_pct": 0.03,
+    "max_total_exposure_pct": 0.6,
+    "atr_sl_mult": 1.5,
+    "safety_atr_mult": 0.25,
+    "tp1_rr": 1.0,
+    "tp2_rr": 2.0,
+    "tp3_rr": 3.0
+  }
+}

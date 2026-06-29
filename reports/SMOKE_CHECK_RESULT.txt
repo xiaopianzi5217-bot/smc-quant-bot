@@ -1,0 +1,7 @@
+SMC V11+V9 institutional quant system dry-run complete
+report: /mnt/data/hf_work/audit_quant/reports/latest_signals.json
+BTC/USDT | approved=False | state=BLOCKED | reason=趋势强度不足，来回止损概率高
+ETH/USDT | approved=False | state=BLOCKED | reason=趋势强度不足，来回止损概率高
+{'trades': 0, 'win_rate': 0.0, 'avg_r': 0.0, 'total_r': 0.0, 'best_r': 0.0, 'worst_r': 0.0, 'profit_factor': 0.0}
+saved: data/backtest_smoke.csv
+SMOKE_CHECK_OK

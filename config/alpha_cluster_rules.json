@@ -1,0 +1,42 @@
+{
+  "version": "AlphaClusterGuard_V54_ALPHA_EXPANSION_20260621",
+  "block_books": [
+    "DUMPSTER",
+    "SCALP"
+  ],
+  "hard_bad_clusters": [
+    "TREND_V37_DUMPSTER_NEG_OK",
+    "TRANSITION_V37_DUMPSTER_NEG_OK",
+    "TRANSITION_V37_DUMPSTER_NEG_WEAK",
+    "TRANSITION_V37_DUMPSTER_NEG_GOOD",
+    "CHOP_V37_DUMPSTER_NEG_OK",
+    "CHOP_V37_DUMPSTER_NEG_WEAK"
+  ],
+  "soft_bad_clusters": [
+    "TREND_V37_CORE_EXTREME_GOOD",
+    "TREND_V37_CORE_EXTREME_STRONG",
+    "TRANSITION_V37_TACTICAL_EXTREME_GOOD",
+    "CHOP_V37_SCALP_HIGH_GOOD"
+  ],
+  "alpha_clusters": [
+    "TRANSITION_V37_CORE_EXTREME_GOOD",
+    "TRANSITION_V37_PROBE_LOW_GOOD",
+    "CHOP_V37_TACTICAL_EXTREME_GOOD"
+  ],
+  "min_trades_for_hard_stat": 20,
+  "hard_pf_floor": 0.75,
+  "hard_win_rate_floor": 0.08,
+  "soft_pf_floor": 1.0,
+  "unknown_cluster_multiplier": 0.85,
+  "soft_bad_multiplier": 0.45,
+  "soft_bad_requires_liquidity_sweep": true,
+  "weak_cluster_multiplier": 0.6,
+  "alpha_multiplier": 1.05,
+  "alpha_min_trades_for_boost": 30,
+  "fragile_alpha_multiplier": 0.65,
+  "fragile_alpha_requires_liquidity_sweep": true,
+  "block_book_probe_multiplier": 0.35,
+  "hard_bad_probe_multiplier": 0.3,
+  "stat_bad_probe_multiplier": 0.3,
+  "no_sweep_probe_multiplier": 0.35
+}

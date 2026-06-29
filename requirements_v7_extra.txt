@@ -1,0 +1,4 @@
+ccxt
+pandas
+requests加上这个库是为了处理音频数据的，可能在某些功能中需要用到。
+gradio

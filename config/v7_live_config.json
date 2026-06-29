@@ -1,0 +1,106 @@
+{
+  "mode": "dry_run",
+  "exchange": "bitget",
+  "symbols": ["BTC/USDT:USDT", "ETH/USDT:USDT"],
+  "exec_timeframe": "15m",
+  "macro_timeframe": "1h",
+  "scan_interval_seconds": 60,
+  "risk": {
+    "account_risk_pct": 0.005,
+    "max_total_risk_pct": 0.025,
+    "max_symbol_risk_pct": 0.01,
+    "max_open_positions": 3,
+    "max_same_direction_positions": 2,
+    "min_notional_usdt": 5,
+    "min_rr": 2.0,
+    "leverage": 1
+  },
+  "position_sizing": {
+    "enabled": true,
+    "grade_risk_multiplier": {
+      "S": 1.0,
+      "A": 0.5,
+      "B": 0.0,
+      "C": 0.0,
+      "D": 0.0
+    },
+    "observe_grades": ["B", "C", "D"]
+  },
+  "strategy_filters": {
+    "enabled": true,
+    "multi_timeframe_trend": {
+      "enabled": true,
+      "allow_both": true,
+      "block_long_when_exec_red": true,
+      "block_short_when_exec_blue": true
+    },
+    "min_rr": { "enabled": true, "value": 2.0 },
+    "atr_volatility": {
+      "enabled": true,
+      "min_atr_pct": 0.0015,
+      "max_atr_pct": 0.06,
+      "min_atr_ratio": 0.7,
+      "max_atr_ratio": 2.2
+    },
+    "symbol_cooldown": {
+      "enabled": true,
+      "bars": 8,
+      "state_file": "state/strategy_filter_state.json"
+    },
+    "volume_confirmation": {
+      "enabled": true,
+      "min_volume_ratio": 1.15,
+      "strong_volume_ratio": 1.5,
+      "allow_if_sweep_or_ob": true
+    },
+    "structure_distance": {
+      "enabled": true,
+      "max_entry_to_support_atr": 2.0,
+      "max_entry_to_resistance_atr": 2.0,
+      "min_distance_to_opposite_atr": 0.7,
+      "require_near_structure": true
+    },
+    "structure_dedupe": {
+      "enabled": true,
+      "bars": 12,
+      "state_file": "state/strategy_filter_state.json"
+    },
+    "trading_session": {
+      "enabled": true,
+      "timezone": "UTC",
+      "allowed_weekdays": [0, 1, 2, 3, 4, 5, 6],
+      "blocked_utc_hours": [0, 1, 2, 3],
+      "allow_if_volume_ratio_above": 1.8
+    },
+    "event_pause": {
+      "enabled": true,
+      "state_file": "state/news_pause.json",
+      "pause_if_manual_flag": true,
+      "extreme_atr_pct": 0.08,
+      "extreme_range_atr_mult": 3.0,
+      "extreme_volume_ratio": 3.5
+    }
+  },
+  "audit": { "enabled": true, "path": "reports/filter_audit.csv" },
+  "execution": {
+    "order_type": "market",
+    "slippage_bps": 8,
+    "fee_bps": 6,
+    "enable_partial_tp": true,
+    "tp1_close_pct": 0.35,
+    "tp2_close_pct": 0.35,
+    "tp3_close_pct": 0.3,
+    "move_sl_to_be_after_tp1": true,
+    "trail_after_tp2": true,
+    "trail_atr_mult": 1.2,
+    "cooldown_minutes_after_loss": 30,
+    "cooldown_minutes_same_zone": 20,
+    "same_zone_atr_mult": 0.8
+  },
+  "telegram": {
+    "send_approved": true,
+    "send_rejected": false,
+    "send_management": true,
+    "send_errors": true
+  }
+}

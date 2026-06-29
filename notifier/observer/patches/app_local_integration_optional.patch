@@ -1,0 +1,24 @@
+diff --git a/app.py b/app.py
+index 0000000..0000001 100644
+--- a/app.py
++++ b/app.py
+@@
+ from notifier.manager import dispatch_observer_snapshot, dispatch_strategy_decision, dispatch_execution_event
++from notifier.auto_alert_router import dispatch_instant_alerts
+@@
+ def build_local_snapshot_and_decision(symbol):
+@@
+-    return snapshot, decision
++    # 本地构建路径也挂接 Observer 瞬发提醒。
++    # 注意：这里不发送 Strategy，不下单；开单信息仍走 dispatch_strategy_decision。
++    try:
++        dispatch_instant_alerts(
++            snapshot=snapshot,
++            df=df_exec,
++            symbol=symbol,
++            timeframe="15m",
++        )
++    except Exception:
++        pass
++
++    return snapshot, decision

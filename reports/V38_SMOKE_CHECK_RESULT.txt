@@ -1,0 +1,12 @@
+V38 tiered restructure smoke check
+
+Commands executed:
+1) python -m compileall -q .
+2) python scripts/smoke_check.py
+
+Result:
+SMOKE_CHECK_OK
+
+Notes:
+- The smoke check validates syntax, key imports, quick backtest execution, output CSV creation, and AVS report generation.
+- The smoke window is intentionally small and should not be treated as a performance claim.

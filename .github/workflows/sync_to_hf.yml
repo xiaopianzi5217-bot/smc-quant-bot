@@ -1,0 +1,59 @@
+name: Sync to Hugging Face
+on:
+  push:
+    branches: [main]
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Hugging Face Space
+        run: |
+          # ─── ☢️ 【核心修复：在你的脚本开头加入此段，彻底干掉大文件历史幽灵】 ───
+          # 这几行命令会在 Actions 虚拟机内存里，把携带了 zip 记忆的历史树连根拔起（不影响你的本地和 GitHub 历史）
+          rm -rf .git
+          git init --initial-branch=main
+          
+          git config --global user.email "bot@example.com"
+          git config --global user.name "GitHub-Sync-Bot"
+          
+          # 重新把干干净净的代码打包成一个没有任何前科的全新起点提交
+          git add .
+          git commit -m "🚀 Force deploy clean state to Hugging Face"
+          
+          # ─── 🔐 【安全对接远端空间】 ───
+          git remote add hf https://Aisvbo:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/Aisvbo/svb-bot || git remote set-url hf https://Aisvbo:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/Aisvbo/svb-bot
+          
+          # ─── 🛡️ 【抗 429 频控的动态退避重试机制】 ───
+          echo "⚡ 启动抗频控重试引擎推送至 Hugging Face..."
+          MAX_ATTEMPTS=5
+          ATTEMPT=1
+          DELAY=10  # 初始等待 10 秒
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "🔄 尝试推送中 (第 $ATTEMPT / $MAX_ATTEMPTS 次)..."
+            
+            # 🌟 优化：既然本地已经干净，直接将当前干净的 main 分支安全推送到远程 main
+            if git push --force hf main:main; then
+              echo "✅ [SUCCESS] 代码已成功突破频控墙，强制同步至 Hugging Face！"
+              exit 0
+            else
+              echo "⚠️ [WARNING] 推送被拦截或遭遇 429 频控。"
+              if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+                echo "❌ [ERROR] 连续 $MAX_ATTEMPTS 次尝试均告失败，请稍后手动触发。"
+                exit 1
+              fi
+              echo "⏳ 激活指数退避，等待 $DELAY 秒后发起下一次冲击..."
+              sleep $DELAY
+              DELAY=$((DELAY * 2))
+              ATTEMPT=$((ATTEMPT + 1))
+            fi
+          done

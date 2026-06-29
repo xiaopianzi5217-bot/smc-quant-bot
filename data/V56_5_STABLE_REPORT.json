@@ -1,0 +1,412 @@
+{
+  "version": "V56_5_STABLE_ENHANCED_20260623",
+  "config": {
+    "warmup_bars": 260,
+    "annual_trade_target_min": 300,
+    "annual_trade_target_max": 500,
+    "min_score": 65.0,
+    "extra_second_trade_days": 25,
+    "allowed_hours": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      6,
+      7,
+      16,
+      17,
+      18,
+      19,
+      21,
+      23
+    ],
+    "primary_setups": [
+      "LIQUIDITY_SWEEP"
+    ],
+    "allow_tier2_if_strong": false,
+    "strong_tier2_score": 82.0,
+    "stop_atr": 0.8,
+    "min_stop_pct": 0.0025,
+    "tp1_r": 1.0,
+    "tp2_r": 1.8,
+    "tp3_r": 2.8,
+    "tp1_close_pct": 0.35,
+    "tp2_close_pct": 0.35,
+    "max_hold_bars": 36,
+    "fee_r": 0.04,
+    "slippage_r": 0.03,
+    "no_overlap": true,
+    "apply_cluster_sizing": true,
+    "cluster_skip_threshold": 0.85,
+    "cluster_size_penalty": 0.2,
+    "min_size_scale": 0.7,
+    "target_win_rate_min": 0.55,
+    "target_win_rate_max": 0.62,
+    "target_pf_min": 1.15,
+    "target_pf_max": 2.4,
+    "target_total_r_min": 20.0,
+    "requested_pf_min": 1.6
+  },
+  "data": {
+    "bars": 35040,
+    "start": "2025-06-01 11:45:00",
+    "end": "2026-06-01 11:30:00"
+  },
+  "candidate_summary": {
+    "broad_candidates": 9250,
+    "enriched_candidates": 9250,
+    "selected_before_overlap_guard": 350,
+    "signal_density": 0.26398
+  },
+  "signal_entropy_broad": {
+    "candidate_count": 9250,
+    "setup_counts": {
+      "TREND_PULLBACK": 3719,
+      "WEAK_BOS": 2691,
+      "LIQUIDITY_SWEEP": 1724,
+      "FVG_TOUCH": 846,
+      "ORDERBLOCK_REACTION": 270
+    },
+    "entropy_bits": 1.9629,
+    "max_pattern_share": 0.4021,
+    "dominance_warning": false
+  },
+  "selected_signal_quality": {
+    "tier": [
+      {
+        "group": "1",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.1789,
+        "pnl": 27.9725,
+        "avg_r": 0.08038,
+        "max_dd_r": -21.8728,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      }
+    ],
+    "setup_type": [
+      {
+        "group": "LIQUIDITY_SWEEP",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.1789,
+        "pnl": 27.9725,
+        "avg_r": 0.08038,
+        "max_dd_r": -21.8728,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      }
+    ],
+    "direction": [
+      {
+        "group": "Long",
+        "trades": 200,
+        "win_rate": 0.57,
+        "pf": 1.1268,
+        "pnl": 11.5732,
+        "avg_r": 0.05787,
+        "max_dd_r": -12.2449,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.565,
+        "tp2_touch_rate": 0.325,
+        "tp3_touch_rate": 0.16,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "group": "Short",
+        "trades": 148,
+        "win_rate": 0.5878,
+        "pf": 1.2518,
+        "pnl": 16.3993,
+        "avg_r": 0.11081,
+        "max_dd_r": -12.214,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5811,
+        "tp2_touch_rate": 0.3311,
+        "tp3_touch_rate": 0.2027,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      }
+    ],
+    "tier+direction": [
+      {
+        "group": "1/Long",
+        "trades": 200,
+        "win_rate": 0.57,
+        "pf": 1.1268,
+        "pnl": 11.5732,
+        "avg_r": 0.05787,
+        "max_dd_r": -12.2449,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.565,
+        "tp2_touch_rate": 0.325,
+        "tp3_touch_rate": 0.16,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "group": "1/Short",
+        "trades": 148,
+        "win_rate": 0.5878,
+        "pf": 1.2518,
+        "pnl": 16.3993,
+        "avg_r": 0.11081,
+        "max_dd_r": -12.214,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5811,
+        "tp2_touch_rate": 0.3311,
+        "tp3_touch_rate": 0.2027,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      }
+    ]
+  },
+  "ev_calibration": {
+    "buckets": [
+      {
+        "bucket": "(0.389, 0.496]",
+        "trades": 35,
+        "model_ev_mean": 0.46746,
+        "win_rate": 0.6857,
+        "avg_r": 0.38823
+      },
+      {
+        "bucket": "(0.496, 0.524]",
+        "trades": 35,
+        "model_ev_mean": 0.51153,
+        "win_rate": 0.5429,
+        "avg_r": -0.06758
+      },
+      {
+        "bucket": "(0.524, 0.553]",
+        "trades": 35,
+        "model_ev_mean": 0.53863,
+        "win_rate": 0.4857,
+        "avg_r": -0.08723
+      },
+      {
+        "bucket": "(0.553, 0.582]",
+        "trades": 34,
+        "model_ev_mean": 0.56987,
+        "win_rate": 0.6765,
+        "avg_r": 0.25559
+      },
+      {
+        "bucket": "(0.582, 0.61]",
+        "trades": 35,
+        "model_ev_mean": 0.59551,
+        "win_rate": 0.5429,
+        "avg_r": 0.04842
+      },
+      {
+        "bucket": "(0.61, 0.65]",
+        "trades": 35,
+        "model_ev_mean": 0.63311,
+        "win_rate": 0.6286,
+        "avg_r": 0.2534
+      },
+      {
+        "bucket": "(0.65, 0.68]",
+        "trades": 34,
+        "model_ev_mean": 0.66261,
+        "win_rate": 0.6176,
+        "avg_r": 0.10971
+      },
+      {
+        "bucket": "(0.68, 0.707]",
+        "trades": 35,
+        "model_ev_mean": 0.69267,
+        "win_rate": 0.4571,
+        "avg_r": -0.16352
+      },
+      {
+        "bucket": "(0.707, 0.741]",
+        "trades": 35,
+        "model_ev_mean": 0.72333,
+        "win_rate": 0.5429,
+        "avg_r": 0.03949
+      },
+      {
+        "bucket": "(0.741, 0.83]",
+        "trades": 35,
+        "model_ev_mean": 0.76832,
+        "win_rate": 0.6,
+        "avg_r": 0.03314
+      }
+    ],
+    "monotonic_winrate_steps": 4,
+    "max_possible_steps": 9,
+    "status": "WARN"
+  },
+  "overall": {
+    "trades": 348,
+    "win_rate": 0.5776,
+    "pf": 1.1789,
+    "pnl": 27.9725,
+    "avg_r": 0.08038,
+    "max_dd_r": -21.8728,
+    "max_win_r": 1.75,
+    "max_loss_r": -1.07,
+    "tp1_touch_rate": 0.5718,
+    "tp2_touch_rate": 0.3276,
+    "tp3_touch_rate": 0.1782,
+    "micro_profit_frequency_lt_0p2r": 0.0,
+    "micro_loss_frequency_gt_minus_0p2r": 0.0
+  },
+  "temporal_stability": {
+    "slices": [
+      {
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
+      },
+      {
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
+      },
+      {
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
+      },
+      {
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
+      }
+    ]
+  },
+  "stability_curve": {
+    "status": "PASS",
+    "scenarios": [
+      {
+        "scenario": "base",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.1789,
+        "pnl": 27.9725,
+        "avg_r": 0.08038,
+        "max_dd_r": -21.8728,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "scenario": "slippage_plus_1bp_proxy",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.1552,
+        "pnl": 24.4925,
+        "avg_r": 0.07038,
+        "max_dd_r": -23.5128,
+        "max_win_r": 1.74,
+        "max_loss_r": -1.08,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "scenario": "tp_minus_5pct",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.12,
+        "pnl": 18.7559,
+        "avg_r": 0.0539,
+        "max_dd_r": -25.4074,
+        "max_win_r": 1.6625,
+        "max_loss_r": -1.07,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "scenario": "delay_plus_1bar_proxy",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.172,
+        "pnl": 26.9725,
+        "avg_r": 0.07751,
+        "max_dd_r": -22.3328,
+        "max_win_r": 1.75,
+        "max_loss_r": -1.09,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      },
+      {
+        "scenario": "combined_stress",
+        "trades": 348,
+        "win_rate": 0.5776,
+        "pf": 1.0908,
+        "pnl": 14.3764,
+        "avg_r": 0.04131,
+        "max_dd_r": -27.4689,
+        "max_win_r": 1.653,
+        "max_loss_r": -1.1,
+        "tp1_touch_rate": 0.5718,
+        "tp2_touch_rate": 0.3276,
+        "tp3_touch_rate": 0.1782,
+        "micro_profit_frequency_lt_0p2r": 0.0,
+        "micro_loss_frequency_gt_minus_0p2r": 0.0
+      }
+    ]
+  },
+  "target_gap": {
+    "trade_count_ok": true,
+    "win_rate_ok": true,
+    "stable_pf_ok": true,
+    "requested_pf_1p6_ok": false,
+    "total_r_ok": true,
+    "note": "V56.5 reports both achieved stable target and the original 1.6 PF request. It does not force PF by future leakage or micro-profit tricks."
+  },
+  "logic_checks": {
+    "tp1_not_micro": true,
+    "no_mfe_replay": true,
+    "no_future_outcome_labels": true,
+    "next_bar_open_entry": true,
+    "real_hl_touch_exits": true,
+    "conservative_intrabar_before_tp1": true,
+    "overlap_uses_entry_bar_not_signal_bar": true,
+    "cluster_as_risk_scaler": true
+  }
+}

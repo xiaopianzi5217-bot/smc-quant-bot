@@ -1,0 +1,95 @@
+# SMC v9 Full Quant Integrated
+
+## 结论
+
+v6、v7、v8 是分层补丁包，不建议继续分散上传。v9 是把它们整合后的主版本。
+
+## v9 整合内容
+
+- v6：统一决策入口、权重数据化、中文信号、仓位/资金管理基础
+- v7：实盘执行、持仓生命周期、日志、交易所适配
+- v8：数据质量、滑点手续费、安全熔断、监控、配置检查
+- v9：Regime 精细化、信号等级数据化、OB/买方/卖方流动性数字化、硬安全、信号事件训练日志
+
+## 重点新增
+
+```text
+regime/v9_regime_classifier.py
+calibration/v9_signal_grader.py
+observer/v9_numeric_signal_formatter.py
+ops/v9_hard_safety.py
+journal/v9_signal_event_logger.py
+decision/v9_decision_kernel.py
+config/v9_full_config.json
+```
+
+## 新统一入口
+
+```python
+from decision.v9_decision_kernel import V9DecisionKernel
+
+kernel = V9DecisionKernel()
+decision = kernel.decide(...)
+```
+
+以后原则：
+
+```text
+任何提醒、任何开单、任何实盘执行，都不允许绕过 V9DecisionKernel。
+```
+
+## 第 3-6 条已优化
+
+### 3. Regime Gate 更细
+
+不再只看 ADX，新增：
+
+- 震荡弱趋势
+- 波动压缩
+- 高波动混乱
+- 趋势行情
+- 强趋势
+- 过渡行情
+
+### 4. OB / buyside / sellside 数字化
+
+提醒会输出：
+
+- 当前价
+- 订单块区间
+- 距离订单块百分比
+- 买方流动性价格与距离
+- 卖方流动性价格与距离
+- 动能背离
+- K线颜色状态
+- 打分、等级、建议、TP/SL
+
+### 5. 实盘安全更硬
+
+新增：
+
+- 手动紧急停止
+- 单日最大亏损停止
+- 连续亏损暂停
+- API 异常停止
+- 数据异常停止
+- 持仓不同步保护
+- 重复下单保护
+
+### 6. 日志训练数据化
+
+所有事件都会记录：
+
+- 为什么提醒
+- 为什么不开
+- 为什么开
+- 当时评分
+- 当时行情
+- TP/SL
+- 原始上下文 JSON
+
+## 部署建议
+
+直接以 v9 作为唯一上传包，不要再单独叠 v6/v7/v8。
+
+先 dry_run，稳定后再 live。

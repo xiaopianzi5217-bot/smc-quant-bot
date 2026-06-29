@@ -1,0 +1,29 @@
+diff --git a/notifier/observer/realtime_scanner.py b/notifier/observer/realtime_scanner.py
+index 0000000..0000001 100644
+--- a/notifier/observer/realtime_scanner.py
++++ b/notifier/observer/realtime_scanner.py
+@@
+ from notifier.manager import dispatch_observer_snapshot, dispatch_strategy_decision
++from notifier.auto_alert_router import dispatch_instant_alerts
+@@
+ def build_snapshot_and_decision(exchange, symbol, exec_timeframe="15m", macro_timeframe="1h", limit=300, cfg=None):
+@@
+     snapshot = build_signal_snapshot(
+         symbol=symbol, df=df_exec, macro_ctx=macro_ctx, exec_ctx=exec_ctx,
+         long_score=l_score, long_threshold=l_thresh, long_reasons=l_reasons,
+         short_score=s_score, short_threshold=s_thresh, short_reasons=s_reasons,
+         direction=direction, rr_plan=rr_plan, funding_rate=funding_rate
+     )
++
++    # Observer 瞬发提醒：
++    # SQZMOM：K线变色 / 背离
++    # SMC：SELLSIDE / BUYSIDE 扫单与接近流动性
++    # 只发送 Telegram，不调用任何下单函数，不影响系统中枢 decision。
++    dispatch_instant_alerts(
++        snapshot=snapshot,
++        df=df_exec,
++        symbol=symbol,
++        timeframe=exec_timeframe,
++    )
++
+     return snapshot, decision

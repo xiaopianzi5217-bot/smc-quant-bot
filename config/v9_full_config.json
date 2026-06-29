@@ -1,0 +1,80 @@
+{
+  "mode": "dry_run",
+  "risk": {
+    "risk_per_trade_pct": 0.005,
+    "max_daily_loss_pct": 0.03,
+    "max_total_open_risk_pct": 0.05,
+    "max_positions": 3,
+    "max_same_direction_positions": 2,
+    "max_consecutive_losses": 3
+  },
+  "regime": {
+    "adx_weak": 18,
+    "adx_trend": 24,
+    "adx_strong": 32,
+    "atr_pct_low": 0.004,
+    "atr_pct_high": 0.018
+  },
+  "scoring": {
+    "base_score_by_setup": {
+      "COMBO_SETUP": 75.0,
+      "BREAKOUT_ONLY": 65.0,
+      "REVERSAL_ONLY": 55.0,
+      "EARLY_REVERSAL_POOL": 45.0
+    },
+    "regime_multiplier": {
+      "trend": 1.2,
+      "transition": 1.0,
+      "mud": 0.7
+    },
+    "setup_multiplier": {
+      "COMBO_SETUP": 1.3,
+      "BREAKOUT_ONLY": 1.15,
+      "REVERSAL_ONLY": 0.85,
+      "EARLY_REVERSAL_POOL": 0.60
+    },
+    "grade_thresholds": {
+      "S": 85.0,
+      "A": 70.0,
+      "B": 55.0,
+      "C": 40.0,
+      "D": 0.0
+    },
+    "position_size_by_grade": {
+      "S": 0.35,
+      "A": 0.20,
+      "B": 0.10,
+      "C": 0.03,
+      "D": 0.0
+    },
+    "component_weights": {
+      "divergence_max": 15.0,
+      "momentum_max": 10.0,
+      "liquidity_max": 8.0,
+      "smc_zone_max": 8.0,
+      "volume_max": 5.0,
+      "execution_max": 6.0
+    },
+    "risk_penalty_max": {
+      "macro_conflict": 15.0,
+      "too_extended": 10.0,
+      "repeat_divergence": 8.0,
+      "no_smc_structure": 5.0,
+      "wrong_side_liquidity": 8.0
+    }
+  },
+  "alerts": {
+    "dedupe_seconds": 300,
+    "send_ob_alert": true,
+    "send_liquidity_alert": true,
+    "send_divergence_alert": true,
+    "send_kline_color_alert": true
+  },
+  "execution": {
+    "enable_live_trading_env": "ENABLE_LIVE_TRADING",
+    "emergency_stop_env": "EMERGENCY_STOP",
+    "default_order_type": "limit",
+    "slippage_bps": 3,
+    "fee_bps": 6
+  }
+}
