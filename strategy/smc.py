@@ -408,6 +408,18 @@ def build_exec_context(df):
     ema_20 = float(df['close'].ewm(span=20, adjust=False).mean().iloc[-1] or 0.0)
     momentum = close_val - ema_20 if ema_20 > 0 else 0.0
     
+    # ===== 多空分差字段（供 smc_impulse_score 方向对齐奖励评分） =====
+    smc_quality_score_bull = long_quality
+    smc_quality_score_bear = short_quality
+    sqzmom_bull_strength = (7.0 if momentum > 0 else 0.0) + \
+                           (8.0 if sqzmom_white_reversal_long else 0.0) + \
+                           (10.0 if has_bot_div else 0.0)
+    sqzmom_bear_strength = (7.0 if momentum < 0 else 0.0) + \
+                           (8.0 if sqzmom_white_reversal_short else 0.0) + \
+                           (10.0 if has_top_div else 0.0)
+    bullish_momentum = momentum if momentum > 0 else 0.0
+    bearish_momentum = abs(momentum) if momentum < 0 else 0.0
+    
     return {
         'swing_high': sh_val, 'swing_low': sl_val,
         'poc': poc, 'vah': vah, 'val': val, 'utc_hour': utc_hour,
@@ -456,4 +468,11 @@ def build_exec_context(df):
         'ema_20': ema_20,
         'close': close_val,
         'body_pct': float(curr.get('body_pct', 0.0) or 0.0),
+        # 多空分差字段（供 smc_impulse_score 方向对齐奖励评分）
+        'smc_quality_score_bull': smc_quality_score_bull,
+        'smc_quality_score_bear': smc_quality_score_bear,
+        'sqzmom_bull_strength': sqzmom_bull_strength,
+        'sqzmom_bear_strength': sqzmom_bear_strength,
+        'bullish_momentum': bullish_momentum,
+        'bearish_momentum': bearish_momentum,
     }

@@ -26,12 +26,22 @@ from strategy.smc import build_macro_context, build_exec_context
 from strategy.risk import calculate_dynamic_tp_sl, check_partial_close_and_trail
 from notifier.observer.funding import fetch_funding_rate_safe, normalize_swap_symbol
 from notifier.telegram import send_telegram
+from state.trade_journal import journal as trade_journal
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
 
-# ---------- V37 主引擎 ----------
-from core.alpha_master_engine import V37MasterEngine
+# ---------- V56.5 主引擎（唯一生产决策管线） ----------
+from final_forge.v56_5_stable_engine import (
+    V565Config,
+    generate_v56_candidates,
+    enrich_v565_candidates,
+    select_v565_portfolio,
+    execute_v565,
+    add_v56_indicators,
+    load_ohlcv,
+)
+from strategy.v565_quality_gate import v565_quality_gate
 
 # ---------- 状态与特征存储 ----------
 from state.position_manager import position_manager
@@ -59,6 +69,10 @@ MIN_SCORE_GAP = 6.0
 # ----- 止损冷却 -----
 STOP_LOSS_COOLDOWN = 300
 _last_stop_loss_time = {}
+
+# 【修复20260704】去重与质量加强参数
+SIGNAL_COOLDOWN_SECONDS = 900  # 同品种同方向 15 分钟内不再重复开单
+TREND_END_PULLBACK_ATR = 3.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
 
 def _check_cooldown(symbol):
     last = _last_stop_loss_time.get(symbol, 0)
@@ -215,88 +229,123 @@ async def scan_and_decide(symbol: str) -> dict | None:
     if df_macro is None or len(df_macro) < 50:
         df_macro = make_sample_ohlcv(start=102.0)
         
+    # ===== V56.5 唯一决策管线 =====
+    # 使用 V56_5_Engine 的候选-评分-选择-执行链路
+    df_v56 = add_v56_indicators(load_ohlcv(df_exec))
+    if df_v56 is None or len(df_v56) < 260:
+        print(f"[{symbol}] V56 指标计算后数据不足")
+        return None
+    
+    broad = generate_v56_candidates(df_v56, None)
+    if broad is None or broad.empty:
+        print(f"[{symbol}] V56 无候选信号")
+        return None
+    
+    # 注入 exec_ctx 的 SMC 结构信息（原 V37 的 build_exec_context）
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
     df_macro = add_all_indicators(df_macro, STRATEGY_PARAMS["wvf_std_mult"])
-    
     macro_ctx = build_macro_context(df_macro)
     exec_ctx = build_exec_context(df_exec)
     exec_ctx["data_source"] = "hf_auto"
     
+    enriched = enrich_v565_candidates(broad, None)
+    
+    # 用 Quality Gate 做最终筛选
+    gate_passed = []
+    gate_reasons = []
+    for _, row in enriched.iterrows():
+        passed, reason, meta = v565_quality_gate(row.to_dict())
+        gate_passed.append(passed)
+        gate_reasons.append(reason)
+    enriched["gate_passed"] = gate_passed
+    enriched["gate_reason"] = gate_reasons
+    enriched = enriched[enriched["gate_passed"]].copy()
+    
+    if enriched.empty:
+        print(f"[{symbol}] Quality Gate 拦截全部信号，本次不开单")
+        return None
+    
+    selected = select_v565_portfolio(enriched, None)
+    
+    if selected is None or selected.empty:
+        print(f"[{symbol}] Top-N 选择后无信号")
+        return None
+    
+    trades = execute_v565(df_v56, selected, None)
+    
+    if trades is None or trades.empty:
+        print(f"[{symbol}] 执行后无交易")
+        return None
+    
+    # 取最高 score 的交易作为本次推送
+    best = trades.sort_values("score", ascending=False).iloc[0]
+    
+    direction = best.get("direction", None)
+    if not direction:
+        print(f"[{symbol}] 无有效方向")
+        return None
+    
+    # 用 exec_ctx 计算 entry quality（SMC 结构验证）
     curr = df_exec.iloc[-1]
-    engine = V37MasterEngine()
-    decision = engine.decide(curr, exec_ctx, macro_ctx)
+    entry_price = float(curr["close"])
     
-    allow = bool(decision.get("allow", False))
-    signal = decision.get("signal", {})
-    expected_value = signal.get("expected_value", -1.0)
-    score = signal.get("score", 0.0)
-    direction = signal.get("direction", None)
+    # 从 best row 读取 TP/SL
+    entry_signal = float(best.get("opened_at", df_v56.iloc[-1]))
+    sl = float(best.get("sl", 0))
+    tp1 = float(best.get("tp1", 0))
+    tp2 = float(best.get("tp2", 0))
+    tp3 = float(best.get("tp3", 0))
+    rr = float(best.get("estimated_rr", 0))
+    score = float(best.get("score", 0))
+    ev = float(best.get("model_ev", 0))
     
-    long_sig = engine.generate_signal(curr, "Long", exec_ctx, macro_ctx)
-    short_sig = engine.generate_signal(curr, "Short", exec_ctx, macro_ctx)
-    long_score = long_sig.get("score", 0.0)
-    short_score = short_sig.get("score", 0.0)
-    long_ev = long_sig.get("expected_value", -1.0)
-    short_ev = short_sig.get("expected_value", -1.0)
+    print(f"[{symbol}] V56.5 选定: {direction} score={score:.1f} ev={ev:.4f} "
+          f"setup={best.get('setup_type','?')} price={entry_price:.2f}")
     
-    sym_strategy = load_symbol_strategy(symbol, SYMBOL_STRATEGY)
-    min_rr = sym_strategy.get("min_rr", 2.0)
-    
-    sl, tp1, tp2, tp3, rr = calculate_dynamic_tp_sl(
-        direction or "Long", curr, df_exec, exec_ctx, min_rr, sym_strategy
-    )
-    long_sl, long_tp1, long_tp2, long_tp3, long_rr = calculate_dynamic_tp_sl(
-        "Long", curr, df_exec, exec_ctx, min_rr, sym_strategy
-    )
-    short_sl, short_tp1, short_tp2, short_tp3, short_rr = calculate_dynamic_tp_sl(
-        "Short", curr, df_exec, exec_ctx, min_rr, sym_strategy
-    )
-    
-    observer_events = _detect_observer_events(curr, exec_ctx, macro_ctx, long_score, short_score)
-    
+    # 构建兼容返回格式
     return {
         "symbol": symbol,
         "direction": direction,
-        "expected_value": round(float(expected_value), 4),
-        "score": round(float(score), 2),
-        "entry": float(curr["close"]),
+        "expected_value": round(ev, 4),
+        "score": round(score, 2),
+        "entry": entry_price,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
         "rr": round(rr, 2),
-        "approved": bool(allow),
-        "reason": decision.get("reason", "UNKNOWN"),
-        "regime": decision.get("regime", "unknown"),
-        "vol_state": decision.get("vol_state", "unknown"),
-        "book": decision.get("book", "NONE"),
-        "size": decision.get("size", 0.0),
-        "decision": decision,
+        "approved": True,
+        "reason": f"V56.5_{best.get('setup_type','?')}_{best.get('gate_reason','PASSED')}",
+        "regime": best.get("regime", "unknown"),
+        "vol_state": exec_ctx.get("volatility", "unknown"),
+        "book": "V56_5",
+        "size": 0.05,  # 固定 5%，后续让 position_manager 调整
+        "decision": {"signal": best.to_dict()},
         "df_exec": df_exec,
         "exec_ctx": exec_ctx,
         "macro_ctx": macro_ctx,
         "curr": curr,
-        "observer_events": observer_events,
-        "long_score": round(float(long_score), 2),
-        "short_score": round(float(short_score), 2),
-        "long_ev": round(float(long_ev), 4),
-        "short_ev": round(float(short_ev), 4),
-        "long_entry": float(curr["close"]),
-        "long_sl": long_sl,
-        "long_tp1": long_tp1,
-        "long_tp2": long_tp2,
-        "long_tp3": long_tp3,
-        "long_rr": round(long_rr, 2),
-        "short_entry": float(curr["close"]),
-        "short_sl": short_sl,
-        "short_tp1": short_tp1,
-        "short_tp2": short_tp2,
-        "short_tp3": short_tp3,
-        "short_rr": round(short_rr, 2),
-        "price": float(curr["close"]),
+        "observer_events": [],
+        "long_score": float(score) if direction == "Long" else 0.0,
+        "short_score": 0.0 if direction == "Long" else float(score),
+        "long_ev": round(ev, 4) if direction == "Long" else 0.0,
+        "short_ev": 0.0 if direction == "Long" else round(ev, 4),
+        "long_entry": entry_price,
+        "long_sl": sl if direction == "Long" else 0,
+        "long_tp1": tp1 if direction == "Long" else 0,
+        "long_tp2": tp2 if direction == "Long" else 0,
+        "long_tp3": tp3 if direction == "Long" else 0,
+        "long_rr": round(rr, 2) if direction == "Long" else 0,
+        "short_entry": entry_price,
+        "short_sl": sl if direction == "Short" else 0,
+        "short_tp1": tp1 if direction == "Short" else 0,
+        "short_tp2": tp2 if direction == "Short" else 0,
+        "short_tp3": tp3 if direction == "Short" else 0,
+        "short_rr": round(rr, 2) if direction == "Short" else 0,
+        "price": entry_price,
         "rsi": float(curr.get("rsi", 0)),
         "adx": float(exec_ctx.get("adx", curr.get("adx", 0))),
-        "atr": float(exec_ctx.get("atr", curr.get("ATRr_14", 0))),
+        "atr": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))),
         "macd_hist": float(curr.get("MACDh_12_26_9", 0)),
         "volume_ratio": float(curr.get("volume_ratio", 1)),
         "candle_color": str(exec_ctx.get("curr_color", "")),
@@ -506,16 +555,56 @@ def check_and_open(result: dict) -> bool:
     if position_manager.exists(symbol):
         print(f"[{symbol}] already has position")
         return False
+    
+    # ===== 【修复20260704】趋势位置检查：防止开在趋势末尾 =====
+    # Short 开单检查：如果价格已经从 swing_high 下跌超过一定幅度，不开
+    exec_ctx = result.get("exec_ctx", {}) or {}
+    swing_high = exec_ctx.get("swing_high", 0) or 0
+    swing_low = exec_ctx.get("swing_low", 0) or 0
+    atr_val = result.get("atr", 0) or 1
+    entry_price = entry
+    
+    if direction == "Short" and swing_high > 0 and swing_high > entry_price:
+        drop_from_high = (swing_high - entry_price) / max(atr_val, 1)
+        print(f"[{symbol}] Short: swing_high={swing_high:.1f} price={entry_price:.1f} "
+              f"drop={drop_from_high:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
+        if drop_from_high > TREND_END_PULLBACK_ATR:
+            print(f"[{symbol}] 价格已从高位下跌 {drop_from_high:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Short")
+            return False
+    elif direction == "Long" and swing_low > 0 and swing_low < entry_price:
+        rise_from_low = (entry_price - swing_low) / max(atr_val, 1)
+        print(f"[{symbol}] Long: swing_low={swing_low:.1f} price={entry_price:.1f} "
+              f"rise={rise_from_low:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
+        if rise_from_low > TREND_END_PULLBACK_ATR:
+            print(f"[{symbol}] 价格已从低点上涨 {rise_from_low:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Long")
+            return False
+
+    # ===== 【修复20260704】RR 硬校验：如果最终 RR < 1.0 直接拒绝 =====
+    actual_rr = result.get("rr", 0) or 0
+    if actual_rr < 1.0:
+        print(f"[{symbol}] RR={actual_rr:.2f} < 1.0 skip")
+        return False
         
+    # 获取 signal_tier 用于调试消息和日志
+    _tier = None
+    _decision = result.get("decision", {})
+    _signal = _decision.get("signal", {})
+    if _signal:
+        _tier = _signal.get("signal_tier")
+    
     emoji_dir = "L" if direction == "Long" else "S"
+    _debug_long_vs_short = f"Lv{result.get('long_score',0):.1f} Sv{result.get('short_score',0):.1f}"
+    _debug_tier = _tier or "?"
+    _debug_atr_val = result.get("atr", 0)
     msg = (
         f"[Strategy] {emoji_dir} {symbol}\n"
         f"ID: {sig_id}\n"
         f"Entry: {entry:.2f} SL: {sl:.2f}\n"
         f"TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
         f"RR: {rr:.2f} EV: {ev:.4f} Score: {score:.1f}\n"
+        f"Tier: {_debug_tier} ATR: {_debug_atr_val:.2f}\n"
         f"Regime: {regime} Book: {book}\n"
-        f"Size: {size*100:.1f}%\n"
+        f"Size: {size*100:.1f}% {_debug_long_vs_short}\n"
         f"Reason: {reason}"
     )
     safe_send(msg)
@@ -533,9 +622,42 @@ def check_and_open(result: dict) -> bool:
     })
     print(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
     
+    # ===== 【开单日志写入】 =====
+    # 1. TradeJournal（日志审计）
+    _order_id = None
+    try:
+        _order_id = trade_journal.open_trade(
+            symbol=symbol,
+            direction=direction,
+            open_price=entry,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2 if tp2 else 0,
+            tp3=tp3 if tp3 else 0,
+            rr=rr,
+            score=score,
+            regime=result.get("regime", ""),
+            volume=size,
+            note=f"ev={ev:.4f}_adx={result.get('adx',0):.1f}_atr={result.get('atr',0):.1f}_tier={_debug_tier}",
+        )
+        # 把 order_id 存入 position_manager，供后续平仓追溯
+        if _order_id:
+            _pos_data = position_manager.get(symbol)
+            if _pos_data:
+                _pos_data["order_id"] = _order_id
+                position_manager.update(symbol, _pos_data)
+    except Exception as tj_err:
+        print(f"[TradeJournal] 写入失败: {tj_err}")
+    
+    # 2. FeatureStore（信号特征分析）
     try:
         _adx_val = result.get("adx", 0) if result.get("adx") else (result.get("exec_ctx", {}) or {}).get("adx", 0)
         regime2 = "Trend" if _adx_val > 25 else ("Compression" if "squeeze" in str(result.get("squeeze", "")).lower() else "Range")
+        
+        # 获取 score_raw 用于记录分析
+        _raw = None
+        if _signal:
+            _raw = _signal.get("score_raw")
         
         trade_features = {
             "symbol": symbol,
@@ -543,6 +665,8 @@ def check_and_open(result: dict) -> bool:
             "entry": entry,
             "sl": sl,
             "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
             "rr": rr,
             "ev": ev,
             "score": score,
@@ -561,6 +685,9 @@ def check_and_open(result: dict) -> bool:
             "pnl_r": None,
             "weekday": __import__("datetime").datetime.now().weekday(),
             "hour": __import__("datetime").datetime.now().hour,
+            "signal_tier": _tier,
+            "score_raw": _raw,
+            "entry_price_level": f"bsl={result.get('bsl_level',0):.1f}_ssl={result.get('ssl_level',0):.1f}",
         }
         feature_store.save_trade(trade_features)
     except Exception as feat_e:
@@ -621,6 +748,23 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
             giveback = 0.0
             if mfe_val > 0:
                 giveback = abs((mfe_val - profit_r2) / mfe_val)
+            
+            # ===== 写入 TradeJournal 平仓记录 =====
+            try:
+                _oid = pos.get("order_id", "")
+                if _oid:
+                    trade_journal.close_trade(
+                        order_id=_oid,
+                        close_price=current_price,
+                        pnl_r=profit_r2,
+                        exit_reason=stage_label,
+                        mfe_r=mfe_val,
+                        mae_r=pos.get("mae", 0),
+                        max_r_before_stop=pos.get("max_r", 0),
+                        note=f"giveback={giveback:.2f}",
+                    )
+            except Exception as tj_err:
+                print(f"[TradeJournal] 平仓记录失败: {tj_err}")
                 
             feature_store.save_trade({
                 "symbol": symbol,

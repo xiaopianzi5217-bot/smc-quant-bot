@@ -43,7 +43,7 @@ class FeatureStore:
             return
         columns = [
             "timestamp", "symbol", "direction",
-            "entry", "sl", "tp1", "rr",
+            "entry", "sl", "tp1", "tp2", "tp3", "rr",
             "ev", "score",
             "regime", "regime2", "book",
             "adx", "atr",
@@ -52,6 +52,7 @@ class FeatureStore:
             "mfe", "mae", "max_r", "max_r_before_stop",
             "exit_reason", "pnl_r",
             "weekday", "hour",
+            "signal_tier", "score_raw", "entry_price_level",
         ]
         pd.DataFrame(columns=columns).to_csv(self.trades_file, index=False)
         logger.info("FeatureStore CSV 已初始化")

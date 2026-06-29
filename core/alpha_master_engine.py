@@ -514,17 +514,47 @@ class V37MasterEngine:
             chosen["no_base_trigger_candidates"] = True
             return chosen
 
-        return max(
-            candidates,
-            key=lambda s: (
-                _safe_float(s.get("expected_value"), -9.0) + (
-                    long_alignment_bonus * 0.15 if str(s.get("direction", "")).title() == "Long"
-                    else short_alignment_bonus * 0.15
+        # 【修复20260704】当两方向 EV 都接近 0 或都 < 0.08 时，
+        # 不再仅凭 EV 比较（谁大谁赢），改为评分/置信度优先。
+        # 防止 CHOP 市场中 EV=0.0 vs EV=-0.64 这种不合理的偏空选择。
+        long_ev = _safe_float(long_sig.get("expected_value"), 0.0)
+        short_ev = _safe_float(short_sig.get("expected_value"), 0.0)
+        both_ev_low = (long_ev < 0.08 and short_ev < 0.08)
+        both_ev_neg = (long_ev <= 0.0 and short_ev <= 0.0)
+        
+        if both_ev_neg:
+            # 两方向 EV 都 <= 0：完全按 score_raw + confidence 选
+            return max(
+                candidates,
+                key=lambda s: (
+                    _safe_float(s.get("score_raw"), 0.0),
+                    _safe_float(s.get("confidence"), 0.0),
+                    _safe_float(s.get("base_trigger_strength"), 0.0),
                 ),
-                _safe_float(s.get("base_trigger_strength"), 0.0),
-                _safe_float(s.get("score_raw"), 0.0),
-            ),
         )
+        elif both_ev_low:
+            # EV 都很低（<0.08）：EV 权重降到 0.3，score_raw 权重 0.7
+            return max(
+                candidates,
+                key=lambda s: (
+                    _safe_float(s.get("expected_value"), -9.0) * 0.3 +
+                    _safe_float(s.get("score_raw"), 0.0) * 0.7 / 100.0,
+                    _safe_float(s.get("base_trigger_strength"), 0.0),
+                ),
+            )
+        else:
+            # 至少一边 EV 健康：正常 EV 优先 + alignment bonus
+            return max(
+                candidates,
+                key=lambda s: (
+                    _safe_float(s.get("expected_value"), -9.0) + (
+                        long_alignment_bonus * 0.15 if str(s.get("direction", "")).title() == "Long"
+                        else short_alignment_bonus * 0.15
+                    ),
+                    _safe_float(s.get("base_trigger_strength"), 0.0),
+                    _safe_float(s.get("score_raw"), 0.0),
+                ),
+            )
 
     # ------------------------------------------------------------------
     # V35/V36: tail filter, risk engine, portfolio allocator.

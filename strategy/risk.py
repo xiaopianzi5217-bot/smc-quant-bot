@@ -60,36 +60,36 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
     final_score = _safe_float(exec_ctx.get("score_raw", 0)) if exec_ctx else 0
 
     # 信号越强，止盈越远，止损适当放宽让趋势有更多空间
-    # 【修复20260625】将止损乘数整体放宽 30-40%，止盈乘数提升 20-30%
-    # 解决 15M 级别止损过紧被随机噪声扫掉、止盈不足赔率低的问题
+    # 【修复20260704-收紧】用户反馈止盈止损位置太夸张
+    # 核心：降低所有乘数，让止盈更易触及，止损更紧凑
     if signal_tier == "A+":
-        tp1_mult = 2.30
-        tp2_mult = 3.80
-        tp3_mult = 6.00
-        sl_loose = 2.20
+        tp1_mult = 1.50
+        tp2_mult = 2.20
+        tp3_mult = 3.00
+        sl_loose = 1.40
         sl_tight = None
     elif signal_tier == "A":
-        tp1_mult = 1.90
-        tp2_mult = 3.20
-        tp3_mult = 5.00
-        sl_loose = 1.80
+        tp1_mult = 1.30
+        tp2_mult = 1.80
+        tp3_mult = 2.50
+        sl_loose = 1.20
         sl_tight = None
     elif signal_tier == "B":
-        tp1_mult = 1.55
-        tp2_mult = 2.60
-        tp3_mult = 3.80
-        sl_loose = 1.50
-        sl_tight = 4.00
-    else:  # C 信号保守参数
-        tp1_mult = 1.60
-        tp2_mult = 2.80
-        tp3_mult = 3.80
+        tp1_mult = 1.10
+        tp2_mult = 1.60
+        tp3_mult = 2.20
         sl_loose = 1.00
-        sl_tight = 3.00
+        sl_tight = 2.50
+    else:  # C 信号保守参数
+        tp1_mult = 1.00
+        tp2_mult = 1.50
+        tp3_mult = 2.00
+        sl_loose = 0.80
+        sl_tight = 2.00
 
     # 允许 sym_strategy 覆盖默认
     min_stop_atr = float(sym_strategy.get("min_stop_atr", sl_loose))
-    max_stop_atr = float(sym_strategy.get("max_stop_atr", sl_tight if sl_tight else 4.0))
+    max_stop_atr = float(sym_strategy.get("max_stop_atr", sl_tight if sl_tight else 2.5))
     buffer_atr = float(sym_strategy.get("liquidity_buffer_atr", 0.35))
     tp1_atr = float(sym_strategy.get("tp1_atr", tp1_mult))
     tp2_atr = float(sym_strategy.get("tp2_atr", max(tp2_mult, min_rr)))
@@ -113,22 +113,32 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, risk)
         risk = min(max_stop_atr * atr, risk)
         sl = entry - risk
-        # 【修复20260701-重大】多单：止盈在上方，用 BSL (上方) + 牛OB (上方) 结构
-        tp1_targets = []
-        if bsl > 0: tp1_targets.append(bsl)
+        # 【修复20260704】多单止盈：用BSL/OB参考但不超出ATR目标太远
+        # BSL/OB越远说明阻力越远，不应作为直接止盈位
+        tp1_atr_direct = entry + tp1_atr * atr
+        tp1_candidates = [tp1_atr_direct]
+        if bsl > 0:
+            bsl_dist = abs(bsl - entry)
+            # BSL如果不超过TP1的1.5倍才考虑使用
+            if bsl_dist <= tp1_atr * atr * 1.5:
+                tp1_candidates.append(bsl)
         bull_ob = exec_ctx.get("bullish_ob")
         if bull_ob and isinstance(bull_ob, (list, tuple)) and len(bull_ob) >= 2:
             mid = (float(bull_ob[0]) + float(bull_ob[1])) / 2.0
-            if mid > entry: tp1_targets.append(mid)  # 牛OB在上方才是多单目标
-        best_tp1 = max(tp1_targets) if tp1_targets else (entry + tp1_atr * atr)
-        tp1 = best_tp1 if best_tp1 > entry else (entry + tp1_atr * atr)
-        # 【修复20260701】确保 RR>=1.2
+            if mid > entry and abs(mid - entry) <= tp1_atr * atr * 1.5:
+                tp1_candidates.append(mid)
+        # 【修复20260704】取最小值而非最大值，让止盈更易达到
+        tp1 = min(tp1_candidates)
+        if tp1 <= entry:
+            tp1 = tp1_atr_direct
+        # 确保 RR>=1.0（最小1.0，比原来1.2低）
         _sl_dist = abs(entry - sl)
         _tp1_dist = abs(tp1 - entry)
-        if _tp1_dist < _sl_dist * 1.2:
-            tp1 = entry + 1.2 * _sl_dist  # RR=1.2 保底
+        if _tp1_dist < _sl_dist * 1.0:
+            tp1 = entry + 1.0 * _sl_dist
         tp2 = entry + tp2_atr * atr
-        tp3 = bsl if (bsl > 0 and bsl > tp2) else (entry + tp3_atr * atr)
+        # 【修复20260704】TP3用ATR目标，不用BSL（BSL太远）
+        tp3 = entry + tp3_atr * atr
     else:
         swing = _swing_high(hist_exec, 24)
         # 【修复20260701】止损候选增加 OB/FVG 保护
@@ -144,24 +154,45 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, risk)
         risk = min(max_stop_atr * atr, risk)
         sl = entry + risk
-        # 【修复20260701-重大】空单：止盈在下方，用 SSL (下方) + 熊OB (下方) 结构
-        tp1_targets = []
-        if ssl > 0: tp1_targets.append(ssl)
+        # 【修复20260704】空单止盈：用SSL/OB参考但不超出ATR目标太远
+        tp1_atr_direct = entry - tp1_atr * atr
+        tp1_candidates = [tp1_atr_direct]
+        if ssl > 0:
+            ssl_dist = abs(entry - ssl)
+            if ssl_dist <= tp1_atr * atr * 1.5:
+                tp1_candidates.append(ssl)
         bear_ob = exec_ctx.get("bearish_ob")
         if bear_ob and isinstance(bear_ob, (list, tuple)) and len(bear_ob) >= 2:
             mid = (float(bear_ob[0]) + float(bear_ob[1])) / 2.0
-            if mid < entry: tp1_targets.append(mid)  # 熊OB在下方才是空单目标
-        best_tp1 = max(tp1_targets) if tp1_targets else (entry - tp1_atr * atr)
-        tp1 = best_tp1 if best_tp1 < entry else (entry - tp1_atr * atr)
-        # 【修复20260701】确保 RR>=1.2
+            if mid < entry and abs(entry - mid) <= tp1_atr * atr * 1.5:
+                tp1_candidates.append(mid)
+        # 取最大值（最接近entry的），让止盈更易达到
+        tp1 = max(tp1_candidates)
+        if tp1 >= entry:
+            tp1 = tp1_atr_direct
+        # 确保 RR>=1.0
         _sl_dist = abs(entry - sl)
         _tp1_dist = abs(tp1 - entry)
-        if _tp1_dist < _sl_dist * 1.2:
-            tp1 = entry - 1.2 * _sl_dist  # RR=1.2 保底
+        if _tp1_dist < _sl_dist * 1.0:
+            tp1 = entry - 1.0 * _sl_dist
         tp2 = entry - tp2_atr * atr
-        tp3 = ssl if (ssl > 0 and ssl < tp2) else (entry - tp3_atr * atr)
+        # 【修复20260704】TP3用ATR目标，不用SSL（SSL太远）
+        tp3 = entry - tp3_atr * atr
 
     rr = abs(tp2 - entry) / max(abs(entry - sl), 1e-12)
+    
+    # 【修复20260704】强制保证 RR >= min_rr，否则调整 TP1/TP2
+    if rr < min_rr and _sl_dist > 0:
+        # 扩张 TP2 到 min_rr 保底
+        tp2 = entry + (min_rr * _sl_dist) if "long" in direction_l else entry - (min_rr * _sl_dist)
+        # 同时扩张 TP1 到 min_rr * 0.6 保底
+        tp1_candidate = entry + (min_rr * 0.6 * _sl_dist) if "long" in direction_l else entry - (min_rr * 0.6 * _sl_dist)
+        if "long" in direction_l:
+            tp1 = max(tp1, tp1_candidate)
+        else:
+            tp1 = min(tp1, tp1_candidate)
+        rr = abs(tp2 - entry) / max(abs(entry - sl), 1e-12)
+    
     return float(sl), float(tp1), float(tp2), float(tp3), float(rr)
 def risk_is_acceptable(entry: float, sl: float, atr: float, max_risk_atr: float = 2.5) -> bool:
     if entry <= 0 or atr <= 0: return False
@@ -202,7 +233,8 @@ def check_partial_close_and_trail(direction: str, current_price: float, entry_pr
         elif stage >= 2 and current_price > entry_price:
             # TP2 之后，单纯跟随价格推止损 (可用更紧的跟踪参数)
             res["action"] = "TRAIL_ONLY"
-            res["new_sl"] = max(current_sl, current_price * 0.985)
+            # 【修复20260704】收紧trail，从1.5%回撤改成1.0%回撤
+            res["new_sl"] = max(current_sl, current_price * 0.990)
     
     if "short" in d:
         if stage < 2 and current_price <= tp2:
@@ -216,7 +248,7 @@ def check_partial_close_and_trail(direction: str, current_price: float, entry_pr
             res["new_sl"] = min(current_sl, entry_price * 0.998) if current_sl > 0 else entry_price * 0.998
             res["new_stage"] = 1
         elif stage >= 2 and current_price < entry_price:
-            res["action"] = "TRAIL_ONLY"
-            res["new_sl"] = min(current_sl, current_price * 1.015) if current_sl > 0 else current_price * 1.015
+            # 【修复20260704】收紧trail，从1.5%回撤改成1.0%回撤
+            res["new_sl"] = min(current_sl, current_price * 1.010) if current_sl > 0 else current_price * 1.010
             
     return res
