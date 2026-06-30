@@ -18,7 +18,6 @@ _root = Path(__file__).parent.absolute()
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-import ccxt
 import pandas as pd
 
 # ---------- 基础指标与策略模块 ----------
@@ -1070,33 +1069,23 @@ async def main_loop():
 
             # ---- 【第 3 步】持仓追踪 ----
             try:
-                exchange = ccxt.bitget({
-                    "options": {"defaultType": "swap"},
-                    "enableRateLimit": True,
-                })
                 all_positions = position_manager.get()
                 if all_positions:
                     for sym, pos in list(all_positions.items()):
                         try:
-                            ticker = exchange.fetch_ticker(normalize_swap_symbol(sym))
-                            curr_price = float(ticker["last"])
+                            curr_price = _fetch_ticker_price(sym)
+                            if curr_price is None or curr_price <= 0:
+                                print(f"[{sym}] 无法获取实时价格，跳过追踪")
+                                continue
                             check_trailing(sym, pos, curr_price)
                         except Exception as e:
                             print(f"[{sym}] 追踪异常: {e}")
-                exchange.close()
+                            traceback.print_exc()
+                else:
+                    print("[持仓] 无活跃持仓")
             except Exception as e:
-                print(f"[持仓追踪] exchange 创建失败: {e}")
-
-            # 状态日志
-            active = position_manager.get()
-            if active:
-                status = " | ".join(
-                    f"{s}: {p['direction']} @{p['entry']:.0f} SL={p['current_sl']:.0f}"
-                    for s, p in active.items()
-                )
-                print(f"[持仓] {status}")
-            else:
-                print("[持仓] 无活跃持仓")
+                print(f"[持仓追踪] 整体异常: {e}")
+                traceback.print_exc()
                     
             # 扫描间隔休眠
             await asyncio.sleep(SCAN_INTERVAL)
