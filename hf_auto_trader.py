@@ -18,6 +18,7 @@ _root = Path(__file__).parent.absolute()
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+import ccxt
 import pandas as pd
 
 # ---------- 基础指标与策略模块 ----------
@@ -119,7 +120,7 @@ def safe_send(msg: str) -> str:
     global _LAST_SAFE_SEND_TIME
     now = time.time()
     if now - _LAST_SAFE_SEND_TIME < 60:
-        print(f"[safe_send] 触发全局限流，跳过本次推送 (距离上次仅 {now - _LAST_SAFE_SEND_TIME:.1f}s)")
+        print(f"[safe_send] 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < 60s")
         return "RATELIMITED_GLOBAL"
     
     _LAST_SAFE_SEND_TIME = now
@@ -418,29 +419,50 @@ def _detect_observer_events(curr, exec_ctx, macro_ctx, long_score: float, short_
         
     near_bullish_ob = _bool(exec_ctx.get("near_bullish_ob", False))
     near_bearish_ob = _bool(exec_ctx.get("near_bearish_ob", False))
+    bullish_ob = exec_ctx.get("bullish_ob", None)
+    bearish_ob = exec_ctx.get("bearish_ob", None)
     
-    if near_bullish_ob:
+    if near_bullish_ob and bullish_ob:
+        ob_high = _float(bullish_ob[0]) if isinstance(bullish_ob, (list, tuple)) and len(bullish_ob) > 0 else 0
+        ob_low = _float(bullish_ob[1]) if isinstance(bullish_ob, (list, tuple)) and len(bullish_ob) > 1 else 0
+        events.append({"type": "NEAR_OB", "dir": "Long", "desc": f"接近 Bullish OB ({ob_low:.1f}~{ob_high:.1f})", "key": "ob_bull"})
+    elif near_bullish_ob:
         events.append({"type": "NEAR_OB", "dir": "Long", "desc": "接近 Bullish OB", "key": "ob_bull"})
-    if near_bearish_ob:
+    if near_bearish_ob and bearish_ob:
+        ob_high = _float(bearish_ob[0]) if isinstance(bearish_ob, (list, tuple)) and len(bearish_ob) > 0 else 0
+        ob_low = _float(bearish_ob[1]) if isinstance(bearish_ob, (list, tuple)) and len(bearish_ob) > 1 else 0
+        events.append({"type": "NEAR_OB", "dir": "Short", "desc": f"接近 Bearish OB ({ob_low:.1f}~{ob_high:.1f})", "key": "ob_bear"})
+    elif near_bearish_ob:
         events.append({"type": "NEAR_OB", "dir": "Short", "desc": "接近 Bearish OB", "key": "ob_bear"})
         
     is_bsl_swept = _bool(exec_ctx.get("is_bsl_swept", False))
     is_ssl_swept = _bool(exec_ctx.get("is_ssl_swept", False))
     bsl_level = _float(exec_ctx.get("bsl_level", 0))
     ssl_level = _float(exec_ctx.get("ssl_level", 0))
+    close_price = _float(curr.get("close", exec_ctx.get("close", 0))) if hasattr(curr, 'get') else _float(exec_ctx.get("close", 0))
+    atr_val = max(_float(exec_ctx.get("atr", 1)), 1e-12)
     
     if is_bsl_swept:
         events.append({"type": "LIQUIDITY_SWEEP", "dir": "Short", "desc": f"BSL Sweep@{bsl_level:.1f}", "key": "bsl_sweep"})
+    elif bsl_level > 0 and close_price > 0:
+        dist_atr = abs(close_price - bsl_level) / atr_val
+        if dist_atr <= 0.75:
+            events.append({"type": "NEAR_LIQUIDITY", "dir": "Short", "desc": f"接近 BSL@{bsl_level:.1f}，距离{dist_atr:.2f}ATR", "key": "near_bsl"})
     if is_ssl_swept:
         events.append({"type": "LIQUIDITY_SWEEP", "dir": "Long", "desc": f"SSL Sweep@{ssl_level:.1f}", "key": "ssl_sweep"})
+    elif ssl_level > 0 and close_price > 0:
+        dist_atr = abs(close_price - ssl_level) / atr_val
+        if dist_atr <= 0.75:
+            events.append({"type": "NEAR_LIQUIDITY", "dir": "Long", "desc": f"接近 SSL@{ssl_level:.1f}，距离{dist_atr:.2f}ATR", "key": "near_ssl"})
         
     swing_high = _float(exec_ctx.get("swing_high", 0))
     swing_low = _float(exec_ctx.get("swing_low", 0))
-    close_price = _float(curr.get("close", exec_ctx.get("close", 0))) if hasattr(curr, 'get') else _float(exec_ctx.get("close", 0))
+    # close_price 已在上面 LIQUIDITY 部分定义
+    _cp = _float(curr.get("close", exec_ctx.get("close", 0))) if hasattr(curr, 'get') else _float(exec_ctx.get("close", 0))
     
-    if swing_high > 0 and close_price > swing_high:
+    if swing_high > 0 and _cp > swing_high:
         events.append({"type": "CHOCH", "dir": "Long", "desc": f"MSS 突破前高 {swing_high:.1f}", "key": "choch_long"})
-    if swing_low > 0 and close_price < swing_low:
+    if swing_low > 0 and _cp < swing_low:
         events.append({"type": "CHOCH", "dir": "Short", "desc": f"MSS 破前低 {swing_low:.1f}", "key": "choch_short"})
         
     bullish_fvg = exec_ctx.get("bullish_fvg", None)
@@ -473,6 +495,125 @@ def _new_observer_events(symbol: str, events: list) -> list:
             new_events.append(ev)
         last[key] = True
     return new_events
+
+
+# ============================================================
+# Observer 推送（增强版，含完整技术数据）
+# ============================================================
+
+def _push_observer_event(
+    symbol: str, ev: dict,
+    long_score: float = 0, short_score: float = 0,
+    long_ev: float = 0, short_ev: float = 0,
+    long_entry: float = 0, long_sl: float = 0, long_tp1: float = 0, long_rr: float = 0,
+    short_entry: float = 0, short_sl: float = 0, short_tp1: float = 0, short_rr: float = 0,
+    v37_dir: str = "N/A",
+    price: float = 0, rsi: float = 0, adx: float = 0, atr: float = 0,
+    macd_hist: float = 0, volume_ratio: float = 1.0,
+    candle_color: str = "", color_changed: bool = False,
+    regime: str = "", vol_state: str = "", squeeze: str = "",
+    trend_direction: str = "",
+    bsl_level: float = 0, ssl_level: float = 0,
+    is_bsl_swept: bool = False, is_ssl_swept: bool = False,
+    bullish_ob=None, bearish_ob=None,
+    bullish_fvg=None, bearish_fvg=None,
+    funding_rate=None,
+):
+    """推送 Observer 指标事件 + 完整技术数据（从 V37 z_fixer 增强版移植）"""
+    icons = {
+        "SQZMOM_WHITE": "⚪", "DIVERGENCE_R": "🔮", "SQZMOM_EF": "🌀",
+        "NEAR_OB": "🧱", "NEAR_LIQUIDITY": "🎯",
+        "LIQUIDITY_SWEEP": "🗑️", "CHOCH": "🔄", "BOS": "💥",
+        "FVG": "📐", "CANDLE_COLOR": "🎨", "SQUEEZE_RELEASE": "💨",
+    }
+    icon = icons.get(ev["type"], "📊")
+    type_names = {
+        "SQZMOM_WHITE": "SQZMOM K线变白", "DIVERGENCE_R": "背离R",
+        "SQZMOM_EF": "SQZMOM 力竭", "NEAR_OB": "接近主力建仓区",
+        "NEAR_LIQUIDITY": "接近流动性区",
+        "LIQUIDITY_SWEEP": "流动性扫单", "CHOCH": "市场结构转变",
+        "BOS": "结构突破", "FVG": "价格失衡区",
+        "CANDLE_COLOR": "K线变色", "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
+    }
+    type_name = type_names.get(ev["type"], ev["type"])
+    dir_emoji = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
+    dir_text = dir_emoji.get(ev.get("dir", ""), ev.get("dir", ""))
+
+    # 操作建议
+    if abs(long_score - short_score) < 8:
+        suggestion = "方向分歧大（分差<8），等待关键位确认。"
+    elif long_score >= short_score:
+        suggestion = "偏多占优；等回踩防守区，不追高。"
+    else:
+        suggestion = "偏空占优；等反弹防守区，不追低。"
+
+    vr = volume_ratio or 1.0
+    vol_zone = "极度缩量" if vr < 0.35 else ("缩量" if vr < 0.65 else ("正常" if vr < 1.20 else ("温和放量" if vr < 1.80 else "明显放量")))
+    rsi_zone = "超卖" if rsi < 30 else ("偏弱" if rsi < 45 else ("中性" if rsi < 55 else ("偏强" if rsi < 70 else "超买")))
+    adx_zone = "弱趋势/震荡" if adx < 20 else ("趋势萌芽" if adx < 25 else ("有效趋势" if adx < 35 else "强趋势"))
+    macd_dir = "偏多" if macd_hist > 0 else ("偏空" if macd_hist < 0 else "中性")
+    atr_pct = atr / price * 100 if price > 0 and atr > 0 else 0
+    atr_zone = "低波动" if atr_pct < 0.25 else ("正常" if atr_pct < 0.70 else ("高波动" if atr_pct < 1.20 else "极高波动"))
+    regime_cn = {"TREND": "趋势", "CHOP": "震荡", "TRANSITION": "过渡", "CRISIS_RISK_OFF": "避险"}
+    vol_cn = {"HIGH_VOL": "高波动", "MID_VOL": "正常", "LOW_VOL": "低波动"}
+    squeeze_cn = {"release": "已释放", "building": "压缩中", "released": "已释放"}
+
+    def _fmt_ob(ob):
+        if ob is None: return "暂无"
+        if isinstance(ob, (list, tuple)) and len(ob) >= 2:
+            try: return f"{float(ob[0]):.2f}~{float(ob[1]):.2f}"
+            except: return str(ob)
+        return str(ob)
+    def _fmt_fvg(fvg):
+        if fvg is None: return "暂无"
+        try: return f"{float(fvg):.2f}"
+        except: return str(fvg)
+
+    lines = [
+        f"{icon} [{type_name}] {symbol}",
+        f"方向: {dir_text} | {ev['desc']}",
+        "",
+        "━━━ 多空博弈 ━━━",
+        f"多头: {long_score:.1f}分 EV:{long_ev:+.4f}  空头: {short_score:.1f}分 EV:{short_ev:+.4f}",
+        f"分差: {abs(long_score-short_score):.1f}分 | 建议: {suggestion}",
+        "",
+        "━━━ 行情环境 ━━━",
+        f"趋势: {trend_direction or 'N/A'} | 状态: {regime_cn.get(regime, regime)}",
+        f"波动: {vol_cn.get(vol_state, vol_state)} | 压缩: {squeeze_cn.get(squeeze.lower(), squeeze)}",
+        f"成交量: {vr:.2f}x ({vol_zone})",
+        "",
+        "━━━ 指标透视 ━━━",
+        f"K线: {candle_color or 'N/A'} | 变色: {'是' if color_changed else '否'}",
+        f"RSI: {rsi:.1f}({rsi_zone}) ADX: {adx:.1f}({adx_zone}) MACD: {macd_hist:.4f}({macd_dir})",
+        f"ATR: {atr:.2f} | {atr_pct:.2f}% ({atr_zone})",
+        "",
+        "━━━ 流动性/关键位 ━━━",
+    ]
+    if bsl_level > 0:
+        bsl_dist = abs(price - bsl_level) / price * 100 if price > 0 else 0
+        lines.append(f"BSL: {bsl_level:.2f}(距离{bsl_dist:.2f}%) | 已扫: {'是' if is_bsl_swept else '否'}")
+    if ssl_level > 0:
+        ssl_dist = abs(price - ssl_level) / price * 100 if price > 0 else 0
+        lines.append(f"SSL: {ssl_level:.2f}(距离{ssl_dist:.2f}%) | 已扫: {'是' if is_ssl_swept else '否'}")
+    lines.append(f"买方OB: {_fmt_ob(bullish_ob)}  卖方OB: {_fmt_ob(bearish_ob)}")
+    lines.append(f"多头FVG: {_fmt_fvg(bullish_fvg)}  空头FVG: {_fmt_fvg(bearish_fvg)}")
+    if funding_rate is not None:
+        try:
+            fr = float(funding_rate)
+            lines.append(f"资金费率: {fr:.4f}%")
+        except: pass
+
+    ref_entry = long_entry if v37_dir == "Long" else (short_entry if v37_dir == "Short" else 0)
+    ref_sl = long_sl if v37_dir == "Long" else (short_sl if v37_dir == "Short" else 0)
+    ref_tp1 = long_tp1 if v37_dir == "Long" else (short_tp1 if v37_dir == "Short" else 0)
+    ref_rr = long_rr if v37_dir == "Long" else (short_rr if v37_dir == "Short" else 0)
+    if v37_dir in ("Long", "Short") and ref_sl and ref_sl > 0 and ref_entry > 0:
+        lines.append("")
+        lines.append(f"参考开单: {dir_emoji.get(v37_dir, v37_dir)} 入场{ref_entry:.2f} SL{ref_sl:.2f} TP1{ref_tp1:.2f} RR{ref_rr:.2f}")
+
+    safe_send("\n".join(lines))
+    print(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
+
 
 # ============================================================
 # Strategy 信号推送与去重
@@ -812,6 +953,49 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         except Exception:
             pass
 
+    # ---- 止损检查 ----
+    if direction == "Long" and current_price <= pos["current_sl"]:
+        _trigger_stop_loss(symbol, pos, current_price)
+    elif direction == "Short" and current_price >= pos["current_sl"]:
+        _trigger_stop_loss(symbol, pos, current_price)
+
+
+def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
+    """止损触发推送 + 特征记录"""
+    if pos.get("sl_hit"):
+        return
+    pos["sl_hit"] = True
+
+    pnl_pct = ((current_price / pos["entry"]) - 1) * 100
+    if pos["direction"] == "Short":
+        pnl_pct = ((pos["entry"] / current_price) - 1) * 100
+
+    msg = (
+        f"⛔ [SL] {symbol} {'多头' if pos['direction'] == 'Long' else '空头'}\n"
+        f"入场: {pos['entry']:.2f} 出场: {current_price:.2f}\n"
+        f"盈亏: {pnl_pct:+.2f}%"
+    )
+    print(f"[{symbol}] ❌ 止损触发 ({pnl_pct:+.2f}%)")
+    safe_send(msg)
+
+    try:
+        profit_r = pnl_pct / 100.0
+        feature_store.save_trade({
+            "symbol": symbol,
+            "direction": pos["direction"],
+            "exit_reason": "SL",
+            "pnl_r": profit_r,
+            "mfe": pos.get("mfe", 0),
+            "mae": pos.get("mae", 0),
+            "max_r": pos.get("max_r", 0),
+            "max_r_before_stop": pos.get("max_r", 0),
+        })
+    except Exception as feat_e:
+        print(f"[Feature] 止损特征更新异常: {feat_e}")
+
+    position_manager.remove(symbol)
+
+
 # ============================================================
 # 自动交易主循环
 # ============================================================
@@ -827,10 +1011,91 @@ async def main_loop():
             for symbol in SYMBOLS:
                 print(f"[hf_auto_trader] 正在扫描 {symbol}...")
                 result = await scan_and_decide(symbol)
+                print(f"[hf_auto_trader] {symbol} scan_and_decide 返回: {'非空' if result else 'None'}")
                 
                 if result:
-                    # 检查是否满足条件并推送/开仓
+                    print(f"[{symbol}] main_loop: result 非空，curr={type(result.get('curr'))}, exec_ctx={type(result.get('exec_ctx'))}, macro_ctx={type(result.get('macro_ctx'))}")
+
+                    # ---- 【第 1 步】Observer 指标事件推送（含完整技术数据） ----
+                    _curr = result.get("curr")
+                    _exec_ctx = result.get("exec_ctx", {}) or {}
+                    _macro_ctx = result.get("macro_ctx", {}) or {}
+                    _events = _detect_observer_events(_curr, _exec_ctx, _macro_ctx,
+                                                      result.get("long_score", 0), result.get("short_score", 0))
+                    print(f"[{symbol}] _detect_observer_events 返回 {len(_events)} 个事件: {[e['type'] for e in _events]}")
+                    obs_events = _new_observer_events(symbol, _events)
+                    print(f"[{symbol}] 新 Observer 事件: {len(obs_events)} 个 (总 {len(_events)} 个)")
+                    for ev in obs_events:
+                        _push_observer_event(
+                            symbol, ev,
+                            long_score=result.get("long_score", 0),
+                            short_score=result.get("short_score", 0),
+                            long_ev=result.get("long_ev", 0),
+                            short_ev=result.get("short_ev", 0),
+                            long_entry=result.get("long_entry", 0),
+                            long_sl=result.get("long_sl", 0),
+                            long_tp1=result.get("long_tp1", 0),
+                            long_rr=result.get("long_rr", 0),
+                            short_entry=result.get("short_entry", 0),
+                            short_sl=result.get("short_sl", 0),
+                            short_tp1=result.get("short_tp1", 0),
+                            short_rr=result.get("short_rr", 0),
+                            v37_dir=result.get("direction", "N/A") or "N/A",
+                            price=result.get("price", 0),
+                            rsi=result.get("rsi", 0),
+                            adx=result.get("adx", 0),
+                            atr=result.get("atr", 0),
+                            macd_hist=result.get("macd_hist", 0),
+                            volume_ratio=result.get("volume_ratio", 1.0),
+                            candle_color=result.get("candle_color", ""),
+                            color_changed=result.get("color_changed", False),
+                            regime=result.get("regime", ""),
+                            vol_state=result.get("vol_state", ""),
+                            squeeze=result.get("squeeze", ""),
+                            trend_direction=result.get("trend_direction", ""),
+                            bsl_level=result.get("bsl_level", 0),
+                            ssl_level=result.get("ssl_level", 0),
+                            is_bsl_swept=result.get("is_bsl_swept", False),
+                            is_ssl_swept=result.get("is_ssl_swept", False),
+                            bullish_ob=result.get("bullish_ob"),
+                            bearish_ob=result.get("bearish_ob"),
+                            bullish_fvg=result.get("bullish_fvg"),
+                            bearish_fvg=result.get("bearish_fvg"),
+                            funding_rate=result.get("funding_rate"),
+                        )
+
+                    # ---- 【第 2 步】Strategy 开单推送 ----
                     check_and_open(result)
+
+            # ---- 【第 3 步】持仓追踪 ----
+            try:
+                exchange = ccxt.bitget({
+                    "options": {"defaultType": "swap"},
+                    "enableRateLimit": True,
+                })
+                all_positions = position_manager.get()
+                if all_positions:
+                    for sym, pos in list(all_positions.items()):
+                        try:
+                            ticker = exchange.fetch_ticker(normalize_swap_symbol(sym))
+                            curr_price = float(ticker["last"])
+                            check_trailing(sym, pos, curr_price)
+                        except Exception as e:
+                            print(f"[{sym}] 追踪异常: {e}")
+                exchange.close()
+            except Exception as e:
+                print(f"[持仓追踪] exchange 创建失败: {e}")
+
+            # 状态日志
+            active = position_manager.get()
+            if active:
+                status = " | ".join(
+                    f"{s}: {p['direction']} @{p['entry']:.0f} SL={p['current_sl']:.0f}"
+                    for s, p in active.items()
+                )
+                print(f"[持仓] {status}")
+            else:
+                print("[持仓] 无活跃持仓")
                     
             # 扫描间隔休眠
             await asyncio.sleep(SCAN_INTERVAL)
