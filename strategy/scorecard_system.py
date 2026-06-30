@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Scorecard System V1
+Scorecard System V2
 
 把高阶判断从“硬过滤器”降级为“旁路评分/审计层”。
+V2: 引入 HTF 1H 级别背离反向挡停，以及 HTF+LTF 多周期背离共振逻辑。
 
 设计目标：
 1. 第一准入只由 Base Layer 决定：SMC 结构 + SQZMOM 背离/动量确认。
 2. HTF / VWAP / DMI / Breakout / Regime 等不再一票否决，只输出分值、EV 修正和仓位修正。
-3. 每个 scorer 的输出都可进入 trade log / reject audit，后续可以做 counterfactual 分组统计。
+3. 针对 1H HTF 强反向背离设置硬阻断 (block)，强制归零仓位。
+4. 每个 scorer 的输出都可进入 trade log / reject audit，后续可以做 counterfactual 分组统计。
 """
 from __future__ import annotations
 
@@ -109,9 +111,7 @@ def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None =
     div_strength = _safe_float(get("sqzmom_divergence_strength", ctx.get("sqzmom_divergence_strength", 0.0)), 0.0)
     same_div_recent = bool(div_dir == direction and div_age <= 18)
     same_div_fresh = bool(div_dir == direction and div_age <= 8)
-    # V54 Alpha Expansion: 修复强背离直通断层。
-    # 当前回测管线里的 sqzmom_divergence_strength 实际是 0~12 左右，
-    # 旧阈值 25 基本不会触发；保留 25+ 兼容未来 0~100 标尺。
+    
     strong_div_threshold = 7.5
     strong_div_confirm = bool(same_div_recent and (div_strength >= strong_div_threshold or div_strength >= 25.0))
 
@@ -122,6 +122,7 @@ def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None =
     momentum_strength_slope = _safe_float(get("momentum_strength_slope", ctx.get("momentum_strength_slope", 0.0)), 0.0)
     squeeze_released = _safe_bool(get("squeeze_released", ctx.get("squeeze_released", False)))
     dmi_aligned = _safe_bool(ctx.get("sqzmom_dmi_aligned", False))
+    
     if dkey == "long":
         dmi_aligned = dmi_aligned or _safe_float(get("plus_di", 0.0), 0.0) >= _safe_float(get("minus_di", 0.0), 0.0)
         momentum_confirm = bool((momentum > 0 or momentum_slope > 0) and (momentum_strength >= 0 or momentum_strength_slope >= 0 or squeeze_released))
@@ -129,10 +130,6 @@ def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None =
         dmi_aligned = dmi_aligned or _safe_float(get("minus_di", 0.0), 0.0) >= _safe_float(get("plus_di", 0.0), 0.0)
         momentum_confirm = bool((momentum < 0 or momentum_slope < 0) and (momentum_strength <= 0 or momentum_strength_slope <= 0 or squeeze_released))
 
-    # V54.5 Alpha Expansion: 放宽 sqz 确认条件
-    # 1. 强背离直通（不变）
-    # 2. 有背离+动量/DMI/白柱（不变）
-    # 3. 新：SMC >= 45（强结构） + 动量确认 + DMI 任意一项 → 不需要背离
     no_div_sqz = bool(
         smc_quality >= 40.0
         and (momentum_confirm or dmi_aligned or white_confirm or squeeze_released)
@@ -205,9 +202,10 @@ def _scorer(name: str, score: float, ev: float, pos_mult: float, reason: str) ->
 
 def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    高阶模块旁路评分卡。
-
-    返回值只用于 EV/仓位修正和日志审计，不做 reject。
+    高阶模块旁路评分卡 (V2).
+    
+    修改：增加 1H(HTF) 背离反向挡停机制，以及 HTF+LTF 多周期背离共振加分。
+    如果触发挡停，将无视旁路分数，强制 position_multiplier = 0.0。
     """
     macro_ctx = macro_ctx or {}
     direction = str(signal.get("direction", ctx.get("direction", ""))).title()
@@ -218,12 +216,14 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     vol_state = str(ctx.get("vol_state", "")).upper()
 
     scorers: Dict[str, Dict[str, Any]] = {}
+    is_blocked = False
+    block_reason = ""
 
     base = signal.get("base_trigger", {}) if isinstance(signal, dict) else {}
     base_strength = _safe_float(base.get("strength"), 0.0)
     scorers["base"] = _scorer("base", base_strength, 0.035 * base_strength, 0.65 + 0.35 * _clip(base_strength, 0, 1), str(base.get("reason", "BASE_UNKNOWN")))
 
-    # HTF/Macro：只降权，不拦截。
+    # HTF/Macro
     htf_score = _safe_float(macro_ctx.get("htf_macro_score", ctx.get("htf_macro_score", 0.0)), 0.0)
     if abs(htf_score) < 1e-9:
         htf = _scorer("htf", 0.0, 0.0, 1.0, "HTF_NEUTRAL")
@@ -233,7 +233,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         htf = _scorer("htf", mag if aligned else -mag, (0.035 if aligned else -0.055) * mag, 1.0 + (0.12 * mag if aligned else -0.28 * mag), "HTF_ALIGNED" if aligned else "HTF_CONFLICT_SOFT")
     scorers["htf"] = htf
 
-    # VWAP：距离过远只压仓，不能一票否决。
+    # VWAP
     vwap = _safe_float(ctx.get("vwap_48", ctx.get("VWAP", ctx.get("vwap", close))), close)
     vwap_dist_atr = abs(close - vwap) / atr if atr > 0 and close > 0 else _safe_float(ctx.get("vwap_dist_atr", 0.0), 0.0)
     directional_side_ok = (close >= vwap and dkey == "long") or (close <= vwap and dkey == "short")
@@ -250,7 +250,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         vwap_reason = "VWAP_SIDE_CONFLICT_SOFT"
     scorers["vwap"] = _scorer("vwap", vwap_score, vwap_ev, vwap_mult, vwap_reason)
 
-    # DMI：趋势一致加分，强趋势反向压仓。
+    # DMI
     plus_di = _safe_float(ctx.get("plus_di", 0.0), 0.0)
     minus_di = _safe_float(ctx.get("minus_di", 0.0), 0.0)
     adx = _safe_float(ctx.get("adx", 0.0), 0.0)
@@ -261,7 +261,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     dmi_mult = 1.0 + (0.10 if dmi_aligned else -0.22) * dmi_strength
     scorers["dmi"] = _scorer("dmi", dmi_score, dmi_ev, dmi_mult, "DMI_ALIGNED" if dmi_aligned else "DMI_CONFLICT_SOFT")
 
-    # Breakout：概率评分只作为加分项；低 breakout 不再阻断 reversal/divergence。
+    # Breakout
     brk = _safe_float(signal.get("breakout", 0.0), 0.0)
     brk_term = _clip(brk / 30.0, 0.0, 1.0)
     if brk_term > 0:
@@ -269,21 +269,48 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     else:
         scorers["breakout"] = _scorer("breakout", -0.10, -0.005, 0.95, "NO_BREAKOUT_NO_REJECT")
 
-    # Divergence：背离是状态变量，不是好坏标签。新鲜同向加分；反向新鲜背离压仓。
+    # ==========================
+    # 多周期背离与共振逻辑 (15M & 1H)
+    # ==========================
+    
+    # 15M (LTF) 背离状态
     div_dir = str(ctx.get("sqzmom_divergence_dir", "None"))
     div_age = _safe_float(ctx.get("sqzmom_divergence_age", 999), 999)
     div_strength = _safe_float(ctx.get("sqzmom_divergence_strength", 0.0), 0.0)
-    if div_dir == direction and div_age <= 18:
+    
+    # 1H (HTF) 背离状态
+    htf_div_dir = str(macro_ctx.get("sqzmom_divergence_dir", "None"))
+    htf_div_age = _safe_float(macro_ctx.get("sqzmom_divergence_age", 999), 999)
+    
+    # 活跃背离判定标准 (18周期内)
+    ltf_active_same = (div_dir == direction and div_age <= 18)
+    htf_active_opp = (htf_div_dir in ("Long", "Short") and htf_div_dir != direction and htf_div_age <= 18)
+    htf_active_same = (htf_div_dir == direction and htf_div_age <= 18)
+
+    # 1. 1H HTF 背离处理 (挡停与共振)
+    if htf_active_opp:
+        is_blocked = True
+        block_reason = f"HTF_OPPOSITE_DIV_BLOCK_{htf_div_dir.upper()}"
+        scorers["htf_divergence"] = _scorer("htf_divergence", -2.0, -0.15, 0.05, block_reason)
+    elif htf_active_same and ltf_active_same:
+        scorers["htf_divergence"] = _scorer("htf_divergence", 1.25, 0.050, 1.35, "HTF_LTF_RESONANCE_BONUS")
+    elif htf_active_same:
+        scorers["htf_divergence"] = _scorer("htf_divergence", 0.60, 0.025, 1.15, "HTF_DIVERGENCE_SAME_SIDE")
+    else:
+        scorers["htf_divergence"] = _scorer("htf_divergence", 0.0, 0.0, 1.0, "HTF_DIVERGENCE_NEUTRAL")
+
+    # 2. 15M LTF 原有背离逻辑
+    if ltf_active_same:
         freshness = 1.0 if div_age <= 8 else 0.62
         strength_bonus = _clip(div_strength / 25.0, 0.0, 0.35)
         div_score = _clip(freshness + strength_bonus, 0.0, 1.25)
-        scorers["divergence"] = _scorer("divergence", div_score, 0.040 * div_score, 1.0 + 0.13 * div_score, "DIVERGENCE_SAME_SIDE")
+        scorers["ltf_divergence"] = _scorer("ltf_divergence", div_score, 0.040 * div_score, 1.0 + 0.13 * div_score, "LTF_DIVERGENCE_SAME_SIDE")
     elif div_dir in ("Long", "Short") and div_dir != direction and div_age <= 18:
-        scorers["divergence"] = _scorer("divergence", -0.75, -0.045, 0.72, "DIVERGENCE_OPPOSITE_SIDE_SOFT")
+        scorers["ltf_divergence"] = _scorer("ltf_divergence", -0.75, -0.045, 0.72, "LTF_DIVERGENCE_OPPOSITE_SIDE_SOFT")
     else:
-        scorers["divergence"] = _scorer("divergence", 0.0, 0.0, 1.0, "DIVERGENCE_NEUTRAL")
+        scorers["ltf_divergence"] = _scorer("ltf_divergence", 0.0, 0.0, 1.0, "LTF_DIVERGENCE_NEUTRAL")
 
-    # Regime/volatility：分频段决策。状态机只调仓，不决定开不开。
+    # Regime/Volatility
     if regime == "TREND":
         trend_aligned = _safe_bool(ctx.get("trend_aligned", False))
         reg = _scorer("regime", 0.45 if trend_aligned else -0.45, 0.020 if trend_aligned else -0.035, 1.08 if trend_aligned else 0.75, "TREND_ALIGNED" if trend_aligned else "TREND_COUNTER_SOFT")
@@ -295,29 +322,44 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         reg = _scorer("regime", -1.0, -0.090, 0.35, "CRISIS_SIZE_DOWN")
     else:
         reg = _scorer("regime", 0.0, 0.0, 1.0, "REGIME_NEUTRAL")
+        
     if vol_state == "HIGH_VOL":
         reg["position_mult"] = round(max(0.05, reg["position_mult"] * 0.86), 4)
         reg["ev"] = round(reg["ev"] - 0.010, 4)
         reg["reason"] += "+HIGH_VOL"
     scorers["regime"] = reg
 
+    # 汇总计算
     total_score = sum(v["score"] for v in scorers.values())
     ev_adjustment = sum(v["ev"] for v in scorers.values())
+    
     position_multiplier = 1.0
     for v in scorers.values():
         position_multiplier *= _safe_float(v.get("position_mult"), 1.0)
-    position_multiplier = _clip(position_multiplier, 0.05, 1.35)
+    
+    # 挡停逻辑：如果是 Block 状态，彻底剥夺仓位。
+    if is_blocked:
+        position_multiplier = 0.0
+    else:
+        position_multiplier = _clip(position_multiplier, 0.05, 1.35)
 
     positives = [k for k, v in scorers.items() if v["score"] > 0.20]
     negatives = [k for k, v in scorers.items() if v["score"] < -0.20]
+    
+    summary_str = f"blk={int(is_blocked)};score={total_score:.2f};ev_adj={ev_adjustment:.3f};pos_mult={position_multiplier:.2f};+{','.join(positives) or 'none'};-{','.join(negatives) or 'none'}"
+    if is_blocked:
+        summary_str += f";REJECT={block_reason}"
+
     return {
-        "version": "Scorecard_V1_Decoupled_20260616",
+        "version": "Scorecard_V2_HTF_Div_Resonance",
         "direction": direction,
+        "is_blocked": is_blocked,
+        "block_reason": block_reason,
         "total_score": round(float(total_score), 4),
         "ev_adjustment": round(float(_clip(ev_adjustment, -0.18, 0.16)), 4),
         "position_multiplier": round(float(position_multiplier), 4),
         "scorers": scorers,
         "positive_modules": positives,
         "negative_modules": negatives,
-        "summary": f"score={total_score:.2f};ev_adj={ev_adjustment:.3f};pos_mult={position_multiplier:.2f};+{','.join(positives) or 'none'};-{','.join(negatives) or 'none'}",
+        "summary": summary_str,
     }

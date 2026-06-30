@@ -221,6 +221,7 @@ def get_price_extreme(series, idx, is_max=True):
     return window.max() if is_max else window.min()
 
 def build_macro_context(df_1h):
+    """构建1H级别宏观上下文，包含SQZMOM背离检测、顶部/底部/结构判断。"""
     p = PIVOT_PARAMS['macro']
     liq_hp = find_pivots(df_1h['high'], p['left'], p['right'], True, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
     liq_lp = find_pivots(df_1h['low'], p['left'], p['right'], False, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
@@ -252,28 +253,132 @@ def build_macro_context(df_1h):
 
     eq = (bsl + ssl) / 2.0
 
+    # ================================================================
+    # 【修复20260714】1H SQZMOM 背离检测（用于反向挡停 + 多周期共振加分）
+    # ================================================================
+    # 检测1H级别的SQZMOM顶背离和底背离
+    htf_has_top_div = False      # 1H 顶背离：看跌信号
+    htf_has_bot_div = False      # 1H 底背离：看涨信号
+    htf_div_dir = "None"         # 背离方向
+    htf_div_age = 999            # 背离年龄（1H K线根数）
+    htf_div_strength = 0.0       # 背离强度
+    htf_div_high_price = 0.0     # 顶背离形成时的最高价（用于判断背离是否失效）
+    htf_div_low_price = 0.0      # 底背离形成时的最低价（用于判断背离是否失效）
+    
+    try:
+        # 使用1H的sz（SQZMOM值）和价格数据检测背离
+        sz_1h = df_1h['sz'].astype(float)
+        high_1h = df_1h['high'].astype(float)
+        low_1h = df_1h['low'].astype(float)
+        close_1h = df_1h['close'].astype(float)
+        atr_1h = df_1h['ATRr_14'].astype(float).replace(0, np.nan).bfill().fillna(close_1h * 0.006)
+        
+        # 找1H的动量高低点
+        mom = PIVOT_PARAMS['momentum']
+        mom_hp_1h = find_pivots(df_1h['sz'], mom['left'], mom['right'], True, None, 0.0, mom['min_spacing'])
+        mom_lp_1h = find_pivots(df_1h['sz'], mom['left'], mom['right'], False, None, 0.0, mom['min_spacing'])
+        
+        # 顶背离检测：价格更高高点(HH) + 动量更低高点(LH)
+        htf_div_high_idx = -1
+        if len(mom_hp_1h) >= 2:
+            a_idx, b_idx = mom_hp_1h[-2], mom_hp_1h[-1]
+            if sz_1h.iloc[b_idx] > 0:  # 动量在零轴上方
+                price_higher = high_1h.iloc[b_idx] > high_1h.iloc[a_idx] + 0.03 * atr_1h.iloc[b_idx]
+                momentum_lower = sz_1h.iloc[b_idx] < sz_1h.iloc[a_idx]
+                if price_higher and momentum_lower:
+                    htf_has_top_div = True
+                    htf_div_dir = "Short"
+                    htf_div_high_price = float(high_1h.iloc[b_idx])
+                    htf_div_high_idx = b_idx
+                    htf_div_strength = min(12.0, abs((sz_1h.iloc[a_idx] - sz_1h.iloc[b_idx]) / max(abs(sz_1h.iloc[a_idx]), 1e-9)) * 8.0 + 4.0)
+        
+        # 底背离检测：价格更低低点(LL) + 动量更高低点(HL)
+        htf_div_low_idx = -1
+        if len(mom_lp_1h) >= 2:
+            a_idx, b_idx = mom_lp_1h[-2], mom_lp_1h[-1]
+            if sz_1h.iloc[b_idx] < 0:  # 动量在零轴下方
+                price_lower = low_1h.iloc[b_idx] < low_1h.iloc[a_idx] - 0.03 * atr_1h.iloc[b_idx]
+                momentum_higher = sz_1h.iloc[b_idx] > sz_1h.iloc[a_idx]
+                if price_lower and momentum_higher:
+                    htf_has_bot_div = True
+                    htf_div_dir = "Long"
+                    htf_div_low_price = float(low_1h.iloc[b_idx])
+                    htf_div_low_idx = b_idx
+                    htf_div_strength = min(12.0, abs((sz_1h.iloc[b_idx] - sz_1h.iloc[a_idx]) / max(abs(sz_1h.iloc[a_idx]), 1e-9)) * 8.0 + 4.0)
+        
+        # 计算背离年龄：从最近一次背离确认点到现在的1H K线根数
+        last_top_idx = htf_div_high_idx if htf_has_top_div else -999
+        last_bot_idx = htf_div_low_idx if htf_has_bot_div else -999
+        last_div_idx = max(last_top_idx, last_bot_idx)
+        if last_div_idx > 0:
+            htf_div_age = len(df_1h) - 1 - last_div_idx
+        
+        # 【背离结束判定】：
+        # 条件A：价格突破背离极点（顶背离被价格突破高点 = 空头失效）
+        # 条件B：年龄超期（>24根1H K线 ≈ 1天，时间窗口关闭）
+        div_expired = False
+        if htf_has_top_div and curr_price > htf_div_high_price * 1.001:
+            div_expired = True  # 顶背离失效：价格涨破顶背离最高点
+        if htf_has_bot_div and curr_price < htf_div_low_price * 0.999:
+            div_expired = True  # 底背离失效：价格跌破底背离最低点
+        if htf_div_age > 24:
+            div_expired = True  # 年龄超期
+        
+        if div_expired:
+            htf_has_top_div = False
+            htf_has_bot_div = False
+            htf_div_dir = "None"
+            htf_div_age = 999
+            htf_div_strength = 0.0
+    except Exception as exc:
+        # 背离检测失败不阻塞主流程
+        pass
+
+    # 构建基础返回字典，加入1H背离字段
+    base_ctx = {
+        'allowed_direction': "Both",
+        'macro_trend': "1H neutral",
+        'bsl_1h': bsl, 'ssl_1h': ssl,
+        'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp,
+        'htf_has_top_div': htf_has_top_div,
+        'htf_has_bot_div': htf_has_bot_div,
+        'htf_div_dir': htf_div_dir,
+        'htf_div_age': htf_div_age,
+        'htf_div_strength': htf_div_strength,
+        'htf_div_high_price': htf_div_high_price,
+        'htf_div_low_price': htf_div_low_price,
+    }
+
     # 【修复20260701】一票否决改双向投票：
     # - 趋势方向信号强势(顶部/底部/结构) + 有趋势(ADX>=18) -> 强制方向
     # - 趋势方向信号但无趋势(ADX<18) -> 只建议，让 15M 评分自主
     # - 中线偏离信号也在有趋势时才强制方向，否则返回Both
     if is_top and has_trend:
-        return {'allowed_direction': "Short", 'macro_trend': "1H TOP with TREND", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Short", 'macro_trend': "1H TOP with TREND"})
+        return base_ctx
     if is_bot and has_trend:
-        return {'allowed_direction': "Long", 'macro_trend': "1H BOT with TREND", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Long", 'macro_trend': "1H BOT with TREND"})
+        return base_ctx
     if bearish_struct and has_trend:
-        return {'allowed_direction': "Short", 'macro_trend': "1H BEAR STRUCT with TREND", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Short", 'macro_trend': "1H BEAR STRUCT with TREND"})
+        return base_ctx
     if bullish_struct and has_trend:
-        return {'allowed_direction': "Long", 'macro_trend': "1H BULL STRUCT with TREND", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Long", 'macro_trend': "1H BULL STRUCT with TREND"})
+        return base_ctx
 
     # 无趋势时的方向信号 -> 只建议不强制
     if is_top and not has_trend:
-        return {'allowed_direction': "Both", 'macro_trend': "1H TOP weak trend", 'htf_suggest': "Short", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Both", 'macro_trend': "1H TOP weak trend", 'htf_suggest': "Short"})
+        return base_ctx
     if is_bot and not has_trend:
-        return {'allowed_direction': "Both", 'macro_trend': "1H BOT weak trend", 'htf_suggest': "Long", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Both", 'macro_trend': "1H BOT weak trend", 'htf_suggest': "Long"})
+        return base_ctx
     if bearish_struct and not has_trend:
-        return {'allowed_direction': "Both", 'macro_trend': "1H BEAR STRUCT weak trend", 'htf_suggest': "Short", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Both", 'macro_trend': "1H BEAR STRUCT weak trend", 'htf_suggest': "Short"})
+        return base_ctx
     if bullish_struct and not has_trend:
-        return {'allowed_direction': "Both", 'macro_trend': "1H BULL STRUCT weak trend", 'htf_suggest': "Long", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Both", 'macro_trend': "1H BULL STRUCT weak trend", 'htf_suggest': "Long"})
+        return base_ctx
 
     # 中线偏离判定也加入趋势门槛
     chan_width = bsl - ssl
@@ -283,10 +388,12 @@ def build_macro_context(df_1h):
         dist_from_mid = 0.0
     
     if dist_from_mid >= 0.25 and curr_price > eq and has_trend:
-        return {'allowed_direction': "Short", 'macro_trend': "1H premium zone with trend", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Short", 'macro_trend': "1H premium zone with trend"})
+        return base_ctx
     if dist_from_mid >= 0.25 and curr_price < eq and has_trend:
-        return {'allowed_direction': "Long", 'macro_trend': "1H discount zone with trend", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
-    return {'allowed_direction': "Both", 'macro_trend': "1H neutral", 'bsl_1h': bsl, 'ssl_1h': ssl, 'liq_hp_1h': liq_hp, 'liq_lp_1h': liq_lp}
+        base_ctx.update({'allowed_direction': "Long", 'macro_trend': "1H discount zone with trend"})
+        return base_ctx
+    return base_ctx
 
 def calc_latest_pivot_strength(df, pivot_idx, is_high=True):
     if pivot_idx is None or pivot_idx <= 0 or pivot_idx >= len(df): return 0.0
