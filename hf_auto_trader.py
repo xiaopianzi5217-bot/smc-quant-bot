@@ -292,7 +292,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
     entry_price = float(curr["close"])
     
     # 从 best row 读取 TP/SL
-    entry_signal = float(best.get("opened_at", df_v56.iloc[-1]))
+    # 从 best row 读取 TP/SL
+    entry_signal = float(best.get("opened_at", 0)) if not isinstance(best.get("opened_at", None), pd.Timestamp) else float(df_v56.iloc[-1]["close"])
     sl = float(best.get("sl", 0))
     tp1 = float(best.get("tp1", 0))
     tp2 = float(best.get("tp2", 0))
