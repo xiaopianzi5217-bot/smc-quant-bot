@@ -232,6 +232,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
         
     # ===== V56.5 唯一决策管线 =====
     # 使用 V56_5_Engine 的候选-评分-选择-执行链路
+    # 注意：V565Config 默认 min_score=65.0，生产环境已足够
+    # 但 scan_and_decide 的 DataFreme 只有 320 bars（15m），回测引擎需要更多数据
+    # 因此这里用宽松的 V56 Config
+    from final_forge.v56_5_stable_engine import V565Config
+    _loose_cfg = V565Config(min_score=55.0)  # 放低分数门槛
+  
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
         print(f"[{symbol}] V56 指标计算后数据不足")
@@ -249,7 +255,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     exec_ctx = build_exec_context(df_exec)
     exec_ctx["data_source"] = "hf_auto"
     
-    enriched = enrich_v565_candidates(broad, None)
+    enriched = enrich_v565_candidates(broad, _loose_cfg)
     
     # 用 Quality Gate 做最终筛选
     gate_passed = []
@@ -266,13 +272,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] Quality Gate 拦截全部信号，本次不开单")
         return None
     
-    selected = select_v565_portfolio(enriched, None)
+    selected = select_v565_portfolio(enriched, _loose_cfg)
     
     if selected is None or selected.empty:
         print(f"[{symbol}] Top-N 选择后无信号")
         return None
     
-    trades = execute_v565(df_v56, selected, None)
+    trades = execute_v565(df_v56, selected, _loose_cfg)
     
     if trades is None or trades.empty:
         print(f"[{symbol}] 执行后无交易")
@@ -291,9 +297,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
     entry_price = float(curr["close"])
     
     # 从 best row 读取 TP/SL
-    # 从 best row 读取 TP/SL
-    entry_signal = float(best.get("opened_at", 0)) if not isinstance(best.get("opened_at", None), pd.Timestamp) else float(df_v56.iloc[-1]["close"])
-    sl = float(best.get("sl", 0))
+    # V56.5 执行引擎的列名是 "initial_sl" 而不是 "sl"
+    sl = float(best.get("initial_sl", best.get("sl", 0)))
     tp1 = float(best.get("tp1", 0))
     tp2 = float(best.get("tp2", 0))
     tp3 = float(best.get("tp3", 0))
