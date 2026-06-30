@@ -42,6 +42,7 @@ from final_forge.v56_5_stable_engine import (
     load_ohlcv,
 )
 from strategy.v565_quality_gate import v565_quality_gate
+from decision.v37_gate import v37_final_gate
 
 # ---------- 状态与特征存储 ----------
 from state.position_manager import position_manager
@@ -585,6 +586,38 @@ def check_and_open(result: dict) -> bool:
         print(f"[{symbol}] RR={actual_rr:.2f} < 1.0 skip")
         return False
         
+    # ===== V37 Final Gate（V56.5 管线的最终闸门）=====
+    _v37_decision = {
+        "approved": True,
+        "direction": direction,
+        "reason": "V56.5_QUALITY_PASSED",
+    }
+    _v37_ctx = {
+        "long_score": result.get("long_score", 0),
+        "short_score": result.get("short_score", 0),
+        "regime": result.get("regime", "unknown"),
+        "vol_state": result.get("vol_state", "unknown"),
+        "setup_type": str(result.get("decision", {}).get("signal", {}).get("setup_type", "V56_SIGNAL")),
+        "rr": actual_rr,
+        "entry": result.get("entry", 0),
+        "sl": result.get("sl", 0),
+        "tp1": result.get("tp1", 0),
+        "tp2": result.get("tp2", 0),
+        "tp3": result.get("tp3", 0),
+        "score": result.get("score", 0),
+        "expected_value": result.get("expected_value", 0.0),
+        "atr": result.get("atr", 0),
+        "funding_rate": result.get("funding_rate"),
+        "symbol": symbol,
+        **result.get("exec_ctx", {}),
+    }
+    _v37_passed, _v37_reason, _v37_size_mult = v37_final_gate(_v37_decision, _v37_ctx)
+    if not _v37_passed:
+        print(f"[{symbol}] V37 Gate 拦截: {_v37_reason}")
+        return False
+    else:
+        print(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
+
     # 获取 signal_tier 用于调试消息和日志
     _tier = None
     _decision = result.get("decision", {})

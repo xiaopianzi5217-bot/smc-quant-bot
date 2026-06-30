@@ -50,11 +50,14 @@ from indicators.basic import add_all_indicators
 from strategy.smc import build_macro_context, build_exec_context
 from strategy.scoring import adaptive_signal_score
 from strategy.risk import calculate_dynamic_tp_sl, check_partial_close_and_trail
+from strategy.observer_events import detect_observer_events
 from notifier.observer.risk_plan import build_rr_plan
 from notifier.observer.signal_collector import build_signal_snapshot
 from notifier.observer.funding import fetch_funding_rate_safe, normalize_swap_symbol
 from notifier.manager import dispatch_observer_snapshot, dispatch_strategy_decision, dispatch_execution_event
 from decision.v9_decision_kernel import V9DecisionKernel
+from decision.v37_gate import v37_final_gate
+from state.position_manager import position_manager
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
@@ -413,6 +416,60 @@ def build_local_snapshot_and_decision(symbol):
     print(f"Reason: {decision.get('reason')}")
     print(f"Source/Version: {decision.get('source', 'unknown')} / {decision.get('version', 'unknown')}")
     print(f"Long score: {l_score:.2f}, Short score: {s_score:.2f}, Direction: {direction}")
+
+    # ---- Observer 事件检测 ----
+    observer_events = detect_observer_events(curr, exec_ctx)
+
+    # ---- V37 Final Gate ----
+    passed, reason, size_mult = v37_final_gate(decision, {
+        "long_score": l_score or exec_ctx.get("long_score", 0),
+        "short_score": s_score or exec_ctx.get("short_score", 0),
+        **exec_ctx
+    })
+    if passed and decision.get("approved"):
+        # ===== 顺发：Observer 结构事件 =====
+        if observer_events:
+            try:
+                dispatch_observer_snapshot(snapshot, send_all=True)
+                print(f"[{symbol}] Observer 结构事件顺发完成 ({len(observer_events)} 个)")
+            except Exception as exc:
+                print(f"[{symbol}] Observer 顺发异常: {exc}")
+
+        # ===== 顺发：开单信号推送 (Telegram) =====
+        _emoji = "📈" if direction == "Long" else "📉"
+        _msg = (
+            f"{_emoji} [{symbol}] V37 Gate 通过\n"
+            f"方向: {direction} | 入场: {float(curr['close']):.2f}\n"
+            f"止损: {sl:.2f} | TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
+            f"RR: {rr:.2f} | 评分: L{l_score:.1f} S{s_score:.1f}\n"
+            f"size_mult: {size_mult} | Gate: {reason}\n"
+            f"形态: {exec_ctx.get('setup_type','?')} | 大级别: {macro_ctx.get('allowed_direction','?')}"
+        )
+        safe_send_telegram(_msg)
+
+        # ===== 写入全局持仓 =====
+        position_manager.update(symbol, {
+            "direction": decision["direction"],
+            "entry": curr["close"],
+            "current_sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "stage": 0,
+        })
+        # 同时写入 MANAGED_POSITIONS（供原有后台监控线程使用）
+        MANAGED_POSITIONS[symbol] = {
+            'direction': decision["direction"],
+            'entry': curr["close"],
+            'tp1': tp1,
+            'tp2': tp2,
+            'current_sl': sl,
+            'stage': 0
+        }
+        print(f"[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
+    else:
+        print(f"[{symbol}] V37 Gate 拦截: {reason}")
+
     return snapshot, decision, source
 
 def direct_observer_signal(symbol):
