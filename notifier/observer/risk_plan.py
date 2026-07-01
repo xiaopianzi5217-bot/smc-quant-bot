@@ -30,5 +30,6 @@ def build_rr_plan(direction, entry, sl, tp1, tp2, tp3):
         "rr1": calc_rr(direction, entry, sl, tp1),
         "rr2": calc_rr(direction, entry, sl, tp2),
         "rr3": calc_rr(direction, entry, sl, tp3),
-        "rr": calc_rr(direction, entry, sl, tp2),
+        # 【修复】主 RR 基于 tp1（实际第一止盈位），避免虚假高 RR 误导
+        "rr": calc_rr(direction, entry, sl, tp1),
     }

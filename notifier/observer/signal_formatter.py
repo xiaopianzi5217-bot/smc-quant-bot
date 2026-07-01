@@ -101,48 +101,60 @@ def _message_type_name(message_type: str) -> str:
 
 
 def _trend_explain(v: Any) -> str:
+    """大方向：直接输出中文标识，不加解释"""
     s = _clean(v)
-    if "看多" in s or "底部" in s or "吸筹" in s:
-        return f"{s}\n\n解释：大方向更支持回踩后找多头机会。"
-    if "看空" in s or "顶部" in s or "派发" in s:
-        return f"{s}\n\n解释：大方向更支持反弹后找空头机会。"
-    if "震" in s:
-        return f"{s}\n\n解释：不是单边行情，容易上下洗盘。"
-    return s
+    # 1H macro_trend / allowed_direction 字段格式
+    if "TOP" in s or "顶部" in s or "看空" in s or "派发" in s:
+        return "看空"
+    if "BOT" in s or "底部" in s or "看多" in s or "吸筹" in s:
+        return "看多"
+    if "BULL" in s or "bullish" in s.lower() or "Long" in s or "看涨" in s:
+        return "看多"
+    if "BEAR" in s or "bearish" in s.lower() or "Short" in s or "看跌" in s:
+        return "看空"
+    if "震" in s or "neutral" in s.lower() or "Both" in s:
+        return "震荡"
+    if "premium" in s.lower():
+        return "看空（溢价区）"
+    if "discount" in s.lower():
+        return "看多（折价区）"
+    return s if s else "暂无"
 
 
 def _regime_explain(v: Any) -> str:
+    """行情状态：直接输出中文标识"""
     s = _clean(v).lower()
     table = {
-        "mud": "混沌震荡\n\n解释：方向不干净，容易反复假突破。",
-        "transition": "过渡状态\n\n解释：可能从震荡转趋势，先等确认。",
-        "trend": "趋势行情\n\n解释：方向相对清楚，但不能追太远。",
-        "range": "区间震荡\n\n解释：高抛低吸环境，不适合追涨杀跌。",
-        "chop": "杂乱震荡\n\n解释：噪音多，信号要打折。",
+        "mud": "混沌震荡",
+        "transition": "过渡状态",
+        "trend": "趋势行情",
+        "range": "区间震荡",
+        "chop": "杂乱震荡",
     }
-    return table.get(s, _clean(v))
+    return table.get(s, _clean(v) if s else "暂无")
 
 
 def _volatility_explain(v: Any) -> str:
+    """波动状态：直接输出中文标识"""
     s = _clean(v).lower()
     table = {
-        "high": "偏高\n\n解释：波动大，止损要放宽，仓位要轻。",
-        "normal": "正常\n\n解释：按计划观察，等待关键位触发。",
-        "medium": "正常\n\n解释：按计划观察，等待关键位触发。",
-        "low": "偏低\n\n解释：行情慢，假动作多，突破要看放量。",
+        "high": "高波动",
+        "normal": "正常波动",
+        "medium": "正常波动",
+        "low": "低波动",
     }
-    return table.get(s, _clean(v))
+    return table.get(s, _clean(v) if s else "暂无")
 
 
 def _squeeze_explain(v: Any) -> str:
     s = _clean(v).lower()
     if s in ["building", "build"]:
-        return "正在压缩\n\n解释：波动变窄，后面可能选择方向。"
+        return "正在压缩"
     if s in ["released", "release"]:
-        return "已经释放\n\n解释：波动正在展开，注意别追在末端。"
+        return "已释放"
     if s in ["none", "off", "false", "暂无"]:
         return "无明显压缩"
-    return _clean(v)
+    return _clean(v) if s else "暂无"
 
 
 def _parse_volume_ratio(volume_state: Any) -> Optional[float]:

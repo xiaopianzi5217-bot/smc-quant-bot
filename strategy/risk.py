@@ -93,24 +93,23 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, min(max_stop_atr * atr, risk))
         sl = entry - risk
         
-        tp1_atr_direct = entry + tp1_atr * atr
-        tp1_candidates = [tp1_atr_direct]
-        if bsl > 0 and abs(bsl - entry) <= tp1_atr * atr * 1.5:
-            tp1_candidates.append(bsl)
-        if bull_ob and isinstance(bull_ob, (list, tuple)) and len(bull_ob) >= 2:
-            mid = (float(bull_ob[0]) + float(bull_ob[1])) / 2.0
-            if mid > entry and abs(mid - entry) <= tp1_atr * atr * 1.5:
-                tp1_candidates.append(mid)
-                
-        tp1 = min(tp1_candidates)
-        if tp1 <= entry: tp1 = tp1_atr_direct
-        
+        # 【修复-止盈过近】不再用 BSL/OB 作为 TP1 候选位置
+        # BSL/OB 是阻力/支撑区，价格到了容易反转，做止盈目标不合理
+        # 只用 ATR 乘数 + 止损距离保底，确保 tp1 真实可触及
         _sl_dist = abs(entry - sl)
-        if abs(tp1 - entry) < _sl_dist * 1.0:
-            tp1 = entry + 1.0 * _sl_dist
-            
-        tp2 = entry + tp2_atr * atr
-        tp3 = entry + tp3_atr * atr
+        
+        # tp1: max(ATR目标, 止损距离×1.5)，确保足够空间
+        tp1_min_dist = max(tp1_atr * atr, _sl_dist * 1.5)
+        tp1 = entry + tp1_min_dist
+        
+        # tp2: 基于实际止损距离，保证真实 RR 不虚高
+        tp2_min_dist = max(tp2_atr * atr, _sl_dist * 2.0)
+        tp2 = entry + tp2_min_dist
+        
+        # tp3: 更远的目标
+        tp3_min_dist = max(tp3_atr * atr, _sl_dist * 3.0)
+        tp3 = entry + tp3_min_dist
+        
     else:
         swing = _swing_high(hist_exec, 24)
         stop_candidates = [entry + sl_loose * atr, vwap + 1.75 * atr]
@@ -125,27 +124,23 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, min(max_stop_atr * atr, risk))
         sl = entry + risk
         
-        tp1_atr_direct = entry - tp1_atr * atr
-        tp1_candidates = [tp1_atr_direct]
-        if ssl > 0 and abs(entry - ssl) <= tp1_atr * atr * 1.5:
-            tp1_candidates.append(ssl)
-        if bear_ob and isinstance(bear_ob, (list, tuple)) and len(bear_ob) >= 2:
-            mid = (float(bear_ob[0]) + float(bear_ob[1])) / 2.0
-            if mid < entry and abs(entry - mid) <= tp1_atr * atr * 1.5:
-                tp1_candidates.append(mid)
-                
-        tp1 = max(tp1_candidates)
-        if tp1 >= entry: tp1 = tp1_atr_direct
-        
+        # 【修复-止盈过近】同上，空单不再用 SSL/OB 做 TP1
         _sl_dist = abs(entry - sl)
-        if abs(entry - tp1) < _sl_dist * 1.0:
-            tp1 = entry - 1.0 * _sl_dist
-            
-        tp2 = entry - tp2_atr * atr
-        tp3 = entry - tp3_atr * atr
+        
+        tp1_min_dist = max(tp1_atr * atr, _sl_dist * 1.5)
+        tp1 = entry - tp1_min_dist
+        
+        tp2_min_dist = max(tp2_atr * atr, _sl_dist * 2.0)
+        tp2 = entry - tp2_min_dist
+        
+        tp3_min_dist = max(tp3_atr * atr, _sl_dist * 3.0)
+        tp3 = entry - tp3_min_dist
 
-    # 返回如实的盈亏比，不再强行修改止盈目标
-    rr = abs(tp2 - entry) / max(abs(entry - sl), 1e-12)
+    # 【修复】RR 基于 tp1（实际第一止盈位），避免虚假高 RR
+    # 之前用 tp2 算 RR 导致显示高但 tp1 实际很近，止盈就被扫了
+    rr = abs(tp1 - entry) / max(abs(entry - sl), 1e-12)
+    # 同时保留 tp2 的 RR 在 exec_ctx 中供参考
+    _rr2 = abs(tp2 - entry) / max(abs(entry - sl), 1e-12)
     
     return float(sl), float(tp1), float(tp2), float(tp3), float(rr)
 

@@ -241,22 +241,110 @@ def _direction_from_scores(long_score, short_score):
     return "Neutral"
 
 
-def _suggestion(direction, long_score, short_score, tl, ts, regime, squeeze):
+def _suggestion(direction, long_score, short_score, tl, ts, regime, squeeze,
+                long_ev=None, short_ev=None, is_approved=False):
+    """
+    生成明确的交易建议，包含：开不开单、方向、原因。
+    结合 分数、EV、是否已批准 做综合判断。
+    """
     try:
         lp = float(long_score) / max(float(tl), 1.0) * 100.0
         sp = float(short_score) / max(float(ts), 1.0) * 100.0
     except Exception:
         lp = sp = 0.0
 
-    if direction == "Long" and lp >= 85 and lp > sp:
-        return "偏多占优；等回踩防守区、扫下方止损或量能确认，不追高。"
-    if direction == "Short" and sp >= 85 and sp > lp:
-        return "偏空占优；等反弹压力区、扫上方止损或量能确认，不追低。"
+    try:
+        lev = float(long_ev or 0)
+        sev = float(short_ev or 0)
+    except Exception:
+        lev = sev = 0.0
+
+    score_gap = abs(lp - sp)
+
+    # ==================== 已批准开单 ====================
+    if is_approved:
+        if direction == "Long":
+            return (
+                f"✅ 【建议开多】\n"
+                f"原因：多头评分 {lp:.0f}分(阈值{tl:.0f})，EV {lev:+.4f}，"
+                f"空头 {sp:.0f}分，分差 {score_gap:.0f}分，AI 判断此方向可执行。\n"
+                f"操作：按下方风控计划挂单，不建议追高，等价格回到入场参考附近。"
+            )
+        else:
+            return (
+                f"✅ 【建议开空】\n"
+                f"原因：空头评分 {sp:.0f}分(阈值{ts:.0f})，EV {sev:+.4f}，"
+                f"多头 {lp:.0f}分，分差 {score_gap:.0f}分，AI 判断此方向可执行。\n"
+                f"操作：按下方风控计划挂单，不建议追低，等价格回到入场参考附近。"
+            )
+
+    # ==================== 未批准但分数接近 ====================
+    if direction == "Long" and lp >= 75:
+        near_approved = "接近开单门槛" if lp < 85 else "已达标但被其他条件拦截"
+        reasons = []
+        if lev < -0.20:
+            reasons.append(f"EV={lev:.4f}偏低（需>-0.2）")
+        if score_gap < 10:
+            reasons.append(f"分差仅{score_gap:.0f}分")
+        reason_str = f"，原因：{'、'.join(reasons)}" if reasons else ""
+
+        return (
+            f"⚠️ 【偏向做多，但暂不开单】\n"
+            f"多头 {lp:.0f}分 vs 空头 {sp:.0f}分，{near_approved}{reason_str}。\n"
+            f"操作：等回踩下方防守区（SSL/买方OB），或等放量/扫止损确认后再入场，不追高。"
+        )
+
+    if direction == "Short" and sp >= 75:
+        near_approved = "接近开单门槛" if sp < 85 else "已达标但被其他条件拦截"
+        reasons = []
+        if sev < -0.20:
+            reasons.append(f"EV={sev:.4f}偏低（需>-0.2）")
+        if score_gap < 10:
+            reasons.append(f"分差仅{score_gap:.0f}分")
+        reason_str = f"，原因：{'、'.join(reasons)}" if reasons else ""
+
+        return (
+            f"⚠️ 【偏向做空，但暂不开单】\n"
+            f"空头 {sp:.0f}分 vs 多头 {lp:.0f}分，{near_approved}{reason_str}。\n"
+            f"操作：等反弹上方防守区（BSL/卖方OB），或等放量/扫止损确认后再入场，不追低。"
+        )
+
+    # ==================== 分差大但分数不够 ====================
+    if direction == "Long" and lp >= 60:
+        return (
+            f"🔎 【轻微偏多，继续观察】\n"
+            f"多头 {lp:.0f}分 vs 空头 {sp:.0f}分，但距开单阈值({tl:.0f}分)还有差距。\n"
+            f"操作：等待价格回踩防守区或扫下方止损后，观察评分是否能再提升。"
+        )
+
+    if direction == "Short" and sp >= 60:
+        return (
+            f"🔎 【轻微偏空，继续观察】\n"
+            f"空头 {sp:.0f}分 vs 多头 {lp:.0f}分，但距开单阈值({ts:.0f}分)还有差距。\n"
+            f"操作：等待价格反弹防守区或扫上方止损后，观察评分是否能再提升。"
+        )
+
+    # ==================== 混沌震荡 ====================
     if str(regime) == "mud":
-        return "混沌震荡；只观察结构变化，等待扫止损/背离/成交量配合。"
+        return (
+            f"⏸️ 【混沌震荡，不开单】\n"
+            f"最近行情状态为 mud（无方向震荡），多空评分接近。\n"
+            f"操作：只观察结构变化，等待扫止损/背离/成交量配合出方向。"
+        )
+
     if str(squeeze) in ["building", "build"]:
-        return "波动压缩中；等待释放方向，不提前重仓。"
-    return "优势不够明显；以观察为主，等待更清晰的流动性触发。"
+        return (
+            f"⏸️ 【波动压缩中，不开单】\n"
+            f"TTM Squeeze 正在压缩，说明波动在变窄，但不确定往哪边释放。\n"
+            f"操作：等待释放方向确认后再入场，不提前重仓。"
+        )
+
+    # ==================== 默认 ====================
+    return (
+        f"⏸️ 【优势不明显，不开单】\n"
+        f"多头 {lp:.0f}分 / 空头 {sp:.0f}分，分差 {score_gap:.0f}分，两者均不够突出。\n"
+        f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
+    )
 
 
 def build_signal_snapshot(*args, **kwargs) -> SignalSnapshot:
@@ -341,7 +429,17 @@ def build_signal_snapshot(*args, **kwargs) -> SignalSnapshot:
     trend_result = _first(["trend_result", "trend", "macro_trend", "allowed_direction"], sources)
     suggestion = _first(["suggestion"], sources, None)
     if not _valid(suggestion):
-        suggestion = _suggestion(direction, long_score, short_score, threshold_long, threshold_short, regime, squeeze)
+        # 【修复】传入 EV 和批准状态，生成明确的建议（开不开、原因）
+        _is_approved = bool(_first(["approved", "decision_approved", "is_approved"], sources, False))
+        _long_ev = _first(["long_ev"], sources, None)
+        _short_ev = _first(["short_ev"], sources, None)
+        suggestion = _suggestion(
+            direction, long_score, short_score,
+            threshold_long, threshold_short,
+            regime, squeeze,
+            long_ev=_long_ev, short_ev=_short_ev,
+            is_approved=_is_approved,
+        )
 
     snapshot = SignalSnapshot(
         symbol=data.get("symbol", _first(["symbol"], sources, "UNKNOWN")),
