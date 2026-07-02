@@ -1,16 +1,16 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 V56.5 Stable Production Backtest Runner
 
-唯一回测入口，直接调用 final_forge.v56_5_stable_engine。
-所有旧 V37/V38 回测路径已彻底移除。
-"""
+鍞竴鍥炴祴鍏ュ彛锛岀洿鎺ヨ皟鐢?final_forge.v56_5_stable_engine銆?鎵€鏈夋棫 V37/V38 鍥炴祴璺緞宸插交搴曠Щ闄ゃ€?"""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
+
+from utils.safe import safe_float, safe_bool, safe_str
 
 from final_forge.v56_5_stable_engine import (
     V565Config,
@@ -69,13 +69,5 @@ def summarize_backtest(trades: pd.DataFrame) -> Dict[str, Any]:
     return summarize_v565(trades)
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        v = float(value)
-        if v != v:
-            return default
-        return v
-    except Exception:
-        return default
+
+

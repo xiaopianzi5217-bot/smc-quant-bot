@@ -85,7 +85,7 @@ BLOCKED_HOURS: Tuple[int, ...] = ()
 # ============================================================
 # ⚙️ model_ev 最低要求（hard floor）
 # ============================================================
-MIN_MODEL_EV: float = -0.05
+MIN_MODEL_EV: float = -0.28
 
 
 # ============================================================
@@ -160,7 +160,7 @@ def v565_quality_gate(
             meta["failed_checks"].append("hour_blocked")
             meta["blocked"] = True
 
-        # 3b. 低分 + trend_strength 极端
+                        # 3b. 低分 + trend_strength 极端
         trend_strength = float(row.get("trend_strength", 0.0))
         if abs(trend_strength) > 1.8:
             reasons.append(f"TREND_EXTREME_{trend_strength:.2f}_LOW_SCORE")
@@ -170,7 +170,23 @@ def v565_quality_gate(
         meta["passed_checks"].append("high_score_bonus")
 
     # ========================================================
-    # 4. 分数软缩减（不拒绝但降仓位）
+    # 4. Structure Override（特权通道）
+    # ========================================================
+    strong_structure = (
+        float(row.get("mitigation_strength", 0)) > 0.54 or
+        bool(row.get("liquidity_sweep_confirmed", False)) or
+        "ob" in str(row.get("setup_type", "")).lower() or
+        "fvg" in str(row.get("setup_type", "")).lower()
+    )
+
+    if strong_structure and score >= 41 and model_ev > -0.50:
+        meta["override"] = True
+        meta["size_mult"] = 0.96
+        meta["reason"] = "Optimized High Structure"
+        return True, "STRUCTURE_OVERRIDE", meta
+
+    # ========================================================
+    # 5. 分数软缩减（不拒绝但降仓位）
     # ========================================================
     size_penalty = 1.0
     if score < 75:

@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Scorecard System V2
 
-把高阶判断从“硬过滤器”降级为“旁路评分/审计层”。
-V2: 引入 HTF 1H 级别背离反向挡停，以及 HTF+LTF 多周期背离共振逻辑。
+鎶婇珮闃跺垽鏂粠鈥滅‖杩囨护鍣ㄢ€濋檷绾т负鈥滄梺璺瘎鍒?瀹¤灞傗€濄€?
+V2: 寮曞叆 HTF 1H 绾у埆鑳岀鍙嶅悜鎸″仠锛屼互鍙?HTF+LTF 澶氬懆鏈熻儗绂诲叡鎸€昏緫銆?
 
-设计目标：
-1. 第一准入只由 Base Layer 决定：SMC 结构 + SQZMOM 背离/动量确认。
-2. HTF / VWAP / DMI / Breakout / Regime 等不再一票否决，只输出分值、EV 修正和仓位修正。
-3. 针对 1H HTF 强反向背离设置硬阻断 (block)，强制归零仓位。
-4. 每个 scorer 的输出都可进入 trade log / reject audit，后续可以做 counterfactual 分组统计。
+璁捐鐩爣锛?
+1. 绗竴鍑嗗叆鍙敱 Base Layer 鍐冲畾锛歋MC 缁撴瀯 + SQZMOM 鑳岀/鍔ㄩ噺纭銆?
+2. HTF / VWAP / DMI / Breakout / Regime 绛変笉鍐嶄竴绁ㄥ惁鍐筹紝鍙緭鍑哄垎鍊笺€丒V 淇鍜屼粨浣嶄慨姝ｃ€?
+3. 閽堝 1H HTF 寮哄弽鍚戣儗绂昏缃‖闃绘柇 (block)锛屽己鍒跺綊闆朵粨浣嶃€?
+4. 姣忎釜 scorer 鐨勮緭鍑洪兘鍙繘鍏?trade log / reject audit锛屽悗缁彲浠ュ仛 counterfactual 鍒嗙粍缁熻銆?
 """
 from __future__ import annotations
 
@@ -17,33 +17,12 @@ from typing import Any, Dict, List
 import json
 import math
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        out = float(value)
-        if math.isnan(out) or math.isinf(out):
-            return default
-        return out
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
-def _safe_bool(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "long", "short", "bull", "bear"}
-    try:
-        if value != value:
-            return False
-    except Exception:
-        pass
-    try:
-        return bool(value)
-    except Exception:
-        return False
+
+
+
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -84,11 +63,11 @@ def dumps_compact(obj: Dict[str, Any]) -> str:
 
 def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    第一道进场许可：只看 SMC + SQZMOM。
+    绗竴閬撹繘鍦鸿鍙細鍙湅 SMC + SQZMOM銆?
 
-    注意：这不是高阶过滤。它只回答“当前 15m 是否存在可交易结构”。
-    - SMC：结构质量分 / FVG-OB 区 / liquidity sweep 任一提供结构支撑。
-    - SQZMOM：同向背离 + 白柱/动量/DMI/释放等确认。
+    娉ㄦ剰锛氳繖涓嶆槸楂橀樁杩囨护銆傚畠鍙洖绛斺€滃綋鍓?15m 鏄惁瀛樺湪鍙氦鏄撶粨鏋勨€濄€?
+    - SMC锛氱粨鏋勮川閲忓垎 / FVG-OB 鍖?/ liquidity sweep 浠讳竴鎻愪緵缁撴瀯鏀拺銆?
+    - SQZMOM锛氬悓鍚戣儗绂?+ 鐧芥煴/鍔ㄩ噺/DMI/閲婃斁绛夌‘璁ゃ€?
     """
     ctx = ctx or {}
     direction = str(direction).title()
@@ -100,34 +79,34 @@ def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None =
         get = lambda k, default=None: default
 
     smc_quality_col = "smc_quality_score_bull" if dkey == "long" else "smc_quality_score_bear"
-    smc_quality = _safe_float(get(smc_quality_col, get("smc_quality_score", ctx.get("smc_quality_100", 0.0))), 0.0)
-    has_valid_zone = _safe_bool(ctx.get("has_valid_zone", False))
-    liquidity_sweep = _safe_bool(ctx.get("liquidity_sweep_confirmed", ctx.get("liquidity_sweep", False)))
-    stop_hunt = _safe_bool(get("bullish_stop_hunt" if dkey == "long" else "bearish_stop_hunt", False))
+    smc_quality = safe_float(get(smc_quality_col, get("smc_quality_score", ctx.get("smc_quality_100", 0.0))), 0.0)
+    has_valid_zone = safe_bool(ctx.get("has_valid_zone", False))
+    liquidity_sweep = safe_bool(ctx.get("liquidity_sweep_confirmed", ctx.get("liquidity_sweep", False)))
+    stop_hunt = safe_bool(get("bullish_stop_hunt" if dkey == "long" else "bearish_stop_hunt", False))
     smc_pass = bool(smc_quality >= 35.0 or has_valid_zone or liquidity_sweep or stop_hunt)
 
     div_dir = str(get("sqzmom_divergence_dir", ctx.get("sqzmom_divergence_dir", "None")))
-    div_age = _safe_float(get("sqzmom_divergence_age", ctx.get("sqzmom_divergence_age", 999)), 999)
-    div_strength = _safe_float(get("sqzmom_divergence_strength", ctx.get("sqzmom_divergence_strength", 0.0)), 0.0)
+    div_age = safe_float(get("sqzmom_divergence_age", ctx.get("sqzmom_divergence_age", 999)), 999)
+    div_strength = safe_float(get("sqzmom_divergence_strength", ctx.get("sqzmom_divergence_strength", 0.0)), 0.0)
     same_div_recent = bool(div_dir == direction and div_age <= 18)
     same_div_fresh = bool(div_dir == direction and div_age <= 8)
     
     strong_div_threshold = 7.5
     strong_div_confirm = bool(same_div_recent and (div_strength >= strong_div_threshold or div_strength >= 25.0))
 
-    white_confirm = _safe_bool(get("sqzmom_reversal_confirm_long" if dkey == "long" else "sqzmom_reversal_confirm_short", False))
-    momentum = _safe_float(get("momentum", ctx.get("momentum", 0.0)), 0.0)
-    momentum_slope = _safe_float(get("momentum_slope", ctx.get("momentum_slope", 0.0)), 0.0)
-    momentum_strength = _safe_float(get("momentum_strength", ctx.get("momentum_strength", 0.0)), 0.0)
-    momentum_strength_slope = _safe_float(get("momentum_strength_slope", ctx.get("momentum_strength_slope", 0.0)), 0.0)
-    squeeze_released = _safe_bool(get("squeeze_released", ctx.get("squeeze_released", False)))
-    dmi_aligned = _safe_bool(ctx.get("sqzmom_dmi_aligned", False))
+    white_confirm = safe_bool(get("sqzmom_reversal_confirm_long" if dkey == "long" else "sqzmom_reversal_confirm_short", False))
+    momentum = safe_float(get("momentum", ctx.get("momentum", 0.0)), 0.0)
+    momentum_slope = safe_float(get("momentum_slope", ctx.get("momentum_slope", 0.0)), 0.0)
+    momentum_strength = safe_float(get("momentum_strength", ctx.get("momentum_strength", 0.0)), 0.0)
+    momentum_strength_slope = safe_float(get("momentum_strength_slope", ctx.get("momentum_strength_slope", 0.0)), 0.0)
+    squeeze_released = safe_bool(get("squeeze_released", ctx.get("squeeze_released", False)))
+    dmi_aligned = safe_bool(ctx.get("sqzmom_dmi_aligned", False))
     
     if dkey == "long":
-        dmi_aligned = dmi_aligned or _safe_float(get("plus_di", 0.0), 0.0) >= _safe_float(get("minus_di", 0.0), 0.0)
+        dmi_aligned = dmi_aligned or safe_float(get("plus_di", 0.0), 0.0) >= safe_float(get("minus_di", 0.0), 0.0)
         momentum_confirm = bool((momentum > 0 or momentum_slope > 0) and (momentum_strength >= 0 or momentum_strength_slope >= 0 or squeeze_released))
     else:
-        dmi_aligned = dmi_aligned or _safe_float(get("minus_di", 0.0), 0.0) >= _safe_float(get("plus_di", 0.0), 0.0)
+        dmi_aligned = dmi_aligned or safe_float(get("minus_di", 0.0), 0.0) >= safe_float(get("plus_di", 0.0), 0.0)
         momentum_confirm = bool((momentum < 0 or momentum_slope < 0) and (momentum_strength <= 0 or momentum_strength_slope <= 0 or squeeze_released))
 
     no_div_sqz = bool(
@@ -202,16 +181,16 @@ def _scorer(name: str, score: float, ev: float, pos_mult: float, reason: str) ->
 
 def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    高阶模块旁路评分卡 (V2).
+    楂橀樁妯″潡鏃佽矾璇勫垎鍗?(V2).
     
-    修改：增加 1H(HTF) 背离反向挡停机制，以及 HTF+LTF 多周期背离共振加分。
-    如果触发挡停，将无视旁路分数，强制 position_multiplier = 0.0。
+    淇敼锛氬鍔?1H(HTF) 鑳岀鍙嶅悜鎸″仠鏈哄埗锛屼互鍙?HTF+LTF 澶氬懆鏈熻儗绂诲叡鎸姞鍒嗐€?
+    濡傛灉瑙﹀彂鎸″仠锛屽皢鏃犺鏃佽矾鍒嗘暟锛屽己鍒?position_multiplier = 0.0銆?
     """
     macro_ctx = macro_ctx or {}
     direction = str(signal.get("direction", ctx.get("direction", ""))).title()
     dkey = _direction_key(direction)
-    close = _safe_float(ctx.get("close", 0.0), 0.0)
-    atr = max(_safe_float(ctx.get("ATRr_14", ctx.get("atr", 0.0)), 0.0), 1e-12)
+    close = safe_float(ctx.get("close", 0.0), 0.0)
+    atr = max(safe_float(ctx.get("ATRr_14", ctx.get("atr", 0.0)), 0.0), 1e-12)
     regime = str(ctx.get("regime", "")).upper()
     vol_state = str(ctx.get("vol_state", "")).upper()
 
@@ -220,11 +199,11 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     block_reason = ""
 
     base = signal.get("base_trigger", {}) if isinstance(signal, dict) else {}
-    base_strength = _safe_float(base.get("strength"), 0.0)
+    base_strength = safe_float(base.get("strength"), 0.0)
     scorers["base"] = _scorer("base", base_strength, 0.035 * base_strength, 0.65 + 0.35 * _clip(base_strength, 0, 1), str(base.get("reason", "BASE_UNKNOWN")))
 
     # HTF/Macro
-    htf_score = _safe_float(macro_ctx.get("htf_macro_score", ctx.get("htf_macro_score", 0.0)), 0.0)
+    htf_score = safe_float(macro_ctx.get("htf_macro_score", ctx.get("htf_macro_score", 0.0)), 0.0)
     if abs(htf_score) < 1e-9:
         htf = _scorer("htf", 0.0, 0.0, 1.0, "HTF_NEUTRAL")
     else:
@@ -234,8 +213,8 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     scorers["htf"] = htf
 
     # VWAP
-    vwap = _safe_float(ctx.get("vwap_48", ctx.get("VWAP", ctx.get("vwap", close))), close)
-    vwap_dist_atr = abs(close - vwap) / atr if atr > 0 and close > 0 else _safe_float(ctx.get("vwap_dist_atr", 0.0), 0.0)
+    vwap = safe_float(ctx.get("vwap_48", ctx.get("VWAP", ctx.get("vwap", close))), close)
+    vwap_dist_atr = abs(close - vwap) / atr if atr > 0 and close > 0 else safe_float(ctx.get("vwap_dist_atr", 0.0), 0.0)
     directional_side_ok = (close >= vwap and dkey == "long") or (close <= vwap and dkey == "short")
     dist_penalty = _clip((vwap_dist_atr - 1.6) / 2.4, 0.0, 1.0)
     if directional_side_ok:
@@ -251,9 +230,9 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     scorers["vwap"] = _scorer("vwap", vwap_score, vwap_ev, vwap_mult, vwap_reason)
 
     # DMI
-    plus_di = _safe_float(ctx.get("plus_di", 0.0), 0.0)
-    minus_di = _safe_float(ctx.get("minus_di", 0.0), 0.0)
-    adx = _safe_float(ctx.get("adx", 0.0), 0.0)
+    plus_di = safe_float(ctx.get("plus_di", 0.0), 0.0)
+    minus_di = safe_float(ctx.get("minus_di", 0.0), 0.0)
+    adx = safe_float(ctx.get("adx", 0.0), 0.0)
     dmi_aligned = (plus_di >= minus_di and dkey == "long") or (minus_di >= plus_di and dkey == "short")
     dmi_strength = _clip(abs(plus_di - minus_di) / 35.0 + max(0.0, adx - 18.0) / 80.0, 0.0, 1.0)
     dmi_score = dmi_strength if dmi_aligned else -dmi_strength
@@ -262,7 +241,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     scorers["dmi"] = _scorer("dmi", dmi_score, dmi_ev, dmi_mult, "DMI_ALIGNED" if dmi_aligned else "DMI_CONFLICT_SOFT")
 
     # Breakout
-    brk = _safe_float(signal.get("breakout", 0.0), 0.0)
+    brk = safe_float(signal.get("breakout", 0.0), 0.0)
     brk_term = _clip(brk / 30.0, 0.0, 1.0)
     if brk_term > 0:
         scorers["breakout"] = _scorer("breakout", brk_term, 0.030 * brk_term, 1.0 + 0.12 * brk_term, "BREAKOUT_SCORE_BONUS")
@@ -270,24 +249,24 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         scorers["breakout"] = _scorer("breakout", -0.10, -0.005, 0.95, "NO_BREAKOUT_NO_REJECT")
 
     # ==========================
-    # 多周期背离与共振逻辑 (15M & 1H)
+    # 澶氬懆鏈熻儗绂讳笌鍏辨尟閫昏緫 (15M & 1H)
     # ==========================
     
-    # 15M (LTF) 背离状态
+    # 15M (LTF) 鑳岀鐘舵€?
     div_dir = str(ctx.get("sqzmom_divergence_dir", "None"))
-    div_age = _safe_float(ctx.get("sqzmom_divergence_age", 999), 999)
-    div_strength = _safe_float(ctx.get("sqzmom_divergence_strength", 0.0), 0.0)
+    div_age = safe_float(ctx.get("sqzmom_divergence_age", 999), 999)
+    div_strength = safe_float(ctx.get("sqzmom_divergence_strength", 0.0), 0.0)
     
-    # 1H (HTF) 背离状态
+    # 1H (HTF) 鑳岀鐘舵€?
     htf_div_dir = str(macro_ctx.get("sqzmom_divergence_dir", "None"))
-    htf_div_age = _safe_float(macro_ctx.get("sqzmom_divergence_age", 999), 999)
+    htf_div_age = safe_float(macro_ctx.get("sqzmom_divergence_age", 999), 999)
     
-    # 活跃背离判定标准 (18周期内)
+    # 娲昏穬鑳岀鍒ゅ畾鏍囧噯 (18鍛ㄦ湡鍐?
     ltf_active_same = (div_dir == direction and div_age <= 18)
     htf_active_opp = (htf_div_dir in ("Long", "Short") and htf_div_dir != direction and htf_div_age <= 18)
     htf_active_same = (htf_div_dir == direction and htf_div_age <= 18)
 
-    # 1. 1H HTF 背离处理 (挡停与共振)
+    # 1. 1H HTF 鑳岀澶勭悊 (鎸″仠涓庡叡鎸?
     if htf_active_opp:
         is_blocked = True
         block_reason = f"HTF_OPPOSITE_DIV_BLOCK_{htf_div_dir.upper()}"
@@ -299,7 +278,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     else:
         scorers["htf_divergence"] = _scorer("htf_divergence", 0.0, 0.0, 1.0, "HTF_DIVERGENCE_NEUTRAL")
 
-    # 2. 15M LTF 原有背离逻辑
+    # 2. 15M LTF 鍘熸湁鑳岀閫昏緫
     if ltf_active_same:
         freshness = 1.0 if div_age <= 8 else 0.62
         strength_bonus = _clip(div_strength / 25.0, 0.0, 0.35)
@@ -312,7 +291,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
 
     # Regime/Volatility
     if regime == "TREND":
-        trend_aligned = _safe_bool(ctx.get("trend_aligned", False))
+        trend_aligned = safe_bool(ctx.get("trend_aligned", False))
         reg = _scorer("regime", 0.45 if trend_aligned else -0.45, 0.020 if trend_aligned else -0.035, 1.08 if trend_aligned else 0.75, "TREND_ALIGNED" if trend_aligned else "TREND_COUNTER_SOFT")
     elif regime == "TRANSITION":
         reg = _scorer("regime", 0.25, 0.012, 1.08, "TRANSITION_REVERSAL_FRIENDLY")
@@ -329,15 +308,15 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         reg["reason"] += "+HIGH_VOL"
     scorers["regime"] = reg
 
-    # 汇总计算
+    # 姹囨€昏绠?
     total_score = sum(v["score"] for v in scorers.values())
     ev_adjustment = sum(v["ev"] for v in scorers.values())
     
     position_multiplier = 1.0
     for v in scorers.values():
-        position_multiplier *= _safe_float(v.get("position_mult"), 1.0)
+        position_multiplier *= safe_float(v.get("position_mult"), 1.0)
     
-    # 挡停逻辑：如果是 Block 状态，彻底剥夺仓位。
+    # 鎸″仠閫昏緫锛氬鏋滄槸 Block 鐘舵€侊紝褰诲簳鍓ュず浠撲綅銆?
     if is_blocked:
         position_multiplier = 0.0
     else:

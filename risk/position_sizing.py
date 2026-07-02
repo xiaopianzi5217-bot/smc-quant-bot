@@ -10,22 +10,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from utils.safe import safe_float
+
 
 DEFAULT_POSITION_SIZING = {
     "enabled": True,
     "grade_risk_multiplier": {"S": 1.0, "A": 0.5, "B": 0.0, "C": 0.0, "D": 0.0},
     "observe_grades": ["B", "C", "D"],
 }
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None or value == "":
-            return default
-        v = float(value)
-        return default if v != v else v
-    except Exception:
-        return default
 
 
 def _grade_letter(value: Any, default: str = "B") -> str:
@@ -64,7 +56,7 @@ def apply_grade_position_sizing(decision: Optional[Dict[str, Any]], cfg: Optiona
         return decision
 
     grade = _get_grade(decision)
-    multiplier = _safe_float((sizing.get("grade_risk_multiplier") or {}).get(grade), 0.0)
+    multiplier = safe_float((sizing.get("grade_risk_multiplier") or {}).get(grade), 0.0)
     observe_grades = {_grade_letter(x) for x in sizing.get("observe_grades", ["B", "C", "D"])}
 
     decision["position_sizing"] = {
@@ -110,10 +102,10 @@ def fixed_fraction_position_size(
     Returns the legacy keys expected by V6RiskEngine: ``allowed`` and ``qty``.
     Extra fields are included for reporting and downstream sizing.
     """
-    equity_f = _safe_float(equity)
-    entry_f = _safe_float(entry)
-    stop_f = _safe_float(stop_loss)
-    risk_pct = max(0.0, _safe_float(risk_per_trade, 0.01))
+    equity_f = safe_float(equity)
+    entry_f = safe_float(entry)
+    stop_f = safe_float(stop_loss)
+    risk_pct = max(0.0, safe_float(risk_per_trade, 0.01))
 
     if equity_f <= 0 or entry_f <= 0 or stop_f <= 0:
         return {"allowed": False, "qty": 0.0, "reason_cn": "权益/入场价/止损价无效"}
@@ -126,7 +118,7 @@ def fixed_fraction_position_size(
     qty = risk_amount / risk_per_unit if risk_amount > 0 else 0.0
     notional = qty * entry_f
 
-    max_pct = _safe_float(max_position_pct, 0.0) if max_position_pct is not None else 0.0
+    max_pct = safe_float(max_position_pct, 0.0) if max_position_pct is not None else 0.0
     if max_pct > 0:
         max_notional = equity_f * max_pct
         if max_notional > 0 and notional > max_notional:
@@ -171,8 +163,8 @@ def calc_position_size(
             "reason": plan.get("reason_cn", "仓位计算失败"),
         }
 
-    notional = _safe_float(plan.get("notional"), 0.0)
-    min_notional_f = _safe_float(min_notional, 0.0)
+    notional = safe_float(plan.get("notional"), 0.0)
+    min_notional_f = safe_float(min_notional, 0.0)
     if min_notional_f > 0 and notional < min_notional_f:
         return {
             "ok": False,
@@ -183,12 +175,12 @@ def calc_position_size(
             "reason": f"名义价值不足: {round(notional, 4)} < min_notional={min_notional_f}",
         }
 
-    max_notional_f = _safe_float(max_notional, 0.0) if max_notional is not None else 0.0
+    max_notional_f = safe_float(max_notional, 0.0) if max_notional is not None else 0.0
     if max_notional_f > 0 and notional > max_notional_f:
-        size = max_notional_f / _safe_float(entry, 1.0)
+        size = max_notional_f / safe_float(entry, 1.0)
         notional = max_notional_f
     else:
-        size = _safe_float(plan.get("qty"), 0.0)
+        size = safe_float(plan.get("qty"), 0.0)
 
     return {
         "ok": size > 0,
@@ -197,4 +189,40 @@ def calc_position_size(
         "risk_amount": plan.get("risk_amount", 0.0),
         "notional": round(notional, 4),
         "reason": "仓位计算通过" if size > 0 else "仓位为 0",
+    }
+
+
+def kelly_position_size(
+    ev: float,
+    confidence: float,
+    balance: float = 10000.0,
+    max_fraction: float = 0.25,
+) -> Dict[str, Any]:
+    """
+    Kelly Criterion 仓位计算。
+
+    使用半 Kelly + confidence 校准，限制最大仓位。
+    EV <= 0 时返回空仓位。
+    """
+    if ev <= 0:
+        return {
+            "size_pct": 0.0,
+            "risk_usd": 0.0,
+            "kelly_fraction": 0.0,
+            "recommended": False,
+        }
+
+    # 保守估计 R:R = 1.5
+    estimated_rr = 1.5
+    kelly_f = ev / estimated_rr
+
+    # 半 Kelly + confidence 校准
+    position_pct = kelly_f * 0.5 * confidence
+    position_pct = max(0.0, min(position_pct, max_fraction))
+
+    return {
+        "size_pct": round(position_pct, 4),
+        "risk_usd": round(balance * position_pct, 2),
+        "kelly_fraction": round(kelly_f, 4),
+        "recommended": position_pct > 0.005,
     }

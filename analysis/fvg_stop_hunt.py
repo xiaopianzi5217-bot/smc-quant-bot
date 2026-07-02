@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """FVG / Order Block / Stop Hunt detection helpers. 
 This module is deliberately dependency-light and can be used by both live and backtest code. 
 It accepts standard OHLCV pandas DataFrames and returns the same frame with additional columns used by the upgraded entry/exit logic. 
@@ -11,20 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        v = float(value)
-        if np.isnan(v) or np.isinf(v):
-            return default
-        return v
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
-@dataclass
 class Zone:
     kind: str
     direction: str
@@ -112,12 +101,12 @@ def add_fvg_zones(df: pd.DataFrame, min_gap_atr: float = 0.20, atr_col: str = "A
     active: List[Zone] = []
     for i in range(len(out)):
         if i >= 2:
-            h0 = _safe_float(out.iloc[i - 2]["high"])
-            l0 = _safe_float(out.iloc[i - 2]["low"])
-            hi = _safe_float(out.iloc[i]["high"])
-            li = _safe_float(out.iloc[i]["low"])
-            atr = _safe_float(out.iloc[i].get(atr_col), _safe_float(out.iloc[i]["close"]) * 0.006)
-            min_gap = max(atr * min_gap_atr, _safe_float(out.iloc[i]["close"]) * 0.0003)
+            h0 = safe_float(out.iloc[i - 2]["high"])
+            l0 = safe_float(out.iloc[i - 2]["low"])
+            hi = safe_float(out.iloc[i]["high"])
+            li = safe_float(out.iloc[i]["low"])
+            atr = safe_float(out.iloc[i].get(atr_col), safe_float(out.iloc[i]["close"]) * 0.006)
+            min_gap = max(atr * min_gap_atr, safe_float(out.iloc[i]["close"]) * 0.0003)
             if li - h0 >= min_gap:
                 top = li
                 bottom = h0
@@ -127,13 +116,13 @@ def add_fvg_zones(df: pd.DataFrame, min_gap_atr: float = 0.20, atr_col: str = "A
                 bottom = hi
                 active.append(Zone("FVG", "Short", top, bottom, (top + bottom) / 2.0, i))
 
-        close = _safe_float(out.iloc[i]["close"])
-        atr = _safe_float(out.iloc[i].get(atr_col), close * 0.006)
+        close = safe_float(out.iloc[i]["close"])
+        atr = safe_float(out.iloc[i].get(atr_col), close * 0.006)
         fresh: List[Zone] = []
         for z in active[-30:]:
-            if z.direction == "Long" and _safe_float(out.iloc[i]["low"]) <= z.mid:
+            if z.direction == "Long" and safe_float(out.iloc[i]["low"]) <= z.mid:
                 z.mitigated = True
-            if z.direction == "Short" and _safe_float(out.iloc[i]["high"]) >= z.mid:
+            if z.direction == "Short" and safe_float(out.iloc[i]["high"]) >= z.mid:
                 z.mitigated = True
             if not z.mitigated:
                 fresh.append(z)
@@ -155,23 +144,23 @@ def add_order_block_proxy(df: pd.DataFrame, lookback: int = 12, atr_col: str = "
         out[col] = None if col == "ob_direction" else (False if col == "near_ob" else np.nan)
 
     for i in range(lookback, len(out)):
-        close = _safe_float(out.iloc[i]["close"])
-        atr = _safe_float(out.iloc[i].get(atr_col), close * 0.006)
-        body = abs(_safe_float(out.iloc[i]["close"]) - _safe_float(out.iloc[i]["open"]))
+        close = safe_float(out.iloc[i]["close"])
+        atr = safe_float(out.iloc[i].get(atr_col), close * 0.006)
+        body = abs(safe_float(out.iloc[i]["close"]) - safe_float(out.iloc[i]["open"]))
         if body < 0.8 * atr:
             continue
-        impulse_long = _safe_float(out.iloc[i]["close"]) > _safe_float(out.iloc[i]["open"])
-        impulse_short = _safe_float(out.iloc[i]["close"]) < _safe_float(out.iloc[i]["open"])
+        impulse_long = safe_float(out.iloc[i]["close"]) > safe_float(out.iloc[i]["open"])
+        impulse_short = safe_float(out.iloc[i]["close"]) < safe_float(out.iloc[i]["open"])
         if not (impulse_long or impulse_short):
             continue
         target_dir = "Long" if impulse_long else "Short"
         for k in range(i - 1, max(-1, i - lookback - 1), -1):
-            o = _safe_float(out.iloc[k]["open"])
-            c = _safe_float(out.iloc[k]["close"])
+            o = safe_float(out.iloc[k]["open"])
+            c = safe_float(out.iloc[k]["close"])
             opposite = (target_dir == "Long" and c < o) or (target_dir == "Short" and c > o)
             if opposite:
-                top = max(_safe_float(out.iloc[k]["open"]), _safe_float(out.iloc[k]["close"]), _safe_float(out.iloc[k]["high"]))
-                bottom = min(_safe_float(out.iloc[k]["open"]), _safe_float(out.iloc[k]["close"]), _safe_float(out.iloc[k]["low"]))
+                top = max(safe_float(out.iloc[k]["open"]), safe_float(out.iloc[k]["close"]), safe_float(out.iloc[k]["high"]))
+                bottom = min(safe_float(out.iloc[k]["open"]), safe_float(out.iloc[k]["close"]), safe_float(out.iloc[k]["low"]))
                 mid = (top + bottom) / 2.0
                 out.at[out.index[i], "ob_direction"] = target_dir
                 out.at[out.index[i], "ob_top"] = top
@@ -202,15 +191,15 @@ def add_stop_hunt_detection(df: pd.DataFrame, atr_col: str = "ATRr_14", volume_w
     out["stop_hunt_score"] = 0.0
 
     for i in range(3, len(out)):
-        close = _safe_float(out.iloc[i]["close"])
-        low = _safe_float(out.iloc[i]["low"])
-        high = _safe_float(out.iloc[i]["high"])
-        atr = _safe_float(out.iloc[i].get(atr_col), close * 0.006)
-        prev_swing_low = _safe_float(out.iloc[i - 1].get("last_swing_low"), 0.0)
-        prev_swing_high = _safe_float(out.iloc[i - 1].get("last_swing_high"), 0.0)
-        vol_z = _safe_float(out.iloc[i].get("volume_z"), 0.0)
-        wick_down = min(_safe_float(out.iloc[i]["open"]), close) - low
-        wick_up = high - max(_safe_float(out.iloc[i]["open"]), close)
+        close = safe_float(out.iloc[i]["close"])
+        low = safe_float(out.iloc[i]["low"])
+        high = safe_float(out.iloc[i]["high"])
+        atr = safe_float(out.iloc[i].get(atr_col), close * 0.006)
+        prev_swing_low = safe_float(out.iloc[i - 1].get("last_swing_low"), 0.0)
+        prev_swing_high = safe_float(out.iloc[i - 1].get("last_swing_high"), 0.0)
+        vol_z = safe_float(out.iloc[i].get("volume_z"), 0.0)
+        wick_down = min(safe_float(out.iloc[i]["open"]), close) - low
+        wick_up = high - max(safe_float(out.iloc[i]["open"]), close)
         bull = prev_swing_low > 0 and low < prev_swing_low - 0.05 * atr and close > prev_swing_low and wick_down >= 0.35 * atr
         bear = prev_swing_high > 0 and high > prev_swing_high + 0.05 * atr and close < prev_swing_high and wick_up >= 0.35 * atr
         if bull:
@@ -228,9 +217,7 @@ def add_stop_hunt_detection(df: pd.DataFrame, atr_col: str = "ATRr_14", volume_w
 
 def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    【新增】专门用于计算 Squeeze Momentum 以及右侧变白/缩头确认特征。
-    将原本写在 runner.py 中的逻辑下沉到特征工程层，确保实盘/回测逻辑严格一致。
-    """
+    銆愭柊澧炪€戜笓闂ㄧ敤浜庤绠?Squeeze Momentum 浠ュ強鍙充晶鍙樼櫧/缂╁ご纭鐗瑰緛銆?    灏嗗師鏈啓鍦?runner.py 涓殑閫昏緫涓嬫矇鍒扮壒寰佸伐绋嬪眰锛岀‘淇濆疄鐩?鍥炴祴閫昏緫涓ユ牸涓€鑷淬€?    """
     out = df.copy()
     close = out["close"].astype(float)
     
@@ -238,14 +225,12 @@ def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
         bb_mid = close.rolling(20, min_periods=10).mean()
         out["momentum"] = close - bb_mid
         
-    # 提取当前与前一根 Bar 的绝对动量
-    curr_mom = out["momentum"].astype(float)
+    # 鎻愬彇褰撳墠涓庡墠涓€鏍?Bar 鐨勭粷瀵瑰姩閲?    curr_mom = out["momentum"].astype(float)
     prev_mom = curr_mom.shift(1).astype(float)
     
-    # 动态注入右侧衰竭特征变白（当前绝对动量值 <= 前一根Bar的92%）
-    out["sqzmom_white"] = curr_mom.abs() <= (prev_mom.abs() * 0.92)
+    # 鍔ㄦ€佹敞鍏ュ彸渚ц“绔壒寰佸彉鐧斤紙褰撳墠缁濆鍔ㄩ噺鍊?<= 鍓嶄竴鏍笲ar鐨?2%锛?    out["sqzmom_white"] = curr_mom.abs() <= (prev_mom.abs() * 0.92)
     
-    # 简单的动能方向判断
+    # 绠€鍗曠殑鍔ㄨ兘鏂瑰悜鍒ゆ柇
     out["mom_bullish"] = curr_mom > 0
     out["mom_bearish"] = curr_mom < 0
     
@@ -253,7 +238,7 @@ def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_smc_features(df: pd.DataFrame) -> pd.DataFrame:
-    """主特征调度管道，实盘与回测均由此接入"""
+    """涓荤壒寰佽皟搴︾閬擄紝瀹炵洏涓庡洖娴嬪潎鐢辨鎺ュ叆"""
     out = df.copy()
     if "ATRr_14" not in out.columns:
         out = add_true_range_atr(out)
@@ -264,7 +249,7 @@ def prepare_smc_features(df: pd.DataFrame) -> pd.DataFrame:
     out = add_order_block_proxy(out)
     out = add_stop_hunt_detection(out)
     
-    # 【新增】将右侧变白特征检测正式集成到主管道中
+    # 銆愭柊澧炪€戝皢鍙充晶鍙樼櫧鐗瑰緛妫€娴嬫寮忛泦鎴愬埌涓荤閬撲腑
     out = add_sqzmom_features(out)
     
     return out
@@ -275,13 +260,14 @@ def nearest_mitigation_price(row: pd.Series, direction: str) -> Tuple[Optional[f
     candidates: List[Tuple[float, str]] = []
     fvg_dir = str(row.get("fvg_direction") or "")
     if fvg_dir == direction and pd.notna(row.get("fvg_mid")):
-        candidates.append((_safe_float(row.get("fvg_mid")), "FVG_MID"))
+        candidates.append((safe_float(row.get("fvg_mid")), "FVG_MID"))
     ob_dir = str(row.get("ob_direction") or "")
     if ob_dir == direction and pd.notna(row.get("ob_mid")):
         # Long prefers upper edge/mid; Short prefers lower edge/mid. Mid is stable for backtest.
-        candidates.append((_safe_float(row.get("ob_mid")), "OB_MID"))
+        candidates.append((safe_float(row.get("ob_mid")), "OB_MID"))
     if not candidates:
         return None, "NO_FVG_OB"
-    close = _safe_float(row.get("close"))
+    close = safe_float(row.get("close"))
     price, src = min(candidates, key=lambda x: abs(close - x[0]))
     return price, src
+

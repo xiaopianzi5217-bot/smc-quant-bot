@@ -5,33 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        out = float(value)
-        if math.isnan(out) or math.isinf(out):
-            return default
-        return out
-    except Exception:
-        return default
-
-
-def _safe_bool(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "long", "short", "bull", "bear"}
-    try:
-        if value != value:
-            return False
-    except Exception:
-        pass
-    try:
-        return bool(value)
-    except Exception:
-        return False
+from utils.safe import safe_float, safe_bool
 
 
 def _clip(value: float, low: float, high: float) -> float:
@@ -49,7 +23,7 @@ def assign_grade(score: float, setup: str, regime: str) -> str:
 
 def grade_from_expected_value(expected_value: float) -> str:
     """Production grade labels based on EV, not on legacy score."""
-    ev = _safe_float(expected_value, -9.0)
+    ev = safe_float(expected_value, -9.0)
     if ev > 0.25:
         return "A_EV"
     if ev > 0.15:
@@ -94,7 +68,7 @@ def compute_expected_value( win_prob: float, estimated_rr: float, regime: Option
     # 4. score dampening：低分仍降级，高分给轻微释放空间。
     score_penalty = 0.0
     if score is not None:
-        score_v = _safe_float(score, 0.0)
+        score_v = safe_float(score, 0.0)
         if score_v < 50:
             score_penalty = -0.025
         elif score_v < 60:
@@ -189,16 +163,16 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     if ctx is None:
         ctx = {}
 
-    sqz_mult = _safe_float(ctx.get("sqz_mult"), 1.0)
+    sqz_mult = safe_float(ctx.get("sqz_mult"), 1.0)
     regime = str(regime or "").upper()
     vol_state = str(vol_state or "").upper()
 
-    score_raw = _safe_float(signal.get("score_raw"), 0.0)
-    score_norm = _safe_float(signal.get("score"), 0.0)
-    smc = _safe_float(signal.get("smc"), 0.0)
-    sqz = _safe_float(signal.get("sqzmom"), 0.0)
-    brk = _safe_float(signal.get("breakout"), 0.0)
-    raw_base = _safe_float(signal.get("raw_base"), 0.0)
+    score_raw = safe_float(signal.get("score_raw"), 0.0)
+    score_norm = safe_float(signal.get("score"), 0.0)
+    smc = safe_float(signal.get("smc"), 0.0)
+    sqz = safe_float(signal.get("sqzmom"), 0.0)
+    brk = safe_float(signal.get("breakout"), 0.0)
+    raw_base = safe_float(signal.get("raw_base"), 0.0)
 
     raw_term = _clip(score_raw / 42.0, 0.0, 1.0)
     score_term = _clip(score_norm / 100.0, 0.0, 1.0)
@@ -207,15 +181,15 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     brk_term = _clip(brk / 30.0, 0.0, 1.0)
     base_term = _clip(raw_base / 20.0, 0.0, 1.0)
 
-    trend_aligned = _safe_bool(meta.get("trend_aligned", False))
+    trend_aligned = safe_bool(meta.get("trend_aligned", False))
     trend_misaligned = regime == "TREND" and not trend_aligned
-    liquidity_wrong_side = _safe_bool(meta.get("liquidity_wrong_side", False))
-    liquidity_confirmed = _safe_bool(meta.get("liquidity_sweep_confirmed", False))
-    setup_match = _safe_bool(meta.get("setup_direction_match", False))
-    has_any_setup = _safe_bool(meta.get("has_any_setup", False))
-    fallback_active = _safe_bool(signal.get("fallback_active", False))
-    smc_passed = _safe_bool(signal.get("smc_passed", False))
-    breakout_passed = _safe_bool(signal.get("breakout_passed", False))
+    liquidity_wrong_side = safe_bool(meta.get("liquidity_wrong_side", False))
+    liquidity_confirmed = safe_bool(meta.get("liquidity_sweep_confirmed", False))
+    setup_match = safe_bool(meta.get("setup_direction_match", False))
+    has_any_setup = safe_bool(meta.get("has_any_setup", False))
+    fallback_active = safe_bool(signal.get("fallback_active", False))
+    smc_passed = safe_bool(signal.get("smc_passed", False))
+    breakout_passed = safe_bool(signal.get("breakout_passed", False))
 
     reasons: List[str] = []
 
@@ -310,7 +284,7 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     is_tail_regime = False
     if regime == "TREND":
         # 提取底层传上来的动量过热指标
-        sqz_mult = _safe_float(ctx.get("sqz_mult"), 1.0)
+        sqz_mult = safe_float(ctx.get("sqz_mult"), 1.0)
         dominance = str(ctx.get("dominance", "")).upper()
 
         # 触发条件：动量乘数极高(指标超买/超卖区) 或 完全由动量主导的突破

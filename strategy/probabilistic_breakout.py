@@ -1,65 +1,41 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Probabilistic Breakout Engine V1
 
-突破概率评分（0~100），替代旧的 AND gate / binary filter。
-
-设计原则：
-    ✅ 连续概率空间（0→100），非 0/1 二元
-    ✅ 四因子加权：ATR + Volume + Squeeze + Momentum
-    ✅ Regime-aware 动态权重
-    ✅ 每个子模块输出 0~100 分
-
-用法：
-    from strategy.probabilistic_breakout import breakout_probability
+绐佺牬姒傜巼璇勫垎锛?~100锛夛紝鏇夸唬鏃х殑 AND gate / binary filter銆?
+Design principles:    鉁?杩炵画姒傜巼绌洪棿锛?鈫?00锛夛紝闈?0/1 浜屽厓
+    鉁?鍥涘洜瀛愬姞鏉冿細ATR + Volume + Squeeze + Momentum
+    鉁?Regime-aware 鍔ㄦ€佹潈閲?    鉁?姣忎釜瀛愭ā鍧楄緭鍑?0~100 鍒?
+鐢ㄦ硶锛?    from strategy.probabilistic_breakout import breakout_probability
     bp = breakout_probability(ctx)
     breakout_score = bp["breakout_prob"]  # 0~100
     if breakout_score >= 60:
-        # 突破信号
+        # 绐佺牬淇″彿
 """
 
 from __future__ import annotations
 from typing import Any, Dict
 import math
 
-
-def _safe_float(v: Any, default: float = 0.0) -> float:
-    try:
-        if v is None:
-            return default
-        out = float(v)
-        return default if math.isnan(out) or math.isinf(out) else out
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
-def _safe_str(v: Any, default: str = "") -> str:
-    try:
-        if v is None:
-            return default
-        return str(v)
-    except Exception:
-        return default
+
+
+
 
 
 # ============================================================
-# 子模块 1：ATR 波动释放评分（0~100）
-# ============================================================
+# 瀛愭ā鍧?1锛欰TR 娉㈠姩閲婃斁璇勫垎锛?~100锛?# ============================================================
 def _atr_score(ctx: Dict[str, Any]) -> float:
     """
-    ATR 波动释放评分（0~100）
+    ATR 娉㈠姩閲婃斁璇勫垎锛?~100锛?    
+    Input:    - atr_pct: ATR / Close 鐧惧垎姣?    - 鎴?atr / close 璁＄畻
     
-    输入：
-    - atr_pct: ATR / Close 百分比
-    - 或 atr / close 计算
-    
-    评分：
-    - > 3.0%: 90（极端波动）
-    - > 2.0%: 70（高波动）
-    - > 1.0%: 50（正常波动）
-    - <= 1.0%: 30（低波动）
-    """
-    atr_pct = _safe_float(ctx.get("atr_pct", 0.0))
+    璇勫垎锛?    - > 3.0%: 90锛堟瀬绔尝鍔級
+    - > 2.0%: 70锛堥珮娉㈠姩锛?    - > 1.0%: 50锛堟甯告尝鍔級
+    - <= 1.0%: 30锛堜綆娉㈠姩锛?    """
+    atr_pct = safe_float(ctx.get("atr_pct", 0.0))
     if atr_pct > 0.03:
         return 90.0
     elif atr_pct > 0.02:
@@ -71,22 +47,16 @@ def _atr_score(ctx: Dict[str, Any]) -> float:
 
 
 # ============================================================
-# 子模块 2：Volume 量能评分（0~100）
-# ============================================================
+# 瀛愭ā鍧?2锛歏olume 閲忚兘璇勫垎锛?~100锛?# ============================================================
 def _volume_score(ctx: Dict[str, Any]) -> float:
     """
-    Volume 量能评分（0~100）
-    
-    输入：
-    - volume_ratio: 当前量 / 20日均量
-    
-    评分：
-    - > 1.5: 90（巨量爆发）
-    - > 1.2: 70（放量）
-    - > 1.0: 50（正常量）
-    - <= 1.0: 30（缩量）
+    Volume 閲忚兘璇勫垎锛?~100锛?    
+    Input:    - volume_ratio: 褰撳墠閲?/ 20鏃ュ潎閲?    
+    璇勫垎锛?    - > 1.5: 90锛堝法閲忕垎鍙戯級
+    - > 1.2: 70锛堟斁閲忥級
+    - > 1.0: 50锛堟甯搁噺锛?    - <= 1.0: 30锛堢缉閲忥級
     """
-    vol = _safe_float(ctx.get("volume_ratio", 1.0))
+    vol = safe_float(ctx.get("volume_ratio", 1.0))
     if vol > 1.5:
         return 90.0
     elif vol > 1.2:
@@ -98,23 +68,17 @@ def _volume_score(ctx: Dict[str, Any]) -> float:
 
 
 # ============================================================
-# 子模块 3：Squeeze 压缩释放评分（0~100）
-# ============================================================
+# 瀛愭ā鍧?3锛歋queeze 鍘嬬缉閲婃斁璇勫垎锛?~100锛?# ============================================================
 def _squeeze_score(ctx: Dict[str, Any]) -> float:
     """
-    Squeeze 压缩释放评分（0~100）
+    Squeeze 鍘嬬缉閲婃斁璇勫垎锛?~100锛?    
+    Input:    - squeeze: "tight" / "mid" / "none"锛堝瓧绗︿覆锛?    - 鎴?squeeze_level: 3 / 2 / 1 / 0锛堟暣鏁帮級
     
-    输入：
-    - squeeze: "tight" / "mid" / "none"（字符串）
-    - 或 squeeze_level: 3 / 2 / 1 / 0（整数）
-    
-    评分：
-    - tight / level >= 3: 85（深度压缩）
-    - mid / level == 2: 60（中度压缩）
-    - none / level <= 1: 40（无压缩）
-    """
-    squeeze = _safe_str(ctx.get("squeeze", "none")).lower()
-    squeeze_level = int(_safe_float(ctx.get("squeeze_level", 0), 0))
+    璇勫垎锛?    - tight / level >= 3: 85锛堟繁搴﹀帇缂╋級
+    - mid / level == 2: 60锛堜腑搴﹀帇缂╋級
+    - none / level <= 1: 40锛堟棤鍘嬬缉锛?    """
+    squeeze = safe_str(ctx.get("squeeze", "none")).lower()
+    squeeze_level = int(safe_float(ctx.get("squeeze_level", 0), 0))
     
     if squeeze == "tight" or squeeze_level >= 3:
         return 85.0
@@ -125,54 +89,40 @@ def _squeeze_score(ctx: Dict[str, Any]) -> float:
 
 
 # ============================================================
-# 子模块 4：Momentum 方向动量评分（0~100）
-# ============================================================
+# 瀛愭ā鍧?4锛歁omentum 鏂瑰悜鍔ㄩ噺璇勫垎锛?~100锛?# ============================================================
 def _momentum_score(ctx: Dict[str, Any]) -> float:
     """
-    Momentum 方向动量评分（0~100）
-    
-    输入：
-    - sqzmom_score: 0~44（来自 _sqzmom_context_score）
-    
-    评分：
-    - 直接映射 sqzmom_score 到 0~100
-    - sqzmom_score 范围 0~44，乘以 100/44 ≈ 2.27
+    Momentum 鏂瑰悜鍔ㄩ噺璇勫垎锛?~100锛?    
+    Input:    - sqzmom_score: 0~44锛堟潵鑷?_sqzmom_context_score锛?    
+    璇勫垎锛?    - 鐩存帴鏄犲皠 sqzmom_score 鍒?0~100
+    - sqzmom_score 鑼冨洿 0~44锛屼箻浠?100/44 鈮?2.27
     """
-    sqz = _safe_float(ctx.get("sqzmom_score", 0.0))
+    sqz = safe_float(ctx.get("sqzmom_score", 0.0))
     return min(max(sqz * (100.0 / 44.0), 0.0), 100.0)
 
 
 # ============================================================
-# 主函数：breakout_probability
+# 涓诲嚱鏁帮細breakout_probability
 # ============================================================
 def breakout_probability(ctx: Dict[str, Any]) -> Dict[str, Any]:
     """
     Probabilistic Breakout Engine V1
     
-    四因子加权评分，输出突破概率（0~100）。
-    
-    权重根据市场状态动态调整：
+    鍥涘洜瀛愬姞鏉冭瘎鍒嗭紝杈撳嚭绐佺牬姒傜巼锛?~100锛夈€?    
+    鏉冮噸鏍规嵁甯傚満鐘舵€佸姩鎬佽皟鏁达細
     - trend:      ATR=0.3, Vol=0.2, Squeeze=0.2, Mom=0.3
     - transition: ATR=0.25, Vol=0.25, Squeeze=0.25, Mom=0.25
     - mud:        ATR=0.2, Vol=0.3, Squeeze=0.2, Mom=0.3
     
-    参数:
-        ctx: 上下文字典，需包含：
-            - atr_pct (float): ATR / Close
-            - volume_ratio (float): 量比
-            - squeeze (str) 或 squeeze_level (int): 压缩状态
-            - sqzmom_score (float): SQZMOM 原始分
-            - regime (str): 市场状态
-    
-    返回:
+    鍙傛暟:
+        ctx: 涓婁笅鏂囧瓧鍏革紝闇€鍖呭惈锛?            - atr_pct (float): ATR / Close
+            - volume_ratio (float): 閲忔瘮
+            - squeeze (str) 鎴?squeeze_level (int): 鍘嬬缉鐘舵€?            - sqzmom_score (float): SQZMOM 鍘熷鍒?            - regime (str): 甯傚満鐘舵€?    
+    杩斿洖:
         {
-            "breakout_prob": float,     # 0~100 突破概率
+            "breakout_prob": float,     # 0~100 绐佺牬姒傜巼
             "components": {
-                "atr": float,           # ATR 分
-                "volume": float,        # 量能分
-                "squeeze": float,       # 压缩分
-                "momentum": float       # 动量分
-            },
+                "atr": float,           # ATR 鍒?                "volume": float,        # 閲忚兘鍒?                "squeeze": float,       # 鍘嬬缉鍒?                "momentum": float       # 鍔ㄩ噺鍒?            },
             "weights": {
                 "atr": float,
                 "volume": float,
@@ -181,14 +131,14 @@ def breakout_probability(ctx: Dict[str, Any]) -> Dict[str, Any]:
             }
         }
     """
-    # 1. 计算各子模块分数
+    # 1. 璁＄畻鍚勫瓙妯″潡鍒嗘暟
     atr = _atr_score(ctx)
     vol = _volume_score(ctx)
     squeeze = _squeeze_score(ctx)
     momentum = _momentum_score(ctx)
 
     # 2. Regime-aware 动态权重
-    regime = _safe_str(ctx.get("regime", "trend")).lower()
+    regime = safe_str(ctx.get("regime", "trend")).lower()
     if regime == "trend":
         w_atr, w_vol, w_sqz, w_mom = 0.3, 0.2, 0.2, 0.3
     elif regime == "transition":
@@ -196,7 +146,7 @@ def breakout_probability(ctx: Dict[str, Any]) -> Dict[str, Any]:
     else:  # mud
         w_atr, w_vol, w_sqz, w_mom = 0.2, 0.3, 0.2, 0.3
 
-    # 3. 加权求和
+    # 3. 鍔犳潈姹傚拰
     prob = (
         atr * w_atr +
         vol * w_vol +
@@ -219,3 +169,4 @@ def breakout_probability(ctx: Dict[str, Any]) -> Dict[str, Any]:
             "momentum": w_mom,
         },
     }
+

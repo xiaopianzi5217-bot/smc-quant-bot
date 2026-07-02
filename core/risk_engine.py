@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Centralized pre-trade risk helpers used by backtest/execution."""
 from __future__ import annotations
 
@@ -6,20 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 import math
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        out = float(value)
-        if math.isnan(out) or math.isinf(out):
-            return default
-        return out
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
-@dataclass(frozen=True)
 class CostRiskDecision:
     allow: bool
     reason: str
@@ -43,9 +32,9 @@ class PreTradeRiskEngine:
         self.hard_cost_ceiling_r = float(hard_cost_ceiling_r)
 
     def evaluate_transaction_cost(self, cost_r: float, atr_now: float, avg_atr: float) -> CostRiskDecision:
-        cost_r = _safe_float(cost_r, 0.0)
-        atr_now = max(_safe_float(atr_now, 0.0), 1e-12)
-        avg_atr = max(_safe_float(avg_atr, atr_now), 1e-12)
+        cost_r = safe_float(cost_r, 0.0)
+        atr_now = max(safe_float(atr_now, 0.0), 1e-12)
+        avg_atr = max(safe_float(avg_atr, atr_now), 1e-12)
 
         atr_regime_ratio = max(0.35, min(2.50, atr_now / avg_atr))
         adaptive_ceiling = max(0.22, min(1.35, self.base_cost_ceiling_r * atr_regime_ratio))
@@ -83,3 +72,4 @@ class PreTradeRiskEngine:
             hard_cost_ceiling_r=round(float(self.hard_cost_ceiling_r), 4),
             would_have_been_rejected_by_fixed_firewall=fixed_firewall_reject,
         )
+

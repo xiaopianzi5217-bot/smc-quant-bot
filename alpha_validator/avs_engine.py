@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Alpha Validity Score (AVS) engine.
 
@@ -25,20 +25,9 @@ import math
 
 import pandas as pd
 
+from utils.safe import safe_float, safe_bool, safe_str
 
 EPS = 1e-12
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        out = float(value)
-        if math.isnan(out) or math.isinf(out):
-            return default
-        return out
-    except Exception:
-        return default
 
 
 def _pf_from_pnl(pnl: pd.Series) -> float:
@@ -188,10 +177,10 @@ class AlphaValidationEngine:
         fake_clusters, fragile_clusters, cluster_table = self.detect_fake_clusters()
         true_regimes, regime_table = self.detect_true_edge_regimes()
 
-        temporal_score = _safe_float(temporal.get("score"), 0.0)
-        regime_score = _safe_float(regimes.get("score"), 0.0)
-        perturb_score = _safe_float(perturb.get("score"), 0.0)
-        independence_score = _safe_float(independence.get("score"), 0.0)
+        temporal_score = safe_float(temporal.get("score"), 0.0)
+        regime_score = safe_float(regimes.get("score"), 0.0)
+        perturb_score = safe_float(perturb.get("score"), 0.0)
+        independence_score = safe_float(independence.get("score"), 0.0)
         avs_score = max(0.0, min(1.0, 0.25 * temporal_score + 0.25 * regime_score + 0.25 * perturb_score + 0.25 * independence_score))
         overfit_score = round(1.0 - avs_score, 4)
 
@@ -310,15 +299,15 @@ class AlphaValidationEngine:
             st = _stats(s)
             st["split"] = idx
             rows.append(st)
-            pf = _safe_float(st.get("pf"), 0.0)
+            pf = safe_float(st.get("pf"), 0.0)
             if pf < 1.0:
                 failing += 1
             if pf < 100:
                 pfs.append(pf)
         if not rows:
             return {"score": 0.0, "failing_splits": 0, "splits": []}
-        positive_ratio = sum(1 for r in rows if _safe_float(r.get("total_r"), 0.0) > 0) / max(1, len(rows))
-        pf_floor_score = sum(1 for r in rows if _safe_float(r.get("pf"), 0.0) >= self.config.weak_pf_floor) / max(1, len(rows))
+        positive_ratio = sum(1 for r in rows if safe_float(r.get("total_r"), 0.0) > 0) / max(1, len(rows))
+        pf_floor_score = sum(1 for r in rows if safe_float(r.get("pf"), 0.0) >= self.config.weak_pf_floor) / max(1, len(rows))
         dispersion_penalty = 0.0
         if len(pfs) >= 2:
             mean_pf = sum(pfs) / len(pfs)
@@ -366,8 +355,8 @@ class AlphaValidationEngine:
 
     def perturbation_stress(self) -> Dict[str, Any]:
         base = _stats(self.df)
-        base_pf = _safe_float(base.get("pf"), 0.0)
-        base_total = _safe_float(base.get("total_r"), 0.0)
+        base_pf = safe_float(base.get("pf"), 0.0)
+        base_total = safe_float(base.get("total_r"), 0.0)
         scenarios: Dict[str, Dict[str, Any]] = {"base": base}
 
         if "raw_pnl_r" in self.df.columns and "cost_r" in self.df.columns:
@@ -395,8 +384,8 @@ class AlphaValidationEngine:
             tmp["pnl_r"] = tmp["pnl_r"].clip(upper=cap)
             scenarios["top_tail_clipped_p90"] = _stats(tmp)
 
-        stressed_pfs = [_safe_float(v.get("pf"), 0.0) for k, v in scenarios.items() if k != "base"]
-        stressed_totals = [_safe_float(v.get("total_r"), 0.0) for k, v in scenarios.items() if k != "base"]
+        stressed_pfs = [safe_float(v.get("pf"), 0.0) for k, v in scenarios.items() if k != "base"]
+        stressed_totals = [safe_float(v.get("total_r"), 0.0) for k, v in scenarios.items() if k != "base"]
         if not stressed_pfs:
             score = 0.45
         else:
@@ -408,7 +397,7 @@ class AlphaValidationEngine:
         return {
             "score": round(float(max(0.0, min(1.0, score))), 4),
             "base_pf": round(base_pf, 4),
-            "high_cost_pf": round(_safe_float(scenarios.get("cost_x_1.5", {}).get("pf"), base_pf), 4),
+            "high_cost_pf": round(safe_float(scenarios.get("cost_x_1.5", {}).get("pf"), base_pf), 4),
             "scenarios": scenarios,
         }
 
@@ -475,9 +464,9 @@ class AlphaValidationEngine:
                 fake.append(st)
             elif label == "FRAGILE_ALPHA":
                 fragile.append(st)
-        rows = sorted(rows, key=lambda x: (x.get("label") != "CANDIDATE_TRUE_ALPHA", -_safe_float(x.get("total_r"), 0.0)))
-        fake = sorted(fake, key=lambda x: (_safe_float(x.get("pf"), 0.0), -int(x.get("trades", 0))))
-        fragile = sorted(fragile, key=lambda x: -_safe_float(x.get("profit_share"), 0.0))
+        rows = sorted(rows, key=lambda x: (x.get("label") != "CANDIDATE_TRUE_ALPHA", -safe_float(x.get("total_r"), 0.0)))
+        fake = sorted(fake, key=lambda x: (safe_float(x.get("pf"), 0.0), -int(x.get("trades", 0))))
+        fragile = sorted(fragile, key=lambda x: -safe_float(x.get("profit_share"), 0.0))
         return fake, fragile, rows
 
     def detect_true_edge_regimes(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -506,7 +495,7 @@ class AlphaValidationEngine:
             else:
                 st["edge_label"] = "NEUTRAL_OR_INSUFFICIENT"
             rows.append(st)
-        return sorted(true_edges, key=lambda x: -_safe_float(x.get("total_r"), 0.0)), sorted(rows, key=lambda x: -_safe_float(x.get("total_r"), 0.0))
+        return sorted(true_edges, key=lambda x: -safe_float(x.get("total_r"), 0.0)), sorted(rows, key=lambda x: -safe_float(x.get("total_r"), 0.0))
 
     @staticmethod
     def _verdict(avs: float) -> str:
@@ -528,3 +517,4 @@ def run_alpha_validation(trades_df: pd.DataFrame, output_dir: str | Path = "outp
     except Exception as exc:  # keep backtests alive even if report writing fails
         report["save_error"] = f"{type(exc).__name__}: {exc}"
     return report
+

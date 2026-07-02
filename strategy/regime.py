@@ -30,3 +30,25 @@ def detect_market_regime(df):
             volatility = 'normal'
 
     return {'regime': regime, 'squeeze': squeeze, 'volatility': volatility, 'adx': float(adx) if not pd.isna(adx) else 0.0, 'atr_ratio': atr_ratio}
+
+
+# ------------------------------------------------------------------
+#  Regime 乘数映射（供 DecisionKernel 等模块统一调用）
+# ------------------------------------------------------------------
+REGIME_MULTIPLIERS = {
+    "trend": 1.3,
+    "transition": 1.0,
+    "mud": 0.7,
+}
+VOLATILITY_MULTIPLIERS = {
+    "high": 0.6,
+    "normal": 1.0,
+    "low": 1.1,
+}
+
+
+def get_regime_multiplier(regime: str, volatility: str = "normal") -> float:
+    """获取环境综合仓位乘数"""
+    base = REGIME_MULTIPLIERS.get(regime, 1.0)
+    vol = VOLATILITY_MULTIPLIERS.get(volatility, 1.0)
+    return round(base * vol, 3)

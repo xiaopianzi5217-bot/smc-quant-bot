@@ -1,0 +1,2 @@
+{"timestamp": "2026-07-03T01:07:08.814635", "symbol": "ETH/USDT", "reason": "LOW_EV", "feature_hash": "B48B6B86", "ev": 0.02, "confidence": 0.3921, "extra": {"score": 0.4, "direction": "LONG", "regime": "CHOP", "confidence": 0.3921, "reasons": ["REGIME_MATCH"]}}
+{"timestamp": "2026-07-03T01:07:08.815636", "symbol": "SOL/USDT", "reason": "LOW_CONFIDENCE", "feature_hash": "513A5FE2", "ev": 0.15, "confidence": 0.3032, "extra": {"score": 0.55, "direction": "LONG", "regime": "TREND", "confidence": 0.3032}}

@@ -1,9 +1,10 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Audit and summarize Strategy filter decisions."""
 import csv
 import json
 from pathlib import Path
 
+from utils.safe import safe_float, safe_bool, safe_str
 FIELDS = [
     "timestamp", "symbol", "bar_index", "price", "direction", "grade", "approved",
     "state", "blocked_by", "reason", "rr", "volume_ratio", "atr_pct", "near_structure_atr",
@@ -11,7 +12,7 @@ FIELDS = [
 ]
 
 
-def _safe_float(x, default=0.0):
+def safe_float(x, default=0.0):
     try:
         if x is None:
             return default
@@ -43,7 +44,7 @@ def _grade(decision):
 
 def _rr(decision):
     risk_plan = (decision or {}).get("risk_plan") or {}
-    return _safe_float(risk_plan.get("rr"), 0.0)
+    return safe_float(risk_plan.get("rr"), 0.0)
 
 
 def _first_blocked_filter(strategy_filters):
@@ -56,7 +57,7 @@ def _first_blocked_filter(strategy_filters):
 def _metric(strategy_filters, filter_name, metric_name, default=0.0):
     for item in (strategy_filters or {}).get("results", []):
         if item.get("filter") == filter_name:
-            return _safe_float((item.get("metrics") or {}).get(metric_name), default)
+            return safe_float((item.get("metrics") or {}).get(metric_name), default)
     return default
 
 
@@ -71,11 +72,11 @@ class FilterAuditLogger:
     def record(self, symbol, curr, decision, future_price=None, future_r=None):
         decision = decision or {}
         sf = decision.get("strategy_filters") or {}
-        price = _safe_float(_get(curr, "close"), 0.0)
+        price = safe_float(_get(curr, "close"), 0.0)
         future_return = 0.0
         if future_price is not None and price > 0:
             direction = str(_direction(decision)).title()
-            fp = _safe_float(future_price, 0.0)
+            fp = safe_float(future_price, 0.0)
             if direction == "Long":
                 future_return = (fp - price) / price
             elif direction == "Short":
@@ -97,7 +98,7 @@ class FilterAuditLogger:
             "near_structure_atr": _metric(sf, "structure_distance", "near_atr"),
             "opposite_structure_atr": _metric(sf, "structure_distance", "opposite_atr"),
             "future_return": future_return,
-            "future_r": _safe_float(future_r, 0.0),
+            "future_r": safe_float(future_r, 0.0),
             "raw_json": json.dumps(decision, ensure_ascii=False, default=str),
         }
         with self.path.open("a", newline="", encoding="utf-8") as f:
@@ -106,9 +107,7 @@ class FilterAuditLogger:
 
     def log(self, *args, **kwargs):
         """
-        向后兼容别名：解决外部调用 .log() 导致的 AttributeError 报错。
-        将所有传给 log() 的参数无缝路由至实际工作的 record() 方法中。
-        """
+        鍚戝悗鍏煎鍒悕锛氳В鍐冲閮ㄨ皟鐢?.log() 瀵艰嚧鐨?AttributeError 鎶ラ敊銆?        灏嗘墍鏈変紶缁?log() 鐨勫弬鏁版棤缂濊矾鐢辫嚦瀹為檯宸ヤ綔鐨?record() 鏂规硶涓€?        """
         return self.record(*args, **kwargs)
 
 
@@ -124,8 +123,8 @@ def summarize_filter_audit(path="reports/filter_audit.csv", output_path="reports
         blocked_by = r.get("blocked_by") or "approved_or_no_filter"
         d = by_filter.setdefault(blocked_by, {"count": 0, "future_return_sum": 0.0, "future_r_sum": 0.0})
         d["count"] += 1
-        d["future_return_sum"] += _safe_float(r.get("future_return"), 0.0)
-        d["future_r_sum"] += _safe_float(r.get("future_r"), 0.0)
+        d["future_return_sum"] += safe_float(r.get("future_return"), 0.0)
+        d["future_r_sum"] += safe_float(r.get("future_r"), 0.0)
     for d in by_filter.values():
         n = max(1, d["count"])
         d["block_rate"] = d["count"] / max(1, total)
@@ -139,12 +138,12 @@ def summarize_filter_audit(path="reports/filter_audit.csv", output_path="reports
 
 
 # ==========================================
-# 补充：暴露给外部直接调用的 wrapper 函数
+# 琛ュ厖锛氭毚闇茬粰澶栭儴鐩存帴璋冪敤鐨?wrapper 鍑芥暟
 # ==========================================
 _default_logger = FilterAuditLogger()
 
 def record_filter_audit(symbol, curr, decision, future_price=None, future_r=None):
     """
-    提供给 v9_decision_kernel.py 调用的接口
-    """
+    鎻愪緵缁?v9_decision_kernel.py 璋冪敤鐨勬帴鍙?    """
     return _default_logger.record(symbol, curr, decision, future_price, future_r)
+

@@ -32,95 +32,37 @@ import math
 
 from strategy.probabilistic_breakout import breakout_probability
 
-
 # ============================================================
 # Dominance 平滑状态（全局）
 # ============================================================
-# 存储最近 N 根 K 线的 dominance 类型，用于平滑判断
-# 避免在震荡行情中 momentum/structure 反复跳变
 _DOMINANCE_HISTORY: List[str] = []
-_DOMINANCE_HISTORY_MAXLEN = 5  # 保留最近 5 根 K 线的 dominance
+_DOMINANCE_HISTORY_MAXLEN = 5
 
 
 def _smooth_dominance(raw_dominance: str) -> str:
-    """
-    对 dominance 做滑动平均平滑。
-    
-    规则：
-    - 将当前 raw_dominance 加入历史队列
-    - 如果历史队列中某种 dominance 占比 >= 60%（5 根中 >= 3 根），则输出该类型
-    - 否则保持上一根 K 线的 dominance（惯性）
-    
-    这能防止在震荡行情中 momentum/structure 反复跳变，
-    确保权重切换的连贯性。
-    """
     global _DOMINANCE_HISTORY
-    
-    # 加入当前值
     _DOMINANCE_HISTORY.append(raw_dominance)
     if len(_DOMINANCE_HISTORY) > _DOMINANCE_HISTORY_MAXLEN:
         _DOMINANCE_HISTORY.pop(0)
-    
-    # 统计各类型出现次数
     counts = {"momentum": 0, "structure": 0, "balanced": 0}
     for d in _DOMINANCE_HISTORY:
         if d in counts:
             counts[d] += 1
-    
     total = len(_DOMINANCE_HISTORY)
-    
-    # 如果某种类型占比 >= 60%，输出该类型
     for dom_type, count in counts.items():
         if count / total >= 0.6:
             return dom_type
-    
-    # 否则保持惯性：返回上一根 K 线的 dominance
     if len(_DOMINANCE_HISTORY) >= 2:
         return _DOMINANCE_HISTORY[-2]
-    
-    # 历史不足 2 根，直接返回当前值
     return raw_dominance
 
 
 def reset_dominance_history() -> None:
-    """重置 dominance 历史（用于回测开始或切换周期时）"""
     global _DOMINANCE_HISTORY
     _DOMINANCE_HISTORY = []
 
 
-def _safe_float(v: Any, default: float = 0.0) -> float:
-    try:
-        if v is None:
-            return default
-        out = float(v)
-        return default if math.isnan(out) or math.isinf(out) else out
-    except Exception:
-        return default
-
-
-def _safe_bool(v: Any) -> bool:
-    if v is None:
-        return False
-    if isinstance(v, str):
-        return v.strip().lower() in {"1", "true", "yes", "y", "long", "short", "bull", "bear"}
-    try:
-        if v != v:  # NaN/NaT should be False
-            return False
-    except Exception:
-        pass
-    try:
-        return bool(v)
-    except Exception:
-        return False
-
-
-def _safe_str(v: Any, default: str = "") -> str:
-    try:
-        if v is None:
-            return default
-        return str(v)
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
 # ============================================================
@@ -136,17 +78,17 @@ def _smc_score(ctx: Dict[str, Any]) -> float:
     # 维度 1：Zone Quality（权重 40%）
     # 连续评分：has_valid_zone(0/25) + liquidity_sweep(0/15) + ob_strength(0~10) + zone_near(0~8) + fvg_bonus(0~8)
     zone = 0.0
-    if _safe_bool(ctx.get("has_valid_zone", False)):
+    if safe_bool(ctx.get("has_valid_zone", False)):
         zone += 25.0
-    if _safe_bool(ctx.get("liquidity_sweep", ctx.get("liquidity_sweep_confirmed", False))):
+    if safe_bool(ctx.get("liquidity_sweep", ctx.get("liquidity_sweep_confirmed", False))):
         zone += 15.0
-    ob_strength = _safe_float(ctx.get("ob_strength", 0.0))
+    ob_strength = safe_float(ctx.get("ob_strength", 0.0))
     zone += min(10.0, ob_strength * 15.0)  # 连续：0~0.67 → 0~10
-    zone_near = _safe_float(ctx.get("zone_near_atr", 9.99))
+    zone_near = safe_float(ctx.get("zone_near_atr", 9.99))
     if zone_near < 1.5:
         zone += max(0.0, 8.0 * (1.0 - zone_near / 1.5))  # 连续：near=0→+8, near=1.5→0
     # 【修复20260701】FVG 失衡区加分：方向匹配的 FVG 额外 +5~8 分
-    direction = _safe_str(ctx.get("direction", "")).lower()
+    direction = safe_str(ctx.get("direction", "")).lower()
     bullish_fvg = ctx.get("bullish_fvg")
     bearish_fvg = ctx.get("bearish_fvg")
     if direction == "long" and bullish_fvg is not None and float(bullish_fvg) > 0:
@@ -157,41 +99,41 @@ def _smc_score(ctx: Dict[str, Any]) -> float:
     # V38: 兼容上游 SMC 质量特征。旧版只看 FVG/OB/sweep，
     # 在没有显式 zone 字段时会把大量真实结构误判为 SMC=0。
     # 这里把 smc_quality_100 映射成结构支撑分，但仍作为连续评分，不做硬拒绝。
-    smc_quality_100 = _safe_float(ctx.get("smc_quality_100", ctx.get("smc_quality_score", 0.0)), 0.0)
+    smc_quality_100 = safe_float(ctx.get("smc_quality_100", ctx.get("smc_quality_score", 0.0)), 0.0)
     if smc_quality_100 > 0:
         zone = max(zone, min(40.0, smc_quality_100 * 0.40))
     zone = min(zone, 40.0)
 
     # 维度 2：Mitigation Strength（权重 30%）
     mitigation = 0.0
-    fill_ratio = _safe_float(ctx.get("wick_fill_ratio", ctx.get("fill_ratio", 0.0)))
+    fill_ratio = safe_float(ctx.get("wick_fill_ratio", ctx.get("fill_ratio", 0.0)))
     mitigation += min(15.0, fill_ratio * 20.0)  # 连续：0~0.75 → 0~15
-    mitigation_src = _safe_str(ctx.get("mitigation_src", "NO_FVG_OB"))
+    mitigation_src = safe_str(ctx.get("mitigation_src", "NO_FVG_OB"))
     if mitigation_src != "NO_FVG_OB":
         mitigation += 10.0
-    if _safe_bool(ctx.get("retest_confirmed", False)):
+    if safe_bool(ctx.get("retest_confirmed", False)):
         mitigation += 5.0
-    body_pct = _safe_float(ctx.get("body_pct", 0.0))
+    body_pct = safe_float(ctx.get("body_pct", 0.0))
     mitigation += max(0.0, min(5.0, (body_pct - 0.3) * 40.0))  # 连续：0.3→0, 0.425→5
     mitigation = min(mitigation, 30.0)
 
     # 维度 3：Structure Alignment（权重 30%）
     alignment = 0.0
-    direction = _safe_str(ctx.get("direction", "")).lower()
-    htf_direction = _safe_str(ctx.get("htf_direction", "")).lower()
+    direction = safe_str(ctx.get("direction", "")).lower()
+    htf_direction = safe_str(ctx.get("htf_direction", "")).lower()
     if htf_direction and direction:
         if htf_direction == direction:
             alignment += 15.0
         else:
             alignment -= 5.0
-    if _safe_bool(ctx.get("sweep_direction_match", False)):
+    if safe_bool(ctx.get("sweep_direction_match", False)):
         alignment += 10.0
-    if _safe_bool(ctx.get("momentum_align", False)):
+    if safe_bool(ctx.get("momentum_align", False)):
         alignment += 5.0
-    if _safe_bool(ctx.get("sqzmom_dmi_aligned", ctx.get("dmi_aligned", False))):
+    if safe_bool(ctx.get("sqzmom_dmi_aligned", ctx.get("dmi_aligned", False))):
         alignment += 5.0
-    regime = _safe_str(ctx.get("regime", "mud"))
-    trend_dir = _safe_str(ctx.get("trend_direction", "None")).lower()
+    regime = safe_str(ctx.get("regime", "mud"))
+    trend_dir = safe_str(ctx.get("trend_direction", "None")).lower()
     if regime == "trend" and trend_dir == direction:
         alignment += 5.0
     alignment = min(alignment, 30.0)
@@ -212,7 +154,7 @@ def _sqzmom_score(ctx: Dict[str, Any]) -> float:
     - sqzmom_score（0~44）：来自 _sqzmom_context_score 的原始分数
     - 映射到 0~30 分
     """
-    sqzmom_raw = _safe_float(ctx.get("sqzmom_score", 0.0), 0.0)
+    sqzmom_raw = safe_float(ctx.get("sqzmom_score", 0.0), 0.0)
     score = (sqzmom_raw / 44.0) * 30.0
     return max(0.0, min(30.0, score))
 
@@ -246,10 +188,10 @@ def _raw_base_score(ctx: Dict[str, Any]) -> float:
     score = 0.0
     
     # 1. 价格位置（0~8）
-    direction = _safe_str(ctx.get("direction", "")).lower()
-    close = _safe_float(ctx.get("close", 0.0))
-    ema20 = _safe_float(ctx.get("ema_20", 0.0))
-    ema50 = _safe_float(ctx.get("ema_50", 0.0))
+    direction = safe_str(ctx.get("direction", "")).lower()
+    close = safe_float(ctx.get("close", 0.0))
+    ema20 = safe_float(ctx.get("ema_20", 0.0))
+    ema50 = safe_float(ctx.get("ema_50", 0.0))
     
     if direction == "long":
         if close > ema20:
@@ -263,15 +205,15 @@ def _raw_base_score(ctx: Dict[str, Any]) -> float:
             score += 4.0
     
     # 2. 动量方向（0~6）
-    momentum = _safe_float(ctx.get("momentum", 0.0))
+    momentum = safe_float(ctx.get("momentum", 0.0))
     if direction == "long" and momentum > 0:
         score += 6.0
     elif direction == "short" and momentum < 0:
         score += 6.0
     
     # 3. DMI 方向（0~6）
-    plus_di = _safe_float(ctx.get("plus_di", 0.0))
-    minus_di = _safe_float(ctx.get("minus_di", 0.0))
+    plus_di = safe_float(ctx.get("plus_di", 0.0))
+    minus_di = safe_float(ctx.get("minus_di", 0.0))
     if direction == "long" and plus_di > minus_di:
         score += 6.0
     elif direction == "short" and minus_di > plus_di:
@@ -377,12 +319,12 @@ def smc_impulse_score(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
         # ==================== 多空对齐 + 奖励 + 信号分层 ====================
     # 多空得分对齐（纠正方向不一致的问题）
-    bull_score = (_safe_float(ctx.get("smc_quality_score_bull", 0)) +
-                  _safe_float(ctx.get("sqzmom_bull_strength", 0)) +
-                  _safe_float(ctx.get("bullish_momentum", 0)))
-    bear_score = (_safe_float(ctx.get("smc_quality_score_bear", 0)) +
-                  _safe_float(ctx.get("sqzmom_bear_strength", 0)) +
-                  _safe_float(ctx.get("bearish_momentum", 0)))
+    bull_score = (safe_float(ctx.get("smc_quality_score_bull", 0)) +
+                  safe_float(ctx.get("sqzmom_bull_strength", 0)) +
+                  safe_float(ctx.get("bullish_momentum", 0)))
+    bear_score = (safe_float(ctx.get("smc_quality_score_bear", 0)) +
+                  safe_float(ctx.get("sqzmom_bear_strength", 0)) +
+                  safe_float(ctx.get("bearish_momentum", 0)))
     score_delta = bull_score - bear_score
 
     # 当多空分差明显时，强制修正方向
@@ -404,22 +346,22 @@ def smc_impulse_score(ctx: Dict[str, Any]) -> Dict[str, Any]:
         bonus += 5.0
 
     # 奖励1：强结构（BOS/CHOCH + Sweep + Retest）
-    if (_safe_bool(ctx.get("bos_confirmed", False)) or
-        _safe_bool(ctx.get("choch_confirmed", False))):
+    if (safe_bool(ctx.get("bos_confirmed", False)) or
+        safe_bool(ctx.get("choch_confirmed", False))):
         bonus += 8.0
 
-    if _safe_bool(ctx.get("liquidity_sweep_confirmed", False)) and _safe_bool(ctx.get("retest_confirmed", False)):
+    if safe_bool(ctx.get("liquidity_sweep_confirmed", False)) and safe_bool(ctx.get("retest_confirmed", False)):
         bonus += 7.0
 
     # 奖励2：高品质 SMC
-    smc_quality = _safe_float(ctx.get("smc_quality_100", ctx.get("smc_quality_score", 0.0)))
+    smc_quality = safe_float(ctx.get("smc_quality_100", ctx.get("smc_quality_score", 0.0)))
     if smc_quality >= 65:
         bonus += 6.0
     elif smc_quality >= 50:
         bonus += 3.0
 
     # 奖励3：多时间框架收敛
-    htf_align = _safe_bool(ctx.get("htf_aligned", False)) or abs(_safe_float(ctx.get("htf_direction_strength", 0))) > 0.7
+    htf_align = safe_bool(ctx.get("htf_aligned", False)) or abs(safe_float(ctx.get("htf_direction_strength", 0))) > 0.7
     if htf_align:
         bonus += 9.0
 
@@ -470,7 +412,7 @@ def smc_impulse_score(ctx: Dict[str, Any]) -> Dict[str, Any]:
         "sqzmom": round(sqz, 2),
         "breakout": round(breakout, 2),
         "raw_base": round(raw_base, 2),
-        "regime": _safe_str(ctx.get("regime", "trend")),
+        "regime": safe_str(ctx.get("regime", "trend")),
         "weights": {"smc": smc_raw * smc_soft_mult * w_smc, "sqzmom": sqz * sqz_mult * w_sqz, "breakout": breakout_contrib * w_brk},
         "smc_passed": bool(smc_passed),
         "sqz_passed": sqz_passed,

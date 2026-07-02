@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Institutional single decision kernel for SMC_Bot.
 
@@ -17,19 +17,9 @@ import json
 from core.alpha_master_engine import V37MasterEngine
 from strategy.alpha_cluster_guard import AlphaClusterGuard, ClusterDecision
 
+from utils.safe import safe_float, safe_bool, safe_str
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        value = float(value)
-        if value != value:  # NaN
-            return default
-        if value in (float("inf"), float("-inf")):
-            return default
-        return value
-    except Exception:
-        return default
+
 
 
 def _cluster_decision_to_json(decision: ClusterDecision) -> str:
@@ -121,14 +111,13 @@ class InstitutionalDecisionKernel:
         normalized["signal"] = signal
         normalized["cluster_decision"] = cluster_decision.to_dict()
 
-        pre_cluster_size = _safe_float(normalized.get("size"), 0.0)
+        pre_cluster_size = safe_float(normalized.get("size"), 0.0)
         cluster_mult = float(cluster_decision.position_multiplier)
         post_cluster_size = pre_cluster_size * cluster_mult
 
-        # V54: 多层降仓保护。Cluster 允许成交时，强信号不会因为连续乘法被压到
-        # 接近 0；真正需要隔离的 PROBE_BOOK 仍保留小仓观察。
-        signal_ev = _safe_float(signal.get("expected_value"), 0.0)
-        signal_score = _safe_float(signal.get("score"), 0.0)
+        # V54: 澶氬眰闄嶄粨淇濇姢銆侰luster 鍏佽鎴愪氦鏃讹紝寮轰俊鍙蜂笉浼氬洜涓鸿繛缁箻娉曡鍘嬪埌
+        # 鎺ヨ繎 0锛涚湡姝ｉ渶瑕侀殧绂荤殑 PROBE_BOOK 浠嶄繚鐣欏皬浠撹瀵熴€?        signal_ev = safe_float(signal.get("expected_value"), 0.0)
+        signal_score = safe_float(signal.get("score"), 0.0)
         if cluster_decision.allow and signal_ev >= 0.05 and signal_score >= 80.0 and cluster_mult >= 0.30:
             post_cluster_size = max(post_cluster_size, pre_cluster_size * 0.55)
         elif cluster_decision.allow and signal_ev >= 0.0 and signal_score >= 70.0 and cluster_mult >= 0.30:
@@ -141,10 +130,11 @@ class InstitutionalDecisionKernel:
             normalized["reason"] = cluster_decision.reason
             return normalized
 
-        if _safe_float(normalized.get("size"), 0.0) <= 0.0:
+        if safe_float(normalized.get("size"), 0.0) <= 0.0:
             normalized["allow"] = False
             normalized["reason"] = "DECISION_KERNEL_SIZE_ZERO_AFTER_CLUSTER"
             return normalized
 
         normalized["reason"] = f"{normalized.get('reason', 'ALLOW')};{cluster_decision.reason}"
         return normalized
+

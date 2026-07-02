@@ -672,7 +672,8 @@ def check_and_open(result: dict) -> bool:
     tp2 = result["tp2"]
     tp3 = result["tp3"]
     rr = result["rr"]
-    regime = result["regime"]
+    regime = str(result.get("regime", "unknown"))
+    vol_state = str(result.get("vol_state", "unknown"))
     book = result["book"]
     size = result["size"]
     reason = result["reason"]
@@ -775,16 +776,28 @@ def check_and_open(result: dict) -> bool:
     _debug_long_vs_short = f"Lv{result.get('long_score',0):.1f} Sv{result.get('short_score',0):.1f}"
     _debug_tier = _tier or "?"
     _debug_atr_val = result.get("atr", 0)
+    dir_cn = "多头" if direction == "Long" else "空头"
+    dir_emoji2 = "📈" if direction == "Long" else "📉"
+    regime_cn = {"TREND": "趋势", "CHOP": "震荡", "TRANSITION": "过渡", "CRISIS_RISK_OFF": "避险", "trend": "趋势", "chop": "震荡"}.get(str(regime).upper(), regime)
+    vol_cn = {"HIGH_VOL": "高波动", "MID_VOL": "正常", "LOW_VOL": "低波动", "high_vol": "高波动", "mid_vol": "正常", "low_vol": "低波动"}.get(str(vol_state).upper(), vol_state)
+    rsi_zone = "超买" if result.get("rsi", 50) > 70 else ("超卖" if result.get("rsi", 50) < 30 else ("偏强" if result.get("rsi", 50) > 55 else ("偏弱" if result.get("rsi", 50) < 45 else "中性")))
+    atr_pct = atr / entry * 100 if entry > 0 and atr > 0 else 0
+    vol_ratio_str = f"{result.get('volume_ratio', 1.0):.2f}x"
+
     msg = (
-        f"[Strategy] {emoji_dir} {symbol}\n"
-        f"ID: {sig_id}\n"
-        f"Entry: {entry:.2f} SL: {sl:.2f}\n"
-        f"TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
+        f"━━━ [信号单] {dir_emoji2} {dir_cn} {symbol} ━━━\n"
+        f"📐 [价格失衡区] {result.get('bsl_level',0):.0f}~{result.get('ssl_level',0):.0f}\n"
+        f"方向: {dir_emoji2} {dir_cn}\n"
+        f"━━━ 多空博弈 ━━━\n"
+        f"多头: {result.get('long_score',0):.1f}分 EV:{result.get('long_ev',0):+.4f}  空头: {result.get('short_score',0):.1f}分 EV:{result.get('short_ev',0):+.4f}  分差: {abs(result.get('long_score',0)-result.get('short_score',0)):.1f}分\n"
+        f"━━━ 行情环境 ━━━\n"
+        f"趋势: {regime_cn} | 波动: {vol_cn} | 成交量: {vol_ratio_str}\n"
+        f"━━━ 指标透视 ━━━\n"
+        f"RSI: {result.get('rsi',0):.1f}({rsi_zone}) ATR: {atr:.2f} | {atr_pct:.2f}%\n"
+        f"━━━ 开单参数 ━━━\n"
+        f"入场: {entry:.2f} SL: {sl:.2f} TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
         f"RR: {rr:.2f} EV: {ev:.4f} Score: {score:.1f}\n"
-        f"Tier: {_debug_tier} ATR: {_debug_atr_val:.2f}\n"
-        f"Regime: {regime} Book: {book}\n"
-        f"Size: {size*100:.1f}% {_debug_long_vs_short}\n"
-        f"Reason: {reason}"
+        f"书签: {book} | 仓位: {size*100:.1f}%"
     )
     safe_send(msg)
     

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """V38 institutional signal tiering and regime-adaptive entry helpers.
 
 This module keeps the trade-frequency / win-rate / PF trade-off explicit.
@@ -15,36 +15,12 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, Tuple
 import math
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        out = float(value)
-        if math.isnan(out) or math.isinf(out):
-            return default
-        return out
-    except Exception:
-        return default
+from utils.safe import safe_float, safe_bool, safe_str
 
 
-def _safe_bool(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "long", "short", "bull", "bear"}
-    try:
-        if value != value:
-            return False
-    except Exception:
-        pass
-    try:
-        return bool(value)
-    except Exception:
-        return False
 
 
-@dataclass(frozen=True)
+
 class TierDecision:
     trade_allowed: bool
     tier: int
@@ -89,28 +65,28 @@ def dynamic_ev_threshold(regime: Any, vol_state: Any, tier: int) -> float:
 
 
 def _confirmation_flags(signal: Dict[str, Any], ctx: Dict[str, Any], regime: Any, vol_state: Any) -> Dict[str, bool]:
-    ev = _safe_float(signal.get("expected_value"), 0.0)
-    score = _safe_float(signal.get("score"), 0.0)
-    score_raw = _safe_float(signal.get("score_raw"), 0.0)
-    win_prob = _safe_float(signal.get("win_prob"), 0.0)
-    rr = _safe_float(signal.get("estimated_rr"), 0.0)
+    ev = safe_float(signal.get("expected_value"), 0.0)
+    score = safe_float(signal.get("score"), 0.0)
+    score_raw = safe_float(signal.get("score_raw"), 0.0)
+    win_prob = safe_float(signal.get("win_prob"), 0.0)
+    rr = safe_float(signal.get("estimated_rr"), 0.0)
     base = signal.get("base_trigger", {}) if isinstance(signal.get("base_trigger"), dict) else {}
-    base_strength = _safe_float(base.get("strength", signal.get("base_trigger_strength", 0.0)), 0.0)
-    scorecard_total = _safe_float(signal.get("scorecard_total"), 0.0)
+    base_strength = safe_float(base.get("strength", signal.get("base_trigger_strength", 0.0)), 0.0)
+    scorecard_total = safe_float(signal.get("scorecard_total"), 0.0)
 
-    zone_near_atr = _safe_float(ctx.get("zone_near_atr"), 9.99)
-    has_valid_zone = _safe_bool(ctx.get("has_valid_zone")) and zone_near_atr <= 2.40
-    tight_zone = _safe_bool(ctx.get("has_valid_zone")) and zone_near_atr <= 1.25
-    sweep = _safe_bool(ctx.get("liquidity_sweep_confirmed")) or _safe_bool(ctx.get("liquidity_sweep"))
-    wrong_sweep = _safe_bool(ctx.get("liquidity_wrong_side"))
-    setup_match = _safe_bool(ctx.get("setup_direction_match"))
-    has_any_setup = _safe_bool(ctx.get("has_any_setup"))
-    momentum = _safe_bool(ctx.get("momentum_align")) or _safe_bool(base.get("momentum_confirm"))
-    dmi = _safe_bool(ctx.get("sqzmom_dmi_aligned")) or _safe_bool(base.get("dmi_aligned"))
-    trend_aligned = _safe_bool(ctx.get("trend_aligned"))
-    base_passed = _safe_bool(signal.get("base_trigger_passed"))
-    sqz_passed = _safe_bool(signal.get("sqz_passed")) or _safe_bool(base.get("sqzmom_pass"))
-    smc_passed = _safe_bool(signal.get("smc_passed")) or _safe_bool(base.get("smc_pass"))
+    zone_near_atr = safe_float(ctx.get("zone_near_atr"), 9.99)
+    has_valid_zone = safe_bool(ctx.get("has_valid_zone")) and zone_near_atr <= 2.40
+    tight_zone = safe_bool(ctx.get("has_valid_zone")) and zone_near_atr <= 1.25
+    sweep = safe_bool(ctx.get("liquidity_sweep_confirmed")) or safe_bool(ctx.get("liquidity_sweep"))
+    wrong_sweep = safe_bool(ctx.get("liquidity_wrong_side"))
+    setup_match = safe_bool(ctx.get("setup_direction_match"))
+    has_any_setup = safe_bool(ctx.get("has_any_setup"))
+    momentum = safe_bool(ctx.get("momentum_align")) or safe_bool(base.get("momentum_confirm"))
+    dmi = safe_bool(ctx.get("sqzmom_dmi_aligned")) or safe_bool(base.get("dmi_aligned"))
+    trend_aligned = safe_bool(ctx.get("trend_aligned"))
+    base_passed = safe_bool(signal.get("base_trigger_passed"))
+    sqz_passed = safe_bool(signal.get("sqz_passed")) or safe_bool(base.get("sqzmom_pass"))
+    smc_passed = safe_bool(signal.get("smc_passed")) or safe_bool(base.get("smc_pass"))
 
     return {
         "base": base_passed,
@@ -122,7 +98,7 @@ def _confirmation_flags(signal: Dict[str, Any], ctx: Dict[str, Any], regime: Any
         "score": score >= 48.0 or score_raw >= 17.0,
         "score_strong": score >= 68.0 or score_raw >= 24.0,
         "structure": bool(smc_passed or has_valid_zone or tight_zone),
-        "structure_tight": bool(tight_zone or (_safe_float(ctx.get("smc_quality_100"), 0.0) >= 55.0)),
+        "structure_tight": bool(tight_zone or (safe_float(ctx.get("smc_quality_100"), 0.0) >= 55.0)),
         "liquidity": bool(sweep),
         "not_wrong_liquidity": not wrong_sweep,
         "momentum": bool(sqz_passed or momentum or dmi),
@@ -137,13 +113,13 @@ def _confirmation_flags(signal: Dict[str, Any], ctx: Dict[str, Any], regime: Any
 def classify_signal_tier(signal: Dict[str, Any], ctx: Dict[str, Any], regime: Any, vol_state: Any) -> TierDecision:
     flags = _confirmation_flags(signal, ctx, regime, vol_state)
     regime_u = str(regime or "UNKNOWN").upper()
-    ev = _safe_float(signal.get("expected_value"), 0.0)
-    win_prob = _safe_float(signal.get("win_prob"), 0.0)
-    rr = _safe_float(signal.get("estimated_rr"), 0.0)
-    score = _safe_float(signal.get("score"), 0.0)
-    score_raw = _safe_float(signal.get("score_raw"), 0.0)
-    base_strength = _safe_float(signal.get("base_trigger_strength"), 0.0)
-    scorecard_total = _safe_float(signal.get("scorecard_total"), 0.0)
+    ev = safe_float(signal.get("expected_value"), 0.0)
+    win_prob = safe_float(signal.get("win_prob"), 0.0)
+    rr = safe_float(signal.get("estimated_rr"), 0.0)
+    score = safe_float(signal.get("score"), 0.0)
+    score_raw = safe_float(signal.get("score_raw"), 0.0)
+    base_strength = safe_float(signal.get("base_trigger_strength"), 0.0)
+    scorecard_total = safe_float(signal.get("scorecard_total"), 0.0)
 
     confirm_core = [
         flags["base"], flags["structure"], flags["momentum"], flags["setup"],
@@ -250,7 +226,7 @@ def annotate_signal_with_tier(signal: Dict[str, Any], regime: Any, vol_state: An
     signal["v38_confirmation_flags"] = tier_decision.confirmation_flags
     signal["v38_tier_json"] = str(tier_decision.to_dict())
     signal["size_multiplier"] = round(
-        _safe_float(signal.get("size_multiplier"), 1.0) * tier_decision.position_multiplier,
+        safe_float(signal.get("size_multiplier"), 1.0) * tier_decision.position_multiplier,
         6,
     )
     signal["ev_reasons"] = str(signal.get("ev_reasons", "")) + f";{tier_decision.reason};V38_TIER={tier_decision.tier_name}"
@@ -264,7 +240,7 @@ def regime_adaptive_entry_params(signal: Dict[str, Any], regime: Any, vol_state:
     tolerance.  This reduces bad fills and protects PF.
     """
     defaults = defaults or {}
-    tier = int(_safe_float(signal.get("v38_tier"), 2))
+    tier = int(safe_float(signal.get("v38_tier"), 2))
     regime_u = str(regime or "UNKNOWN").upper()
     vol_u = str(vol_state or "MID_VOL").upper()
 
@@ -301,7 +277,7 @@ def regime_adaptive_entry_params(signal: Dict[str, Any], regime: Any, vol_state:
 
 
 def tier_exit_profile(signal: Dict[str, Any], regime: Any, base_max_hold_bars: int) -> Dict[str, Any]:
-    tier = int(_safe_float(signal.get("v38_tier"), 2))
+    tier = int(safe_float(signal.get("v38_tier"), 2))
     regime_u = str(regime or "UNKNOWN").upper()
     base_hold = max(12, int(base_max_hold_bars))
 
@@ -328,3 +304,4 @@ def tier_exit_profile(signal: Dict[str, Any], regime: Any, base_max_hold_bars: i
         "tp2_close_pct": round(float(tp2_close), 4),
         "max_hold_bars": int(max(8, round(base_hold * hold_mult))),
     }
+

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """ SMC + SQZMOM alpha layers for V28 semi-rebuild. Design goal: - Do not replace the original institutional_alpha_score. - Add an independent scoring/diagnostic layer that can release a small-size EARLY_REVERSAL path when SQZMOM white confirmation is missing, but SMC location + momentum quality are strong enough. - Add DMI/momentum-strength diagnostics for the second breakout engine. """
 from __future__ import annotations
 
@@ -6,24 +6,7 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import pandas as pd
 
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        v = float(value)
-        return default if np.isnan(v) or np.isinf(v) else v
-    except Exception:
-        return default
-
-
-def _safe_bool(value: Any) -> bool:
-    try:
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "y", "long", "short", "bull", "bear"}
-        return bool(value)
-    except Exception:
-        return False
+from utils.safe import safe_float, safe_bool, safe_str
 
 
 def _linreg_last(series: pd.Series, length: int) -> pd.Series:
@@ -136,8 +119,8 @@ def smc_location_score(row: Any, direction: str, entry_meta: Dict[str, Any] | No
         if "BREAKER" in src or "BB" in src:
             score += 14.0; reasons.append("BREAKER_BLOCK")
 
-    zone_near = _safe_float(entry_meta.get("zone_near_atr", row.get("zone_near_atr", 9.99)), 9.99)
-    vwap_dist = _safe_float(entry_meta.get("vwap_dist_atr", row.get("vwap_dist_atr", 9.99)), 9.99)
+    zone_near = safe_float(entry_meta.get("zone_near_atr", row.get("zone_near_atr", 9.99)), 9.99)
+    vwap_dist = safe_float(entry_meta.get("vwap_dist_atr", row.get("vwap_dist_atr", 9.99)), 9.99)
     if zone_near <= 0.35:
         score += 14.0; reasons.append("ZONE_TOUCH")
     elif zone_near <= 0.75:
@@ -151,14 +134,14 @@ def smc_location_score(row: Any, direction: str, entry_meta: Dict[str, Any] | No
         score += 4.0; reasons.append("VWAP_OK")
 
     if direction == "Long":
-        sweep = any(_safe_bool(row.get(c, False)) for c in ["sellside_sweep", "sellside_liquidity_taken", "bullish_stop_hunt", "sweep_low", "liquidity_sweep_long"])
-        wrong = any(_safe_bool(row.get(c, False)) for c in ["buyside_sweep", "buyside_liquidity_taken", "bearish_stop_hunt", "sweep_high", "liquidity_sweep_short"])
-        if _safe_bool(row.get("recent_eql_50", False)) or _safe_float(row.get("dist_to_eql_atr", 9.99), 9.99) <= 0.85:
+        sweep = any(safe_bool(row.get(c, False)) for c in ["sellside_sweep", "sellside_liquidity_taken", "bullish_stop_hunt", "sweep_low", "liquidity_sweep_long"])
+        wrong = any(safe_bool(row.get(c, False)) for c in ["buyside_sweep", "buyside_liquidity_taken", "bearish_stop_hunt", "sweep_high", "liquidity_sweep_short"])
+        if safe_bool(row.get("recent_eql_50", False)) or safe_float(row.get("dist_to_eql_atr", 9.99), 9.99) <= 0.85:
             score += 8.0; reasons.append("EQL_POOL_CONTEXT")
     else:
-        sweep = any(_safe_bool(row.get(c, False)) for c in ["buyside_sweep", "buyside_liquidity_taken", "bearish_stop_hunt", "sweep_high", "liquidity_sweep_short"])
-        wrong = any(_safe_bool(row.get(c, False)) for c in ["sellside_sweep", "sellside_liquidity_taken", "bullish_stop_hunt", "sweep_low", "liquidity_sweep_long"])
-        if _safe_bool(row.get("recent_eqh_50", False)) or _safe_float(row.get("dist_to_eqh_atr", 9.99), 9.99) <= 0.85:
+        sweep = any(safe_bool(row.get(c, False)) for c in ["buyside_sweep", "buyside_liquidity_taken", "bearish_stop_hunt", "sweep_high", "liquidity_sweep_short"])
+        wrong = any(safe_bool(row.get(c, False)) for c in ["sellside_sweep", "sellside_liquidity_taken", "bullish_stop_hunt", "sweep_low", "liquidity_sweep_long"])
+        if safe_bool(row.get("recent_eqh_50", False)) or safe_float(row.get("dist_to_eqh_atr", 9.99), 9.99) <= 0.85:
             score += 8.0; reasons.append("EQH_POOL_CONTEXT")
 
     if sweep:
@@ -171,16 +154,16 @@ def smc_location_score(row: Any, direction: str, entry_meta: Dict[str, Any] | No
 
 def sqzmom_momentum_score(row: Any, direction: str) -> Dict[str, Any]:
     direction = str(direction).title()
-    sz = _safe_float(row.get("sqzmom_sz", row.get("momentum", 0.0)), 0.0)
-    sig = _safe_float(row.get("sqzmom_signal", 0.0), 0.0)
-    strength = _safe_float(row.get("sqzmom_strength", sz - sig), 0.0)
-    strength_slope = _safe_float(row.get("sqzmom_strength_slope", row.get("momentum_slope", 0.0)), 0.0)
-    sqz_level = int(_safe_float(row.get("sqz_level", 1 if _safe_bool(row.get("squeeze_on", False)) else 0), 0))
-    release = _safe_bool(row.get("sqz_release_pro", row.get("squeeze_released", False)))
-    adx = _safe_float(row.get("adx", 0.0), 0.0)
-    adx_slope = _safe_float(row.get("adx_slope", 0.0), 0.0)
-    plus_di = _safe_float(row.get("plus_di", 0.0), 0.0)
-    minus_di = _safe_float(row.get("minus_di", 0.0), 0.0)
+    sz = safe_float(row.get("sqzmom_sz", row.get("momentum", 0.0)), 0.0)
+    sig = safe_float(row.get("sqzmom_signal", 0.0), 0.0)
+    strength = safe_float(row.get("sqzmom_strength", sz - sig), 0.0)
+    strength_slope = safe_float(row.get("sqzmom_strength_slope", row.get("momentum_slope", 0.0)), 0.0)
+    sqz_level = int(safe_float(row.get("sqz_level", 1 if safe_bool(row.get("squeeze_on", False)) else 0), 0))
+    release = safe_bool(row.get("sqz_release_pro", row.get("squeeze_released", False)))
+    adx = safe_float(row.get("adx", 0.0), 0.0)
+    adx_slope = safe_float(row.get("adx_slope", 0.0), 0.0)
+    plus_di = safe_float(row.get("plus_di", 0.0), 0.0)
+    minus_di = safe_float(row.get("minus_di", 0.0), 0.0)
 
     score = 0.0
     reasons = []
@@ -224,21 +207,21 @@ def evaluate_alpha_layers(row: Any, direction: str, exec_ctx: Dict[str, Any], ma
     smc = smc_location_score(row, direction, entry_meta)
     mom = sqzmom_momentum_score(row, direction)
 
-    div_age = int(_safe_float(row.get("sqzmom_divergence_age", 999), 999))
+    div_age = int(safe_float(row.get("sqzmom_divergence_age", 999), 999))
     div_dir = str(row.get("sqzmom_divergence_dir", "None"))
     div_recent = (div_dir == direction and div_age <= 12)
-    white = _safe_bool(row.get("sqzmom_reversal_confirm_long" if direction == "Long" else "sqzmom_reversal_confirm_short", False))
+    white = safe_bool(row.get("sqzmom_reversal_confirm_long" if direction == "Long" else "sqzmom_reversal_confirm_short", False))
     macro_conflict = False
     if macro_ctx:
-        mm = _safe_float(macro_ctx.get("macro_momentum", 0.0), 0.0)
-        ms = _safe_float(macro_ctx.get("macro_momentum_slope", 0.0), 0.0)
+        mm = safe_float(macro_ctx.get("macro_momentum", 0.0), 0.0)
+        ms = safe_float(macro_ctx.get("macro_momentum_slope", 0.0), 0.0)
         if direction == "Long" and mm < 0 and ms < 0:
             macro_conflict = True
         if direction == "Short" and mm > 0 and ms > 0:
             macro_conflict = True
 
-    location = _safe_float(smc["smc_location_score_v2"], 0.0)
-    momentum = _safe_float(mom["sqzmom_momentum_score_v2"], 0.0)
+    location = safe_float(smc["smc_location_score_v2"], 0.0)
+    momentum = safe_float(mom["sqzmom_momentum_score_v2"], 0.0)
     blend = round(location * 0.52 + momentum * 0.48, 4)
 
     allow_early = bool(div_recent and (not white) and (not macro_conflict) and location >= 58.0 and momentum >= 54.0 and blend >= 60.0)
@@ -266,11 +249,11 @@ def evaluate_alpha_layers(row: Any, direction: str, exec_ctx: Dict[str, Any], ma
 
 def dmi_breakout_filter(row: Any, direction: str) -> Tuple[bool, str]:
     direction = str(direction).title()
-    adx = _safe_float(row.get("adx", 0.0), 0.0)
-    adx_slope = _safe_float(row.get("adx_slope", 0.0), 0.0)
-    strength = _safe_float(row.get("sqzmom_strength", 0.0), 0.0)
-    plus_di = _safe_float(row.get("plus_di", 0.0), 0.0)
-    minus_di = _safe_float(row.get("minus_di", 0.0), 0.0)
+    adx = safe_float(row.get("adx", 0.0), 0.0)
+    adx_slope = safe_float(row.get("adx_slope", 0.0), 0.0)
+    strength = safe_float(row.get("sqzmom_strength", 0.0), 0.0)
+    plus_di = safe_float(row.get("plus_di", 0.0), 0.0)
+    minus_di = safe_float(row.get("minus_di", 0.0), 0.0)
     if direction == "Long":
         ok = plus_di >= minus_di and adx >= 20.0 and adx_slope >= -0.25 and strength >= 0.0
     else:

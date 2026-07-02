@@ -1,18 +1,13 @@
-# -*- coding: utf-8 -*-
-""" strategy/trade_management.py V2 Stable Compatible Version 目标： 1. 尽量保留旧项目可能调用的通用函数名。 2. 引入分层止盈止损参数： A 单：更能吃趋势 B 单：平衡胜率与盈亏比 C 单：快保本、快止盈，避免边缘信号拖累 3. 不破坏原有 -1R 最大亏损结构。 """
+﻿# -*- coding: utf-8 -*-
+""" strategy/trade_management.py V2 Stable Compatible Version 鐩爣锛?1. 灏介噺淇濈暀鏃ч」鐩彲鑳借皟鐢ㄧ殑閫氱敤鍑芥暟鍚嶃€?2. 寮曞叆鍒嗗眰姝㈢泩姝㈡崯鍙傛暟锛?A 鍗曪細鏇磋兘鍚冭秼鍔?B 鍗曪細骞宠　鑳滅巼涓庣泩浜忔瘮 C 鍗曪細蹇繚鏈€佸揩姝㈢泩锛岄伩鍏嶈竟缂樹俊鍙锋嫋绱?3. 涓嶇牬鍧忓師鏈?-1R 鏈€澶т簭鎹熺粨鏋勩€?"""
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from utils.safe import safe_float, safe_bool, safe_str
 
-def _safe_float(v: Any, default: float = 0.0) -> float:
-    try:
-        if v is None:
-            return default
-        return float(v)
-    except Exception:
-        return default
+
 
 
 def _lower(v: Any) -> str:
@@ -23,7 +18,7 @@ def _lower(v: Any) -> str:
 
 
 def get_management_profile(entry_grade: str = "B", **kwargs: Any) -> Dict[str, Any]:
-    """ 根据入场等级返回止盈止损管理参数。 返回单位： - *_r 都是 R 倍数 - pct 是平仓比例 """
+    """ 鏍规嵁鍏ュ満绛夌骇杩斿洖姝㈢泩姝㈡崯绠＄悊鍙傛暟銆?杩斿洖鍗曚綅锛?- *_r 閮芥槸 R 鍊嶆暟 - pct 鏄钩浠撴瘮渚?"""
     g = str(entry_grade or "B").upper()
 
     if g == "A":
@@ -75,7 +70,7 @@ def get_management_profile(entry_grade: str = "B", **kwargs: Any) -> Dict[str, A
 
 
 def build_trade_plan(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    """ 生成交易管理计划。 """
+    """ 鐢熸垚浜ゆ槗绠＄悊璁″垝銆?"""
     ctx: Dict[str, Any] = {}
     if isinstance(context, dict):
         ctx.update(context)
@@ -84,11 +79,11 @@ def build_trade_plan(context: Optional[Dict[str, Any]] = None, **kwargs: Any) ->
     grade = str(ctx.get("entry_grade") or ctx.get("grade") or "B").upper()
     profile = get_management_profile(grade)
 
-    entry = _safe_float(ctx.get("entry") or ctx.get("entry_price"), 0.0)
-    stop = _safe_float(ctx.get("stop") or ctx.get("stop_price"), 0.0)
+    entry = safe_float(ctx.get("entry") or ctx.get("entry_price"), 0.0)
+    stop = safe_float(ctx.get("stop") or ctx.get("stop_price"), 0.0)
     side = _lower(ctx.get("side") or ctx.get("direction"))
 
-    risk = abs(entry - stop) if entry and stop else _safe_float(ctx.get("risk"), 0.0)
+    risk = abs(entry - stop) if entry and stop else safe_float(ctx.get("risk"), 0.0)
 
     plan = dict(profile)
     plan.update({
@@ -113,15 +108,15 @@ def build_trade_plan(context: Optional[Dict[str, Any]] = None, **kwargs: Any) ->
 
 
 def manage_trade(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    """ 通用兼容管理函数：返回当前应采取的动作。 """
+    """ 閫氱敤鍏煎绠＄悊鍑芥暟锛氳繑鍥炲綋鍓嶅簲閲囧彇鐨勫姩浣溿€?"""
     ctx: Dict[str, Any] = {}
     if isinstance(context, dict):
         ctx.update(context)
     ctx.update(kwargs)
 
     plan = build_trade_plan(ctx)
-    current_r = _safe_float(ctx.get("current_r") or ctx.get("unrealized_r"), 0.0)
-    bars_held = int(_safe_float(ctx.get("bars_held"), 0.0))
+    current_r = safe_float(ctx.get("current_r") or ctx.get("unrealized_r"), 0.0)
+    bars_held = int(safe_float(ctx.get("bars_held"), 0.0))
 
     action = "HOLD"
     reason = "NO_ACTION"
@@ -152,7 +147,7 @@ def manage_trade(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dic
     }
 
 
-# 旧项目可能调用这些别名
+# 鏃ч」鐩彲鑳借皟鐢ㄨ繖浜涘埆鍚?
 def trade_management_plan(*args: Any, **kwargs: Any) -> Dict[str, Any]:
     return build_trade_plan(*args, **kwargs)
 
