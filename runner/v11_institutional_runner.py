@@ -18,8 +18,11 @@ from notifier.observer.signal_collector import build_signal_snapshot
 from strategy.intelligence_engine import estimate_expected_value
 from config import SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
+from utils.ctx_builder import _enrich_common_fields, build_directional_contexts
 from analytics.filter_audit import FilterAuditLogger
 from utils.time_utils import now_bj, series_ms_to_bj
+from utils.ohlcv_cache import ohlcv_cache
+from utils.structured_logger import slog
 try:
     import ccxt  # type: ignore
 except ModuleNotFoundError:  # optional dependency for live data only
@@ -57,10 +60,19 @@ def make_sample_ohlcv(rows=320, start=100.0):
 
 
 def fetch_live_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320):
-    """Fetch real OHLCV data from Bitget swap (合约) API via requests."""
+    """从 Bitget 获取 OHLCV，带增量缓存"""
+    from utils.ohlcv_cache import ohlcv_cache
+    
+    # 检查缓存是否新鲜（缓存 TTL = 15 秒，避免同周期重复拉取）
+    if not ohlcv_cache.is_stale(symbol, timeframe, max_age_sec=15):
+        cached = ohlcv_cache.get(symbol, timeframe)
+        if cached is not None and len(cached) >= 50:
+            slog.info("使用缓存 OHLCV", symbol=symbol, timeframe=timeframe, rows=len(cached))
+            return cached
+    
+    # 拉取真实数据
     import requests as _req
     
-    # Bitget 合约 API 时间格式：1m,3m,5m,15m,30m,1H,4H,6H,12H,1D,1W,1M
     tf_map = {"1h": "1H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D", "1w": "1W"}
     gran = tf_map.get(timeframe.lower(), timeframe)
     
@@ -90,7 +102,15 @@ def fetch_live_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320):
     
     df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["datetime"] = series_ms_to_bj(df["timestamp"] * 1000)
-    print(f"  ✅ 成功获取 {symbol} {timeframe} 合约数据 ({len(candles)} 根K线, 最新价:{candles[-1][4]})")
+    
+    # 存入缓存（增量合并）
+    existing = ohlcv_cache.get_raw(symbol, timeframe)
+    if existing is not None:
+        df = ohlcv_cache.append(symbol, timeframe, df) or df
+    else:
+        ohlcv_cache.put(symbol, timeframe, df)
+    
+    slog.info("成功获取 OHLCV", symbol=symbol, timeframe=timeframe, rows=len(candles), latest_price=candles[-1][4])
     return df
 
 
@@ -172,137 +192,14 @@ def evaluate_symbol(symbol, cfg):
         else:
             exec_ctx["funding_rate"] = 0.0
     except Exception:
-        exec_ctx["funding_rate"] = 0.0
+                exec_ctx["funding_rate"] = 0.0
 
-    # ===== 补充评分系统所需字段（grade_entry_quality 需要这些字段才能正确评分） =====
-    # 方向相关
-    exec_ctx["htf_direction"] = macro_ctx.get("allowed_direction", "")
-    exec_ctx["setup_type"] = "ob" if exec_ctx.get("ob_valid") else ("fvg" if exec_ctx.get("bearish_fvg") or exec_ctx.get("bullish_fvg") else "")
-    
-    # SMC 区域
-    exec_ctx["smc_zone_score"] = float(exec_ctx.get("pivot_strength_high", 0) or 0) + float(exec_ctx.get("pivot_strength_low", 0) or 0)
-    exec_ctx["has_valid_zone"] = bool(exec_ctx.get("ob_valid")) or bool(exec_ctx.get("bullish_fvg")) or bool(exec_ctx.get("bearish_fvg"))
-    
-    # K线形态
-    body = abs(float(curr.get("close", 0)) - float(curr.get("open", 0)))
-    hilo = float(curr.get("high", 0)) - float(curr.get("low", 0))
-    exec_ctx["body_pct"] = body / hilo if hilo > 0 else 0.0
-    
-    # 其他
-    exec_ctx["macro_conflict"] = False
-    exec_ctx["too_extended"] = False
-    exec_ctx["fe_bottom"] = bool(curr.get("is_FE", False))
-    exec_ctx["fe_top"] = bool(curr.get("is_Inv_FE", False))
-    exec_ctx["same_side_div_count_12"] = 0.0
-    exec_ctx["vwap_align"] = None  # 由后续逻辑判断
-    exec_ctx["rr"] = 1.0  # 占位，后面 calculate_dynamic_tp_sl 会计算真实 rr
-    exec_ctx["distance_atr"] = 0.0
-    exec_ctx["ob_strength"] = float(exec_ctx.get("pivot_strength_high", 0) or 0)
-    exec_ctx["fvg_quality"] = 1.0 if (exec_ctx.get("bearish_fvg") or exec_ctx.get("bullish_fvg")) else 0.0
-    exec_ctx["displacement"] = float(exec_ctx.get("pivot_strength_low", 0) or 0)
-    exec_ctx["liquidity"] = 1.0 if (exec_ctx.get("is_bsl_swept") or exec_ctx.get("is_ssl_swept")) else 0.0
-    # ==========================================
-
-    # 构建多头和空头各自的评分上下文（方向相关字段分开设置）
-    long_ctx = dict(exec_ctx)
-    short_ctx = dict(exec_ctx)
-    
-    # 多头方向相关字段
-    long_ctx["direction"] = "Long"
-    long_ctx["divergence_confirmed"] = bool(curr.get("has_bot_div", False))  # 底背离 = 多头
-    long_ctx["sqzmom_divergence_dir"] = "Long" if bool(curr.get("has_bot_div", False)) else ""
-    long_ctx["sqzmom_divergence_age"] = int(float(curr.get("bot_div_age", 999) or 999))
-    long_ctx["sqzmom_divergence_strength"] = float(curr.get("bot_div_strength", 0) or 0)
-    long_ctx["sqzmom_white_confirm"] = bool(curr.get("sqzmom_white_reversal_long", False))
-    long_ctx["sqzmom_momentum_confirm"] = bool(curr.get("sqzmom_white_reversal_long", False))
-    long_ctx["sqzmom_reversal_confirm_long"] = bool(curr.get("sqzmom_white_reversal_long", False))
-    long_ctx["sqzmom_reversal_confirm_short"] = False
-    long_ctx["sqzmom_dmi_aligned"] = bool(curr.get("dmi_bull", False))
-    long_ctx["sqzmom_trigger_ok"] = bool(curr.get("dmi_bull", False))
-    long_ctx["dmi_bull"] = bool(curr.get("dmi_bull", False))
-    long_ctx["dmi_bear"] = False
-    long_ctx["momentum"] = float(curr.get("momentum", 0) or 0)
-    long_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 多头信号
-    long_ctx["liquidity_wrong_side"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 空头信号，对多头是反方向
-    # 【修复20260625】补充 sqzmom_score 字段（smc_impulse_engine 的 _sqzmom_score 依赖此字段）
-    # 计算方式与 core/alpha_master_engine.py 的 build_entry_snapshot 一致
-    _long_sqz = 0.0
-    if float(curr.get("momentum", 0) or 0) > 0: _long_sqz += 7.0
-    if float(curr.get("momentum_slope", 0) or 0) > 0: _long_sqz += 6.0
-    if bool(curr.get("sqzmom_white_reversal_long", False)): _long_sqz += 8.0
-    if bool(curr.get("dmi_bull", False)) or float(curr.get("plus_di", 0) or 0) >= float(curr.get("minus_di", 0) or 0): _long_sqz += 7.0
-    if bool(curr.get("squeeze_released", False)): _long_sqz += 6.0
-    if str(curr.get("sqzmom_divergence_dir", "None")) == "Long" and int(float(curr.get("bot_div_age", 999) or 999)) <= 18: _long_sqz += 10.0
-    long_ctx["sqzmom_score"] = max(0.0, min(44.0, _long_sqz))
-    
-    # 空头方向相关字段
-    short_ctx["direction"] = "Short"
-    short_ctx["divergence_confirmed"] = bool(curr.get("has_top_div", False))  # 顶背离 = 空头
-    short_ctx["sqzmom_divergence_dir"] = "Short" if bool(curr.get("has_top_div", False)) else ""
-    short_ctx["sqzmom_divergence_age"] = int(float(curr.get("top_div_age", 999) or 999))
-    short_ctx["sqzmom_divergence_strength"] = float(curr.get("top_div_strength", 0) or 0)
-    short_ctx["sqzmom_white_confirm"] = bool(curr.get("sqzmom_white_reversal_short", False))
-    short_ctx["sqzmom_momentum_confirm"] = bool(curr.get("sqzmom_white_reversal_short", False))
-    short_ctx["sqzmom_reversal_confirm_long"] = False
-    short_ctx["sqzmom_reversal_confirm_short"] = bool(curr.get("sqzmom_white_reversal_short", False))
-    short_ctx["sqzmom_dmi_aligned"] = bool(curr.get("dmi_bear", False))
-    short_ctx["sqzmom_trigger_ok"] = bool(curr.get("dmi_bear", False))
-    short_ctx["dmi_bull"] = False
-    short_ctx["dmi_bear"] = bool(curr.get("dmi_bear", False))
-    short_ctx["momentum"] = float(curr.get("momentum", 0) or 0)
-    short_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 空头信号
-    short_ctx["liquidity_wrong_side"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 多头信号，对空头是反方向
-    # 【修复20260625】补充 sqzmom_score 字段（smc_impulse_engine 的 _sqzmom_score 依赖此字段）
-    _short_sqz = 0.0
-    if float(curr.get("momentum", 0) or 0) < 0: _short_sqz += 7.0
-    if float(curr.get("momentum_slope", 0) or 0) < 0: _short_sqz += 6.0
-    if bool(curr.get("sqzmom_white_reversal_short", False)): _short_sqz += 8.0
-    if bool(curr.get("dmi_bear", False)) or float(curr.get("minus_di", 0) or 0) > float(curr.get("plus_di", 0) or 0): _short_sqz += 7.0
-    if bool(curr.get("squeeze_released", False)): _short_sqz += 6.0
-    if str(curr.get("sqzmom_divergence_dir", "None")) == "Short" and int(float(curr.get("top_div_age", 999) or 999)) <= 18: _short_sqz += 10.0
-    short_ctx["sqzmom_score"] = max(0.0, min(44.0, _short_sqz))
-
+    # ===== 补充评分系统所需字段 + 构建多空评分上下文 =====
+    # 使用共享 ctx_builder 工具 (消除 ~70 行重复代码)
+    _enrich_common_fields(exec_ctx, curr, macro_ctx)
+    long_ctx, short_ctx = build_directional_contexts(exec_ctx, curr)
     l_score, l_thresh, l_reasons = adaptive_signal_score(long_ctx, macro_ctx, "Long", is_vol)
     s_score, s_thresh, s_reasons = adaptive_signal_score(short_ctx, macro_ctx, "Short", is_vol)
-
-    # ===== 【修复20260701】计算真实 EV（期望值）=====
-    def _extract_from_reasons(reasons, field, default=0):
-        """从 reasons dict 或 list 中提取字段值"""
-        if isinstance(reasons, dict):
-            return float(reasons.get(field, 0) or 0)
-        if isinstance(reasons, (list, tuple)):
-            for r in reasons:
-                if isinstance(r, str) and f"{field}=" in r:
-                    try: return float(r.split("=")[1].split(",")[0].strip())
-                    except: pass
-        return default
-
-    _long_sig = {
-        "score_raw": l_score, "score": l_score,
-        "smc": _extract_from_reasons(l_reasons, "smc"),
-        "sqzmom": _extract_from_reasons(l_reasons, "sqzmom"),
-        "breakout": 0, "raw_base": 0,
-        "base_trigger_passed": l_score >= l_thresh,
-        "fallback_active": False, "direction": "Long", "ev_grade": "C_EV",
-        "entry_meta": long_ctx,
-    }
-    _short_sig = {
-        "score_raw": s_score, "score": s_score,
-        "smc": _extract_from_reasons(s_reasons, "smc"),
-        "sqzmom": _extract_from_reasons(s_reasons, "sqzmom"),
-        "breakout": 0, "raw_base": 0,
-        "base_trigger_passed": s_score >= s_thresh,
-        "fallback_active": False, "direction": "Short", "ev_grade": "C_EV",
-        "entry_meta": short_ctx,
-    }
-
-    _regime_str = str(macro_ctx.get("regime", ""))
-    _vol_str = str(macro_ctx.get("vol_state", ""))
-    _long_ev_result = estimate_expected_value(_long_sig, _regime_str, _vol_str, long_ctx)
-    _short_ev_result = estimate_expected_value(_short_sig, _regime_str, _vol_str, short_ctx)
-    long_ev = _long_ev_result.get("expected_value", 0.0)
-    short_ev = _short_ev_result.get("expected_value", 0.0)
-    # ==================================================
 
     # ===== 【修复20260625】HTF 方向强制对齐 =====
     # 问题：决策方向只靠 long_score >= short_score 比较，
@@ -323,42 +220,86 @@ def evaluate_symbol(symbol, cfg):
     score_edge = abs(l_score - s_score)
     m15_weight = min(0.9, max(0.3, score_edge / 30.0))
     
-    # HTF 投票：Short=-1, Long=+1, Both=0
+        # HTF 投票：Short=-1, Long=+1, Both=0
     htf_vote = -1 if htf_allowed == "Short" else (1 if htf_allowed == "Long" else 0)
     # 15M 投票：基于评分差异
     dir_by_score = "Long" if l_score >= s_score else "Short"
     m15_vote = 1 if dir_by_score == "Long" else -1
     
-    # 加权总分
-    total_vote = htf_vote * htf_weight + m15_vote * m15_weight
-    
-    # 融合方向决策
-    if total_vote > 0.3:
-        direction = "Long"
-        exec_ctx["htf_fusion"] = f"Long(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
-    elif total_vote < -0.3:
-        direction = "Short"
-        exec_ctx["htf_fusion"] = f"Short(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
+    # 【修复20260715】当 HTF=Both 且评分接近时，允许双方向
+    # 原问题：htf_vote=0 时 total_vote 完全由 m15_vote 决定，
+    # 导致评分相差很小(edge<5)也硬选短方向，造成 36/37 偏空
+    small_edge = score_edge < 5.0
+    if htf_allowed == "Both" and small_edge:
+        # 评分接近又无 HTF 方向，让下游决策层自然选择
+        direction = dir_by_score  # 还是选评分高的，但标记为弱信号
+        exec_ctx["htf_fusion"] = f"WeakBoth({direction},edge={score_edge:.1f})"
     else:
-        # 分歧区：HTF 有明确方向但 15M 强烈反对 -> 放权给 15M 评分
-        if htf_allowed != "Both" and abs(htf_vote * htf_weight - m15_vote * m15_weight) < 0.15:
-            direction = dir_by_score  # 轻微分歧，15M 优先
-            exec_ctx["htf_fusion"] = f"DisagreeMin({direction},vote={total_vote:.2f})"
+        # 加权总分
+        total_vote = htf_vote * htf_weight + m15_vote * m15_weight
+        
+        if total_vote > 0.3:
+            direction = "Long"
+            exec_ctx["htf_fusion"] = f"Long(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
+        elif total_vote < -0.3:
+            direction = "Short"
+            exec_ctx["htf_fusion"] = f"Short(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
         else:
-            direction = dir_by_score  # 大分歧也按 15M 评分
-            exec_ctx["htf_fusion"] = f"DisagreeStrong({direction},vote={total_vote:.2f})"
-    
-    # 保留 htf_allowed 供风控参考（不参与开单决策，只用于日志）
-    exec_ctx["htf_allowed"] = htf_allowed
+            if htf_allowed != "Both" and abs(htf_vote * htf_weight - m15_vote * m15_weight) < 0.15:
+                direction = dir_by_score
+                exec_ctx["htf_fusion"] = f"DisagreeMin({direction},vote={total_vote:.2f})"
+            else:
+                direction = dir_by_score
+                exec_ctx["htf_fusion"] = f"DisagreeStrong({direction},vote={total_vote:.2f})"
     
     # 记录方向对齐信息
-    exec_ctx["htf_forced_direction"] = direction
     exec_ctx["htf_allowed"] = htf_allowed
+    exec_ctx["htf_forced_direction"] = direction
     sym_strategy = load_symbol_strategy(symbol, SYMBOL_STRATEGY)
     min_rr = sym_strategy.get("min_rr", cfg.get("risk", {}).get("min_rr", 2.0))
     sl, tp1, tp2, tp3, rr = calculate_dynamic_tp_sl(
         direction, curr, df_exec, exec_ctx, min_rr, sym_strategy
     )
+
+    # ===== 【修复20260716】EV 传入真实评分数据和系统实际 RR =====
+    # 之前问题：
+    # 1. smc/sqzmom 从 reasons 字符串手动解析，可能失败返回 0
+    # 2. breakout/raw_base 写死为 0
+    # 3. estimated_rr 用 EV 引擎自估（≈0.9~1.2），和系统实际 RR（1.50）脱节
+    # 修复：从 l_reasons/s_reasons 元数据中直接读取 + 传入系统实际 RR
+    _long_sig = {
+        "score_raw": l_score, "score": l_score,
+        "smc": float(l_reasons.get("smc", 0)) if isinstance(l_reasons, dict) else 0,
+        "sqzmom": float(l_reasons.get("sqzmom", 0)) if isinstance(l_reasons, dict) else 0,
+        "breakout": float(l_reasons.get("breakout", l_reasons.get("breakout_score", 0))) if isinstance(l_reasons, dict) else 0,
+        "raw_base": float(l_reasons.get("raw_base", 0)) if isinstance(l_reasons, dict) else 0,
+        "base_trigger_passed": l_score >= l_thresh,
+        "fallback_active": bool(l_reasons.get("fallback_active", False)) if isinstance(l_reasons, dict) else False,
+        "direction": "Long", "ev_grade": "C_EV",
+        "entry_meta": long_ctx,
+        "estimated_rr": rr,  # 传入系统实际 RR（来自 calculate_dynamic_tp_sl）
+    }
+    _short_sig = {
+        "score_raw": s_score, "score": s_score,
+        "smc": float(s_reasons.get("smc", 0)) if isinstance(s_reasons, dict) else 0,
+        "sqzmom": float(s_reasons.get("sqzmom", 0)) if isinstance(s_reasons, dict) else 0,
+        "breakout": float(s_reasons.get("breakout", s_reasons.get("breakout_score", 0))) if isinstance(s_reasons, dict) else 0,
+        "raw_base": float(s_reasons.get("raw_base", 0)) if isinstance(s_reasons, dict) else 0,
+        "base_trigger_passed": s_score >= s_thresh,
+        "fallback_active": bool(s_reasons.get("fallback_active", False)) if isinstance(s_reasons, dict) else False,
+        "direction": "Short", "ev_grade": "C_EV",
+        "entry_meta": short_ctx,
+        "estimated_rr": rr,  # 传入系统实际 RR
+    }
+
+    _regime_str = str(macro_ctx.get("regime", ""))
+    _vol_str = str(macro_ctx.get("vol_state", ""))
+    _long_ev_result = estimate_expected_value(_long_sig, _regime_str, _vol_str, long_ctx)
+    _short_ev_result = estimate_expected_value(_short_sig, _regime_str, _vol_str, short_ctx)
+    long_ev = _long_ev_result.get("expected_value", 0.0)
+    short_ev = _short_ev_result.get("expected_value", 0.0)
+    # ==================================================
+
     rr_plan = build_rr_plan(direction, price, sl, tp1, tp2, tp3)
     snapshot = build_signal_snapshot(
         symbol=symbol,
@@ -440,6 +381,10 @@ def evaluate_symbol(symbol, cfg):
     decision["take_profit_2"] = tp2
     decision["take_profit_3"] = tp3
     decision["rr_calculated"] = rr
+        # 【修复20260715】将 htf_allowed 注入 decision 顶层供 CSV 日志使用
+    decision["htf_allowed"] = htf_allowed
+    decision["exec_ctx"] = dict(exec_ctx)  # 用完整的原始 exec_ctx 而不是重建空 dict
+    decision["exec_ctx"]["htf_allowed"] = htf_allowed
 
     # Strategy filters are post-decision guards: they may only downgrade/block
     # an already approved decision. They must never turn HOLD into approved.
@@ -701,7 +646,7 @@ def _append_csv_log(results, cfg):
                 "reason": r.get("reason", ""),
             }
             writer.writerow(row)
-    print(f"  📝 CSV 日志已追加: {log_path} ({len(results)} 条)")
+    print(f"  [CSV] 日志已追加: {log_path} ({len(results)} 条)")
 
 
 def main():

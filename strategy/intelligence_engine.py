@@ -24,8 +24,6 @@ def assign_grade(score: float, setup: str, regime: str) -> str:
 def grade_from_expected_value(expected_value: float) -> str:
     """Production grade labels based on EV, not on legacy score."""
     ev = safe_float(expected_value, -9.0)
-    if ev > 0.25:
-        return "A_EV"
     if ev > 0.15:
         return "A_EV"
     if ev > 0.05:
@@ -193,9 +191,13 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
 
     reasons: List[str] = []
 
-    # Win probability: quality adds probability; hostile context subtracts it.
+        # Win probability: quality adds probability; hostile context subtracts it.
+    # 【修复20260716】win_prob 基准从 0.30 提到 0.35
+    # 原问题：0.30 基准导致即使评分中等(40分)也只能到 ≈0.42，
+    # 经过 shrink 后 (0.84*0.42+0.16*0.37=0.412) 再乘以 RR 后 EV 难以转正。
+    # 新基准 0.35 让中等信号也能达到合理胜率水平。
     win_prob = (
-        0.30
+        0.35
         + 0.085 * raw_term
         + 0.045 * score_term
         + 0.065 * smc_term
@@ -231,33 +233,39 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
         win_prob -= 0.030
         reasons.append("HIGH_VOL_SOFT")
 
-    # Estimated R:R: strong breakout/structure expands upside; bad context compresses it.
-    estimated_rr = (
-        0.68
-        + 0.24 * raw_term
-        + 0.34 * smc_term
-        + 0.22 * sqz_term
-        + 0.42 * brk_term
-    )
-    if regime == "TREND":
-        estimated_rr += 0.14
-    elif regime == "TRANSITION":
-        estimated_rr += 0.04
-    elif regime == "CHOP":
-        estimated_rr -= 0.16
-    elif regime == "CRISIS_RISK_OFF":
-        estimated_rr -= 0.58
+        # Estimated R:R: strong breakout/structure expands upside; bad context compresses it.
+    # 【修复20260716】优先使用 signal 中传入的系统实际 estimated_rr，
+    # 如果没有才自估。之前 EV 引擎用自估 RR（≈0.9~1.2）而系统实际
+    # RR=1.50，导致 EV 被系统性低估达 -0.02~-0.08。
+    _signal_rr = safe_float(signal.get("estimated_rr"), 0.0)
+    if _signal_rr > 0:
+        estimated_rr = _signal_rr
+    else:
+        estimated_rr = (
+            0.68
+            + 0.24 * raw_term
+            + 0.34 * smc_term
+            + 0.22 * sqz_term
+            + 0.42 * brk_term
+        )
+        if regime == "TREND":
+            estimated_rr += 0.14
+        elif regime == "TRANSITION":
+            estimated_rr += 0.04
+        elif regime == "CHOP":
+            estimated_rr -= 0.16
+        elif regime == "CRISIS_RISK_OFF":
+            estimated_rr -= 0.58
 
-    if vol_state == "HIGH_VOL":
-        estimated_rr -= 0.10
+        if vol_state == "HIGH_VOL":
+            estimated_rr -= 0.10
 
-    wp_est = _clip(win_prob, 0.05, 0.68)
-    estimated_rr = _clip(estimated_rr, 0.35, 2.65)
+        estimated_rr = _clip(estimated_rr, 0.35, 2.65)
 
-    # V37.6: keep RR local to the current signal.
-    # The global RRTracker created temporal feedback and made estimated_rr jump
-    # to 2.0 after a few outlier winners, corrupting EV ranking.
-    estimated_rr = _clip(estimated_rr, 0.80, 1.80)
+        # V37.6: keep RR local to the current signal.
+        # The global RRTracker created temporal feedback and made estimated_rr jump
+        # to 2.0 after a few outlier winners, corrupting EV ranking.
+        estimated_rr = _clip(estimated_rr, 0.80, 1.80)
 
     # ✅ 使用校准版 EV 计算
     setup_type = str(meta.get("setup_type", "V37_CORE") or "V37_CORE")
@@ -294,7 +302,7 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
             bucket_wp *= 0.75
 
     # 融合：原始 win_prob 和分桶概率各占一半
-    blended_wp = 0.8 * wp_est + 0.2 * bucket_wp
+    blended_wp = 0.8 * win_prob + 0.2 * bucket_wp
 
     # 惩罚2：如果是鱼尾，额外压低融合胜率。
     if is_tail_regime:

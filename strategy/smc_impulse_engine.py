@@ -33,33 +33,42 @@ import math
 from strategy.probabilistic_breakout import breakout_probability
 
 # ============================================================
-# Dominance 平滑状态（全局）
+# Dominance 平滑状态（线程安全，按 symbol 隔离）
 # ============================================================
-_DOMINANCE_HISTORY: List[str] = []
+import threading
+_DOMINANCE_HISTORY: Dict[str, List[str]] = {}
+_DOMINANCE_LOCK = threading.Lock()
 _DOMINANCE_HISTORY_MAXLEN = 5
 
 
-def _smooth_dominance(raw_dominance: str) -> str:
-    global _DOMINANCE_HISTORY
-    _DOMINANCE_HISTORY.append(raw_dominance)
-    if len(_DOMINANCE_HISTORY) > _DOMINANCE_HISTORY_MAXLEN:
-        _DOMINANCE_HISTORY.pop(0)
-    counts = {"momentum": 0, "structure": 0, "balanced": 0}
-    for d in _DOMINANCE_HISTORY:
-        if d in counts:
-            counts[d] += 1
-    total = len(_DOMINANCE_HISTORY)
-    for dom_type, count in counts.items():
-        if count / total >= 0.6:
-            return dom_type
-    if len(_DOMINANCE_HISTORY) >= 2:
-        return _DOMINANCE_HISTORY[-2]
+def _smooth_dominance(raw_dominance: str, symbol: str = "") -> str:
+    """线程安全的 dominance 平滑（按 symbol 隔离）"""
+    with _DOMINANCE_LOCK:
+        key = symbol or "_global"
+        if key not in _DOMINANCE_HISTORY:
+            _DOMINANCE_HISTORY[key] = []
+        history = _DOMINANCE_HISTORY[key]
+        history.append(raw_dominance)
+        if len(history) > _DOMINANCE_HISTORY_MAXLEN:
+            history.pop(0)
+        counts = {"momentum": 0, "structure": 0, "balanced": 0}
+        for d in history:
+            if d in counts:
+                counts[d] += 1
+        total = len(history)
+        for dom_type, count in counts.items():
+            if count / total >= 0.6:
+                return dom_type
+        if len(history) >= 2:
+            return history[-2]
     return raw_dominance
 
 
-def reset_dominance_history() -> None:
-    global _DOMINANCE_HISTORY
-    _DOMINANCE_HISTORY = []
+def reset_dominance_history(symbol: str = "") -> None:
+    """重置指定 symbol 的 dominance 历史"""
+    with _DOMINANCE_LOCK:
+        key = symbol or "_global"
+        _DOMINANCE_HISTORY.pop(key, None)
 
 
 from utils.safe import safe_float, safe_bool, safe_str
@@ -302,8 +311,9 @@ def smc_impulse_score(ctx: Dict[str, Any]) -> Dict[str, Any]:
     else:
         raw_dominance = "balanced"
 
-    # 7. 对 dominance 做滑动平均平滑，避免震荡行情中反复跳变
-    dominance = _smooth_dominance(raw_dominance)
+        # 7. 对 dominance 做滑动平均平滑，避免震荡行情中反复跳变
+    ctx_symbol = str(ctx.get("symbol", ""))
+    dominance = _smooth_dominance(raw_dominance, ctx_symbol)
 
     # 8. 动态 dominance 权重
     if dominance == "momentum":

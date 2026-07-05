@@ -1,15 +1,62 @@
 ﻿# -*- coding: utf-8 -*-
-"""线程安全的全局持仓管理器"""
+"""线程安全的全局持仓管理器，带文件持久化"""
 import threading
+import json
+import os
+import atexit
+
+POSITIONS_FILE = "state/managed_positions.json"
+
 
 class PositionManager:
     def __init__(self):
         self._positions = {}
         self._lock = threading.Lock()
+        self._persist_path = POSITIONS_FILE
+        self._dirty = False
+        self._load()
+        atexit.register(self._save_at_exit)
+
+    # ── 持久化 ──────────────────────────────────────────────
+
+    def _load(self):
+        """从文件加载持仓状态"""
+        if os.path.exists(self._persist_path):
+            try:
+                with open(self._persist_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._positions = data
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[PositionManager] 加载持久化文件失败: {exc}，使用空字典")
+
+    def _save(self):
+        """写入文件持久化"""
+        if not self._dirty:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._persist_path) or ".", exist_ok=True)
+            with open(self._persist_path, "w", encoding="utf-8") as f:
+                json.dump(self._positions, f, ensure_ascii=False, indent=2, default=str)
+            self._dirty = False
+        except OSError as exc:
+            print(f"[PositionManager] 持久化写入失败: {exc}")
+
+    def _save_at_exit(self):
+        """程序退出时强制保存"""
+        if self._dirty:
+            self._save()
+
+    def _mark_dirty(self):
+        self._dirty = True
+
+    # ── 核心接口 ────────────────────────────────────────────
 
     def update(self, symbol: str, pos: dict):
         with self._lock:
             self._positions[symbol] = pos
+            self._mark_dirty()
+        self._save()
 
     def get(self, symbol: str = None):
         with self._lock:
@@ -20,6 +67,8 @@ class PositionManager:
     def remove(self, symbol: str):
         with self._lock:
             self._positions.pop(symbol, None)
+            self._mark_dirty()
+        self._save()
 
     def exists(self, symbol: str) -> bool:
         with self._lock:
@@ -36,6 +85,7 @@ class PositionManager:
     def __repr__(self):
         with self._lock:
             return repr(self._positions)
+
 
 # 单例
 position_manager = PositionManager()

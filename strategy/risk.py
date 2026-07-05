@@ -60,7 +60,7 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         tp1_mult, tp2_mult, tp3_mult = 1.10, 1.60, 2.20
         sl_loose, sl_tight = 1.20, 2.50
     else: 
-        tp1_mult, tp2_mult, tp3_mult = 1.00, 1.50, 2.00
+        tp1_mult, tp2_mult, tp3_mult = 1.50, 2.20, 3.00
         sl_loose, sl_tight = 1.00, 2.00
 
     _hard_min_stop = 1.20

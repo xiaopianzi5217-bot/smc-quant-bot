@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
 
+# ================= V38 REAL ENGINE CONFIG =================
+# 统一控制层：哪些引擎启用，哪些隔离
 VERSION = "V54_ALPHA_EXPANSION_20260621"
+PURE_MODE = False  # V54: no legacy book hard whitelist; use probe sizing instead
+ENGINES = ["TRANSITION", "CORE", "TREND"]  # 启用哪些 regime 引擎
+ISOLATED = ["PROBE"]  # 完全隔离账户的 book
+ALLOWED_BOOKS = ["CORE", "TACTICAL", "SCALP", "PROBE"]
+ALLOWED_GRADES = ["A_EV", "B_EV", "C_EV"]
 
 SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
 TIMEFRAME_MACRO = '1h'
@@ -91,13 +98,3 @@ TELEGRAM = {
 if __name__ == '__main__':
     print('TG_BOT_TOKEN =', os.getenv('TG_BOT_TOKEN'))
     print('TG_CHAT_ID =', os.getenv('TG_CHAT_ID'))
-
-
-# ================= V38 REAL ENGINE CONFIG =================
-# 统一控制层：哪些引擎启用，哪些隔离
-VERSION = "V54_ALPHA_EXPANSION_20260621"
-PURE_MODE = False  # V54: no legacy book hard whitelist; use probe sizing instead
-ENGINES = ["TRANSITION", "CORE", "TREND"]  # 启用哪些 regime 引擎
-ISOLATED = ["PROBE"]  # 完全隔离账户的 book
-ALLOWED_BOOKS = ["CORE", "TACTICAL", "SCALP", "PROBE"]
-ALLOWED_GRADES = ["A_EV", "B_EV", "C_EV"]
