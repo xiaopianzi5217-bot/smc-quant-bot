@@ -71,7 +71,7 @@
       "max_atr_pct": 0.06
     },
     "volume_confirmation": {
-      "enabled": false,
+      "enabled": true,
       "soft_min_volume_ratio": 0.75
     },
     "structure_distance": {
