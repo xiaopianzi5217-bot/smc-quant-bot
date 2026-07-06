@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-07-06T10:07:30.465296+00:00",
+  "params": {
+    "threshold": 40,
+    "min_rr": 0.8,
+    "note": "CALIBRATED",
+    "current_score": {
+      "sharpe": -0.9571,
+      "win_rate": 0.39,
+      "avg_r": -0.025,
+      "n": 200
+    },
+    "optimized_score": {
+      "sharpe": 3.7927,
+      "win_rate": 0.4405,
+      "avg_r": 0.1012,
+      "n": 84
+    },
+    "improvement": {
+      "sharpe_delta": 4.7498,
+      "win_rate_delta": 0.0505,
+      "avg_r_delta": 0.1262
+    }
+  }
+}

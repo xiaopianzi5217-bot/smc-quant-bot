@@ -8,7 +8,9 @@
     "ETH/USDT",
     "SOL/USDT"
   ],
-  "symbol_blacklist": ["SOL/USDT"],
+  "symbol_blacklist": [
+    "SOL/USDT"
+  ],
   "exec_timeframe": "15m",
   "macro_timeframe": "1h",
   "scan_interval_seconds": 45,
