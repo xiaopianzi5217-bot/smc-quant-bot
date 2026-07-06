@@ -591,10 +591,52 @@ def run_once(cfg=None):
                 "state": "ERROR",
                 "reason": err_stack,
             })
-    write_json_report("latest_v11_run.json", results)
+        write_json_report("latest_v11_run.json", results)
     # 【修复20260625】追加 CSV 数据日志（只追加，不覆盖）
     _append_csv_log(results, cfg)
+
+    # 🧠 自适应调参：每 120 次扫描检查一次（约每小时检查是否需优化）
+    try:
+        _trigger_adaptive_calibrate()
+    except Exception:
+        pass
+
     return results
+
+
+def _trigger_adaptive_calibrate():
+    """按需触发自适应调参"""
+    import os, json
+    from pathlib import Path
+
+    count_file = Path("state/scan_counter.json")
+    count_file.parent.mkdir(parents=True, exist_ok=True)
+
+    counter = 0
+    try:
+        if count_file.exists():
+            with open(count_file) as f:
+                data = json.load(f)
+                counter = data.get("count", 0)
+    except Exception:
+        counter = 0
+
+    counter += 1
+    try:
+        with open(count_file, "w") as f:
+            json.dump({"count": counter}, f)
+    except Exception:
+        pass
+
+    # 每 120 次扫描检查一次（约 1.5 小时）
+    if counter % 120 == 0:
+        try:
+            from optimizer.adaptive_calibrator import run_auto_calibrate
+            result = run_auto_calibrate()
+            if result.get("note") == "CALIBRATED":
+                print(f"[自适应] 参数已优化: threshold={result['threshold']}, min_rr={result['min_rr']}")
+        except Exception as e:
+            print(f"[自适应] 调参异常: {e}")
 
 
 def _append_csv_log(results, cfg):
