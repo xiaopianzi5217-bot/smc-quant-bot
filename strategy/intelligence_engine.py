@@ -409,11 +409,25 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     if expected_value <= 0.0:
         size_multiplier *= 0.80
         
-    # 【修复20260701】方向性 setup 只调 size，不改 win_prob（从上面移过来）
+        # 【修复20260701】方向性 setup 只调 size，不改 win_prob（从上面移过来）
     if not has_any_setup and not setup_match:
         size_multiplier *= 0.75  # 无方向性 setup 时仓位打 75 折
     elif not setup_match and has_any_setup:
         size_multiplier *= 0.60  # setup 在对面时仓位打 6 折
+
+    # 🧠 置信度调节：样本不足时降低 EV 可信度
+    try:
+        from strategy.confidence_engine import confidence_engine
+        _sample_n = ev_learner.buckets.get(ev_learner._key(regime, setup_type), {}).get("total", 0)
+        _variance = abs(blended_wp - 0.5)
+        _regime_stability = 1.0 if regime not in ("CHOP", "MUD") else 0.4
+        _conf = confidence_engine.score(n=_sample_n, variance=_variance, regime_stability=_regime_stability)
+        expected_value = expected_value * _conf
+        # 如果置信度极低（<0.2），强制降级
+        if _conf < 0.2 and ev_grade == "A_EV":
+            ev_grade = "B_EV"
+    except Exception:
+        pass
 
     return {
         "win_prob": round(float(blended_wp), 4),
