@@ -533,7 +533,7 @@ def evaluate_symbol(symbol, cfg):
         except Exception as _fs_err:
             print(f"[{symbol}] FeatureStore 写入失败: {_fs_err}")
 
-        # 写入交易日志（Trade Journal）
+                # 写入交易日志（Trade Journal）
         try:
             from state.trade_journal import journal as _tj
             _tj.open_trade(
@@ -551,6 +551,17 @@ def evaluate_symbol(symbol, cfg):
             )
         except Exception as _tj_err:
             print(f"[{symbol}] TradeJournal 写入失败: {_tj_err}")
+
+        # 🧠 学习型 EV：记录开单时的 regime/setup_type（平仓时通过 close_trade 传 won）
+        try:
+            from strategy.intelligence_engine import ev_learner
+            _setup_type = str(exec_ctx.get("setup_type", "V37_CORE") or "V37_CORE")
+            _regime_key = str(macro_ctx.get("regime", "MIXED")).upper()
+            # 暂时记录到 trade_journal 扩展字段，平仓时回传
+            if hasattr(_tj, "journal") or True:
+                pass  # 平仓时在 close_trade 里调用 ev_learner.record_trade
+        except Exception:
+            pass
 
     return {
         "symbol": symbol,

@@ -137,6 +137,81 @@ class RRTracker:
 # ⑥ 全局 RRTracker 实例（交易结束后需调用 rr_tracker.update(pnl_r)）
 rr_tracker: RRTracker = RRTracker()
 
+# ============================================================
+# 🧠 学习型 EV：从历史交易中学习 win_prob 校准
+# ============================================================
+class EVLearner:
+    """从历史交易结果学习 EV 参数校准。
+
+    原理：
+    - 按 (regime, setup_type) 分桶统计历史胜率
+    - 用历史胜率替代固定公式的 win_prob
+    - 保存到 JSON 文件，重启不丢失
+    """
+    def __init__(self, state_file: str = "state/ev_learner_state.json"):
+        self.state_file = state_file
+        self.buckets: Dict[str, Dict[str, Any]] = {}  # key: "regime|setup_type"
+        self._load()
+
+    def _load(self):
+        try:
+            from pathlib import Path
+            p = Path(self.state_file)
+            if p.exists():
+                import json
+                with open(p, "r") as f:
+                    self.buckets = json.load(f)
+        except Exception:
+            self.buckets = {}
+
+    def _save(self):
+        try:
+            from pathlib import Path
+            p = Path(self.state_file)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            import json
+            with open(p, "w") as f:
+                json.dump(self.buckets, f, indent=2)
+        except Exception:
+            pass
+
+    def _key(self, regime: str, setup_type: str) -> str:
+        return f"{regime.upper()}|{setup_type}"
+
+    def record_trade(self, regime: str, setup_type: str, won: bool):
+        """记录一笔交易结果"""
+        k = self._key(regime, setup_type)
+        b = self.buckets.setdefault(k, {"wins": 0, "total": 0})
+        b["total"] += 1
+        if won:
+            b["wins"] += 1
+        # 最多保留最近 200 笔
+        if b["total"] > 200:
+            b["wins"] = max(0, b["wins"] - 1)
+            b["total"] = 200
+        self._save()
+
+    def learned_win_prob(self, regime: str, setup_type: str, fallback: float = 0.38) -> float:
+        """返回学习到的胜率，样本不足时回退到 fallback"""
+        k = self._key(regime, setup_type)
+        b = self.buckets.get(k)
+        if b and b["total"] >= 10:  # 最少 10 笔样本
+            return round(b["wins"] / b["total"], 4)
+        return fallback
+
+    def learned_rr_mult(self, regime: str, setup_type: str, fallback: float = 1.0) -> float:
+        """返回学习到的 RR 乘数（历史平均实现 RR / 预期 RR）"""
+        k = self._key(regime, setup_type)
+        b = self.buckets.get(k)
+        if b and b["total"] >= 10:
+            # 未来可以扩展存储 realized_rr
+            pass
+        return fallback
+
+
+# 全局 EV 学习器实例
+ev_learner: EVLearner = EVLearner()
+
 # V37.6: disabled hard cluster blocking. Previous blocks used a mismatched
 # setup_type field and removed the better TREND trades while leaving weak
 # TRANSITION/SCALP trades. Use EV + cost + portfolio size instead.
@@ -267,8 +342,16 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
         # to 2.0 after a few outlier winners, corrupting EV ranking.
         estimated_rr = _clip(estimated_rr, 0.80, 1.80)
 
-    # ✅ 使用校准版 EV 计算
+        # ✅ 使用校准版 EV 计算
     setup_type = str(meta.get("setup_type", "V37_CORE") or "V37_CORE")
+
+    # 🧠 学习型修正：用历史胜率替代部分规则胜率
+    learned_wp = ev_learner.learned_win_prob(regime, setup_type)
+    if learned_wp > 0:
+        # 规则胜率和学习胜率加权融合（学习权重随样本量增加）
+        bucket_wp = _win_prob_bucket(regime, setup_type, score_norm)
+        learned_weight = min(0.6, max(0.1, ev_learner.buckets.get(ev_learner._key(regime, setup_type), {}).get("total", 0) / 100.0))
+        win_prob = (1 - learned_weight) * win_prob + learned_weight * learned_wp
 
     # ⑦ 禁掉最差组合
     if (regime, setup_type) in BLOCKED_CLUSTERS:
