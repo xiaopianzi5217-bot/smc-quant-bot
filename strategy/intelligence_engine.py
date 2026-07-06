@@ -415,16 +415,20 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     elif not setup_match and has_any_setup:
         size_multiplier *= 0.60  # setup 在对面时仓位打 6 折
 
-    # 🧠 置信度调节：样本不足时降低 EV 可信度
+        # 🧠 置信度调节：样本不足时降低 EV 可信度
     try:
         from strategy.confidence_engine import confidence_engine
         _sample_n = ev_learner.buckets.get(ev_learner._key(regime, setup_type), {}).get("total", 0)
         _variance = abs(blended_wp - 0.5)
         _regime_stability = 1.0 if regime not in ("CHOP", "MUD") else 0.4
         _conf = confidence_engine.score(n=_sample_n, variance=_variance, regime_stability=_regime_stability)
-        expected_value = expected_value * _conf
+        # 置信度只调节学习型 EV 的贡献，规则型 EV 保留
+        # conf=0 时保留 70% 规则 EV（不会完全归零）
+        _learned_weight = min(0.6, max(0.0, _sample_n / 100.0))
+        _effective_conf = _conf + (1 - _conf) * (1 - _learned_weight)
+        expected_value = expected_value * _effective_conf
         # 如果置信度极低（<0.2），强制降级
-        if _conf < 0.2 and ev_grade == "A_EV":
+        if _effective_conf < 0.2 and ev_grade == "A_EV":
             ev_grade = "B_EV"
     except Exception:
         pass

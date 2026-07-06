@@ -122,3 +122,7 @@ ts,symbol,channel,msg_type,direction,score,ev,price,msg_preview,status,reason
 2026-07-06 18:36:14,BTC/USDT,telegram,strategy_approved,Long,35.08,0.0,62931.6,Telegram 已发送,sent,
 2026-07-06 18:36:19,ETH/USDT,telegram,observer,,43.77,0.0,1769.78,observer|symbol=ETH/USDT|score=43.8/22.5,sent,
 2026-07-06 18:36:20,ETH/USDT,telegram,strategy_approved,Long,43.77,0.0,1769.78,Telegram 已发送,sent,
+2026-07-06 18:41:14,BTC/USDT,telegram,observer,,36.81,0.0834,62929.1,observer|symbol=BTC/USDT|score=36.8/28.8,sent,
+2026-07-06 18:41:15,BTC/USDT,telegram,strategy_approved,Long,36.81,0.0834,62929.1,Telegram 已发送,sent,
+2026-07-06 18:41:19,ETH/USDT,telegram,observer,,48.13,0.1025,1770.94,observer|symbol=ETH/USDT|score=48.1/10.5,sent,
+2026-07-06 18:41:21,ETH/USDT,telegram,strategy_approved,Long,48.13,0.1025,1770.94,Telegram 已发送,sent,
