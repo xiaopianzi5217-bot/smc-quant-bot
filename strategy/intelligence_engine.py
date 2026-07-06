@@ -34,53 +34,86 @@ def grade_from_expected_value(expected_value: float) -> str:
 
 
 # ============================================================
-# ✅ 一、校准版 EV 计算（防止过拟合）
+# ✅ 一、校准版 EV 计算（优化版 — 20260706）
 # ============================================================
-def compute_expected_value( win_prob: float, estimated_rr: float, regime: Optional[str] = None, score: Optional[float] = None, ) -> float:
-    """
-    EV 校准版本。
 
-    V54 Alpha Expansion 调整：旧版本同时压缩胜率和 RR，导致真实强信号
-    被过度打低。本版本仍做保守校准，但减少 shrink 幅度，让优质
-    SMC + SQZMOM 信号的收益期望可以释放出来。
+class ConfidenceEngine:
+    """增强版置信度引擎"""
+    @staticmethod
+    def score(n: int = 0, variance: float = 0.0, regime_stability: float = 0.7, score: float = 50.0) -> float:
+        sample_conf = min(1.0, n / (n + 15.0))
+        vol_conf = 1.0 / (1.0 + max(variance * 1.5, 0.0001))
+        score_conf = _clip((score - 50) / 50, 0.6, 1.0)
+        return sample_conf * vol_conf * regime_stability * score_conf
+
+
+def compute_expected_value(
+    win_prob: float,
+    estimated_rr: float,
+    regime: Optional[str] = None,
+    score: Optional[float] = None,
+    n_samples: int = 0,
+) -> float:
+    """
+    EV 优化版本 (2026-07-06)。
+
+    核心改进：
+    1. 置信度 4 因子（样本量×波动×regime稳定性×评分）→ 低置信时打折扣
+    2. win_prob 压缩到 [0.08, 0.78] + base_rate 混入 → 防过拟合
+    3. regime_penalty 调大（匹配 avgR≈0.018 的现实）
+    4. score_bonus 保留但减半（75→0.006, 88→0.014）
+    5. 新增 setup_type 小样本惩罚（n<50 时 -0.03）
     """
     regime_u = str(regime or "").upper()
 
-    # 1. win_prob shrink：V54 从 78/22 再放宽到 84/16。
-    # 仍向保守基准回归，但让强 SMC+SQZMOM 信号不要被二次腰斩。
-    base_rate = 0.40 if regime_u in {"TRANSITION", "CHOP"} else 0.37
-    win_prob_adj = 0.84 * _clip(win_prob, 0.05, 0.76) + 0.16 * base_rate
+    # 1. win_prob 校准：压缩极端值 + base_rate 混入
+    base_rate = 0.42 if regime_u == "TREND" else 0.38 if regime_u in {"TRANSITION", "MIXED"} else 0.35
+    win_prob_adj = 0.88 * _clip(win_prob, 0.08, 0.78) + 0.12 * base_rate
 
-    # 2. RR shrink：保留上限，避免幻想收益；上限放到 2.05 以匹配实际 TP2/TP3 路径。
-    rr_adj = _clip(estimated_rr, 0.80, 2.05)
+    # 2. RR shrink：保留上限
+    rr_adj = _clip(estimated_rr, 0.85, 2.3)
 
-    # 3. regime penalty：把环境惩罚从硬压制改为轻微折扣。
-    regime_penalty = 0.0
-    if regime_u == "CHOP":
-        regime_penalty = -0.015
-    elif regime_u == "TREND":
-        regime_penalty = -0.005
-    elif regime_u == "CRISIS_RISK_OFF":
-        regime_penalty = -0.090
+    # 3. regime_penalty：放大以匹配平均 R=0.018 的现实
+    regime_penalty = {
+        "TREND": -0.035,
+        "TRANSITION": -0.060,
+        "MIXED": -0.060,
+        "CHOP": -0.080,
+        "MUD": -0.080,
+        "CRISIS_RISK_OFF": -0.150,
+    }.get(regime_u, -0.050)
 
-    # 4. score dampening：低分仍降级，高分给轻微释放空间。
-    score_penalty = 0.0
+    # 4. score bonus（减半版本）
+    score_adj = 0.0
     if score is not None:
-        score_v = safe_float(score, 0.0)
-        if score_v < 50:
-            score_penalty = -0.025
-        elif score_v < 60:
-            score_penalty = -0.010
-        elif score_v >= 90:
-            score_penalty = 0.015
+        sv = safe_float(score, 50.0)
+        if sv >= 88:
+            score_adj = 0.014
+        elif sv >= 75:
+            score_adj = 0.006
+        elif sv < 50:
+            score_adj = -0.030
+        elif sv < 60:
+            score_adj = -0.015
 
     # 5. EV core
     ev = (win_prob_adj * rr_adj) - (1.0 - win_prob_adj)
 
-    # 6. final EV
-    ev = ev + regime_penalty + score_penalty
+    # 6. 总调整
+    ev = ev + regime_penalty + score_adj
 
-    return ev
+    # 7. 置信度衰减
+    _variance = abs(win_prob_adj - 0.5)
+    _regime_stab = 0.75 if regime_u == "TREND" else 0.55
+    _sv = safe_float(score, 50.0)
+    _conf = ConfidenceEngine.score(n=n_samples, variance=_variance, regime_stability=_regime_stab, score=_sv)
+    ev = ev * (0.6 + 0.4 * _conf)
+
+    # 8. 小样本额外惩罚（TACTICAL/SCALP 等桶 n<50 时）
+    if n_samples > 0 and n_samples < 50:
+        ev -= 0.03
+
+    return round(max(-0.15, ev), 4)
 
 
 # ============================================================
@@ -141,11 +174,12 @@ rr_tracker: RRTracker = RRTracker()
 # 🧠 学习型 EV：从历史交易中学习 win_prob 校准
 # ============================================================
 class EVLearner:
-    """从历史交易结果学习 EV 参数校准。
+    """从历史交易结果学习 EV 参数校准 + EV 偏差分析。
 
     原理：
     - 按 (regime, setup_type) 分桶统计历史胜率
     - 用历史胜率替代固定公式的 win_prob
+    - 记录预测 EV 和实际 R → 计算 EV 偏差（校准信号）
     - 保存到 JSON 文件，重启不丢失
     """
     def __init__(self, state_file: str = "state/ev_learner_state.json"):
@@ -178,35 +212,86 @@ class EVLearner:
     def _key(self, regime: str, setup_type: str) -> str:
         return f"{regime.upper()}|{setup_type}"
 
-    def record_trade(self, regime: str, setup_type: str, won: bool):
-        """记录一笔交易结果"""
+    def record_trade(self, regime: str, setup_type: str, won: bool, ev: Optional[float] = None, realized_r: Optional[float] = None, estimated_rr: Optional[float] = None):
+        """记录一笔交易结果
+
+        参数:
+            ev: 开单时系统预测的 EV（用于偏差计算）
+            realized_r: 平仓时实现的实际 R 倍数（用于偏差计算）
+            estimated_rr: 开单时的预期 RR（用于学习 RR 乘数）
+        """
+        regime = regime.upper().strip()
+        if not regime:
+            return
         k = self._key(regime, setup_type)
         b = self.buckets.setdefault(k, {"wins": 0, "total": 0})
         b["total"] += 1
         if won:
             b["wins"] += 1
-        # 最多保留最近 200 笔
+        if ev is not None:
+            b["ev_sum"] = b.get("ev_sum", 0.0) + ev
+        if realized_r is not None:
+            b["realized_sum"] = b.get("realized_sum", 0.0) + realized_r
+        # 记录 RR 乘数（实现 R / 预期 RR）
+        if realized_r is not None and estimated_rr is not None and estimated_rr > 0:
+            rr_ratio = realized_r / estimated_rr
+            b["rr_ratio_sum"] = b.get("rr_ratio_sum", 0.0) + rr_ratio
         if b["total"] > 200:
             b["wins"] = max(0, b["wins"] - 1)
             b["total"] = 200
+            if "ev_sum" in b:
+                b["ev_sum"] = b["ev_sum"] * 0.95
+            if "realized_sum" in b:
+                b["realized_sum"] = b["realized_sum"] * 0.95
+            if "rr_ratio_sum" in b:
+                b["rr_ratio_sum"] = b["rr_ratio_sum"] * 0.95
         self._save()
 
     def learned_win_prob(self, regime: str, setup_type: str, fallback: float = 0.38) -> float:
         """返回学习到的胜率，样本不足时回退到 fallback"""
         k = self._key(regime, setup_type)
         b = self.buckets.get(k)
-        if b and b["total"] >= 10:  # 最少 10 笔样本
+        if b and b["total"] >= 10:
             return round(b["wins"] / b["total"], 4)
         return fallback
 
     def learned_rr_mult(self, regime: str, setup_type: str, fallback: float = 1.0) -> float:
-        """返回学习到的 RR 乘数（历史平均实现 RR / 预期 RR）"""
+        """返回学习到的 RR 乘数（历史平均实现 R / 预期 RR）"""
         k = self._key(regime, setup_type)
         b = self.buckets.get(k)
-        if b and b["total"] >= 10:
-            # 未来可以扩展存储 realized_rr
-            pass
+        if b and b["total"] >= 10 and "rr_ratio_sum" in b:
+            return round(b["rr_ratio_sum"] / b["total"], 4)
         return fallback
+
+    def get_ev_bias(self, regime: str, setup_type: str, min_samples: int = 20) -> Optional[float]:
+        """返回 EV 偏差：平均实现 R - 平均预测 EV
+
+        正值 = 模型低估了（实际比预测好，应更激进）
+        负值 = 模型高估了（实际比预测差，应更保守）
+        样本不足时返回 None
+        """
+        k = self._key(regime, setup_type)
+        b = self.buckets.get(k)
+        if not b or b["total"] < min_samples:
+            return None
+        ev_sum = b.get("ev_sum", 0.0)
+        realized_sum = b.get("realized_sum", 0.0)
+        if ev_sum == 0 or realized_sum == 0:
+            return None
+        avg_ev = ev_sum / b["total"]
+        avg_realized = realized_sum / b["total"]
+        return round(avg_realized - avg_ev, 4)
+
+    def get_bias_adjusted_ev(self, regime: str, setup_type: str, raw_ev: float, min_samples: int = 20) -> float:
+        """返回偏差校准后的 EV
+
+        如果该 (regime, setup_type) 桶有足够样本，用历史偏差修正 raw_ev。
+        否则原样返回。
+        """
+        bias = self.get_ev_bias(regime, setup_type, min_samples)
+        if bias is not None:
+            return round(raw_ev + bias, 4)
+        return raw_ev
 
 
 # 全局 EV 学习器实例
@@ -391,7 +476,14 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     if is_tail_regime:
         blended_wp *= 0.90
 
-    expected_value = compute_expected_value(blended_wp, estimated_rr, regime, score_norm)
+                # 🧠 获取样本量用于置信度（传给 compute_expected_value）
+    _sample_n = ev_learner.buckets.get(ev_learner._key(regime, setup_type), {}).get("total", 0)
+
+    expected_value = compute_expected_value(blended_wp, estimated_rr, regime, score_norm, n_samples=_sample_n)
+
+    # 🧠 偏差校准：用历史偏差修正 EV
+    expected_value = ev_learner.get_bias_adjusted_ev(regime, setup_type, expected_value)
+
     ev_grade = grade_from_expected_value(expected_value)
 
     # 惩罚3：强制降级 (剥夺 A_EV 资格)
@@ -401,37 +493,24 @@ def estimate_expected_value(signal: Dict[str, Any], regime: str, vol_state: str,
     # Size缩放。评分层已通过 soft_mult 处理了信号质量，此处只处理环境风险。
     size_multiplier = 1.0
     
+        
+        
     if regime == "CRISIS_RISK_OFF":
         size_multiplier *= 0.40
     if vol_state == "HIGH_VOL":
         size_multiplier *= 0.85
-        
+    
     if expected_value <= 0.0:
         size_multiplier *= 0.80
         
-        # 【修复20260701】方向性 setup 只调 size，不改 win_prob（从上面移过来）
+    # 【修复20260701】方向性 setup 只调 size，不改 win_prob（从上面移过来）
     if not has_any_setup and not setup_match:
         size_multiplier *= 0.75  # 无方向性 setup 时仓位打 75 折
     elif not setup_match and has_any_setup:
         size_multiplier *= 0.60  # setup 在对面时仓位打 6 折
 
-        # 🧠 置信度调节：样本不足时降低 EV 可信度
-    try:
-        from strategy.confidence_engine import confidence_engine
-        _sample_n = ev_learner.buckets.get(ev_learner._key(regime, setup_type), {}).get("total", 0)
-        _variance = abs(blended_wp - 0.5)
-        _regime_stability = 1.0 if regime not in ("CHOP", "MUD") else 0.4
-        _conf = confidence_engine.score(n=_sample_n, variance=_variance, regime_stability=_regime_stability)
-        # 置信度只调节学习型 EV 的贡献，规则型 EV 保留
-        # conf=0 时保留 70% 规则 EV（不会完全归零）
-        _learned_weight = min(0.6, max(0.0, _sample_n / 100.0))
-        _effective_conf = _conf + (1 - _conf) * (1 - _learned_weight)
-        expected_value = expected_value * _effective_conf
-        # 如果置信度极低（<0.2），强制降级
-        if _effective_conf < 0.2 and ev_grade == "A_EV":
-            ev_grade = "B_EV"
-    except Exception:
-        pass
+        # 🧠 置信度已在 compute_expected_value 内部处理（4 因子置信度 + 小样本惩罚）
+    # 此处不再重复折扣
 
     return {
         "win_prob": round(float(blended_wp), 4),

@@ -1,6 +1,26 @@
 {
-  "|V37_CORE": {
-    "wins": 11,
-    "total": 200
+  "CHOP|V37_CORE": {
+    "wins": 27,
+    "total": 56
+  },
+  "MUD|V37_CORE": {
+    "wins": 9,
+    "total": 23
+  },
+  "TRANSITION|V37_CORE": {
+    "wins": 39,
+    "total": 79
+  },
+  "TRANSITION|V37_TACTICAL": {
+    "wins": 18,
+    "total": 22
+  },
+  "TREND|V37_CORE": {
+    "wins": 156,
+    "total": 309
+  },
+  "TREND|V37_TACTICAL": {
+    "wins": 27,
+    "total": 33
   }
 }

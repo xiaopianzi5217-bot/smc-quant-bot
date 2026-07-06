@@ -187,22 +187,28 @@ class BacktestPosition:
 def backtest_evaluate_symbol(
     symbol: str,
     cfg: Dict[str, Any],
+    curr,
+    macro_ctx: Dict[str, Any],
+    exec_ctx: Dict[str, Any],
     df_exec: pd.DataFrame,
-    df_macro: pd.DataFrame,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[BacktestPosition]]:
     """
-    回测版的 evaluate_symbol
-    
+    回测版的 evaluate_symbol（纯函数，不需重复 build_macro/build_exec）
+
+    参数:
+        symbol: 交易对
+        cfg: 配置
+        curr: 当前最新 K 线（Series）
+        macro_ctx: 预计算的宏观上下文
+        exec_ctx: 预计算的执行上下文
+        df_exec: 完整 15M 数据（用于 rolling 计算）
+
     返回:
         (decision_dict, position_or_None)
     """
     try:
-        curr = df_exec.iloc[-1]
         price = float(curr["close"])
         atr = float(curr.get("ATRr_14", curr.get("atr", 0)) or 0)
-
-        macro_ctx = build_macro_context(df_macro)
-        exec_ctx = build_exec_context(df_exec)
 
         # OB 距离判断
         if atr > 0:
@@ -291,8 +297,8 @@ def backtest_evaluate_symbol(
             "entry_meta": short_ctx,
             "estimated_rr": rr,
         }
-        _regime_str = str(macro_ctx.get("regime", ""))
-        _vol_str = str(macro_ctx.get("vol_state", ""))
+        _regime_str = str(macro_ctx.get("regime", exec_ctx.get("regime", "")))
+        _vol_str = str(macro_ctx.get("vol_state", "NORMAL_VOL"))
         long_ev = estimate_expected_value(_long_sig, _regime_str, _vol_str, long_ctx).get("expected_value", 0.0)
         short_ev = estimate_expected_value(_short_sig, _regime_str, _vol_str, short_ctx).get("expected_value", 0.0)
 
@@ -363,7 +369,7 @@ def backtest_evaluate_symbol(
                 tp3=tp3,
                 rr=rr,
                 score=l_score if direction == "Long" else s_score,
-                regime=_regime_str,
+                regime=_regime_str if _regime_str else str(exec_ctx.get("regime", "unknown")),
             )
             return decision, position
 
@@ -434,19 +440,44 @@ def run_backtest(
     df_exec = add_all_indicators(df_exec, wvf)
     df_macro = add_all_indicators(df_macro, wvf)
 
+    # 预计算 SMC 执行上下文（一次 build_exec_context ≈ 5秒）
+    print(f"[回测] 预计算 SMC 执行上下文...")
+    smc_exec_full = build_exec_context(df_exec)
+
     # 回测状态
     positions: List[BacktestPosition] = []
     trades: List[Dict[str, Any]] = []
     total_bars = len(df_exec)
     scan_count = 0
+    macro_ctx: Optional[Dict[str, Any]] = None
+    last_scan_idx = -1  # 上次扫描的索引，用于判断是否需要更新 exec_ctx
 
-    print(f"[回测] 开始逐 K 线回放...")
+    # 对回测模式下更新的 exec_ctx 字段做逐个 K 线修正
+    # （build_exec_context 返回的是最后一根 K 线的快照，需覆盖 K 线级别的动态字段）
+    def _patch_exec_ctx(base_ctx: Dict[str, Any], bar_idx: int) -> Dict[str, Any]:
+        """用预计算的 SMC 上下文 + 当前 K 线的动态字段构建 exec_ctx"""
+        ctx = dict(base_ctx)  # 浅拷贝
+        bar = df_exec.iloc[bar_idx]
+        # K 线级字段需要实时更新
+        ctx['kline_long_ok'] = bool(bar.get('kline_long_ok', False) or False)
+        ctx['kline_short_ok'] = bool(bar.get('kline_short_ok', False) or False)
+        ctx['sqzmom_color'] = str(bar.get('sqzmom_color', 'white'))
+        ctx['close'] = float(bar['close'])
+        ctx['volume_ratio'] = float(bar.get('volume_ratio', 1.0))
+        # 从 regime_info 取 regime
+        regime_info = ctx.get('regime_info', {})
+        ctx['regime'] = str(regime_info.get('regime', 'unknown'))
+        return ctx
+
+    # 回测采样步长：每 4 根 K 线（=1小时）扫描一次
+    SCAN_STEP = 4
+    print(f"[回测] 开始逐 K 线回放（每 {SCAN_STEP} 根 K 线扫描一次）...")
 
     for i in range(warmup, total_bars):
         if i % 5000 == 0:
             print(f"[回测] 进度: {i}/{total_bars} ({100*i/total_bars:.0f}%)")
 
-        # 更新现有持仓
+        # 每根 K 线更新现有持仓
         curr_bar = df_exec.iloc[i]
         high, low, close = float(curr_bar["high"]), float(curr_bar["low"]), float(curr_bar["close"])
         ts = int(curr_bar.get("timestamp", i))
@@ -466,30 +497,51 @@ def run_backtest(
                         regime=pos.regime,
                         setup_type="V37_CORE",
                         won=pos.pnl_r is not None and pos.pnl_r > 0,
+                        realized_r=pos.pnl_r,
+                        estimated_rr=pos.rr,
                     )
                 except Exception:
                     pass
                 positions.remove(pos)
 
-        # 每根 K 线收盘时检查（模拟每 15 分钟扫描一次）
-        df_slice_exec = df_exec.iloc[:i+1]
-        # 对齐 macro（找最接近的 1H K 线）
-        curr_dt = curr_bar["datetime"]
-        mask = df_macro["datetime"] <= curr_dt
-        if mask.any():
-            macro_idx = mask.sum() - 1
-            df_slice_macro = df_macro.iloc[:macro_idx+1]
-        else:
+        # 只在扫描点执行 evaluate（每 SCAN_STEP 根 K 线）
+        if i % SCAN_STEP != 0:
             continue
+
+        # 更新 macro_ctx（每 8 根 K 线 = 2小时更新一次）
+        if macro_ctx is None or i % (SCAN_STEP * 2) == 0:
+            curr_dt = curr_bar["datetime"]
+            mask = df_macro["datetime"] <= curr_dt
+            if mask.any():
+                macro_idx = mask.sum() - 1
+                df_macro_slice = df_macro.iloc[:macro_idx + 1]
+                if len(df_macro_slice) >= 20:
+                    macro_ctx = build_macro_context(df_macro_slice)
 
         if len(positions) >= max_positions:
             continue  # 满仓
 
+        # 构建 exec_ctx（预计算一次 ≈5秒，循环中只做轻量修正）
+        exec_ctx = _patch_exec_ctx(smc_exec_full, i)
+
         # 执行 evaluate
-        decision, position = backtest_evaluate_symbol(symbol, cfg, df_slice_exec, df_slice_macro)
+        decision, position = backtest_evaluate_symbol(
+            symbol, cfg,
+            curr=curr_bar,
+            macro_ctx=macro_ctx or {},
+            exec_ctx=exec_ctx,
+            df_exec=df_exec,  # 传完整 df，rolling 只取 tail(20) 不贵
+        )
         scan_count += 1
 
         if position is not None:
+            # 记录开单时的 EV 预测值
+            _ev_for_trade = None
+            if decision and "ev_info" in decision:
+                _ev_for_trade = decision["ev_info"].get("expected_value")
+            elif decision and "expected_value" in decision:
+                _ev_for_trade = decision.get("expected_value")
+            position._ev_at_entry = _ev_for_trade
             positions.append(position)
 
     # 平掉所有剩余持仓
@@ -506,6 +558,9 @@ def run_backtest(
                 regime=pos.regime,
                 setup_type="V37_CORE",
                 won=pos.pnl_r is not None and pos.pnl_r > 0,
+                ev=getattr(pos, '_ev_at_entry', None),
+                realized_r=pos.pnl_r,
+                estimated_rr=pos.rr,
             )
         except Exception:
             pass
