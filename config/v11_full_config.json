@@ -21,7 +21,7 @@
     "max_daily_loss_r": 3.0,
     "max_drawdown_pct": 0.1,
     "max_consecutive_losses": 3,
-    "min_rr": 1.35,
+    "min_rr": 1.5,
     "risk_per_trade": 0.008
   },
   "position_sizing": {
@@ -34,8 +34,7 @@
     },
     "observe_grades": [
       "S",
-      "A",
-      "B"
+      "A"
     ]
   },
   "strategy_params": {
@@ -115,5 +114,16 @@
     "send_observer": true,
     "send_observer_all": false,
     "send_approved": true
+  },
+  "v9_kernel": {
+    "threshold": 35.0,
+    "min_edge": 5.0,
+    "ev_threshold": 0.0
+  },
+  "v565_gate": {
+    "enabled": true,
+    "min_score": 55.0,
+    "min_model_ev": -0.28,
+    "hard_block_hours": [4, 6, 7, 23]
   }
 }

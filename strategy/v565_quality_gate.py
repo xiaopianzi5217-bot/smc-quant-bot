@@ -93,12 +93,23 @@ def _get_adaptive_min_score(
     regime: str,
     hour: int,
     score_table: Optional[Dict[str, Dict[int, float]]] = None,
+    fallback: Optional[float] = None,
 ) -> float:
-    """获取动态 score 门槛。"""
+    """获取动态 score 门槛。
+
+    如果传入了 fallback（来自 config.min_score），
+    且动态表查出来的值 > fallback，则优先用 fallback（让配置覆盖硬编码表）。
+    """
     table = score_table or DEFAULT_REGIME_HOUR_MIN_SCORE
     regime_lower = regime.lower().strip()
     rt = table.get(regime_lower, table.get("mixed", {}))
-    return float(rt.get(int(hour), rt.get("__default__", 72.0)))
+    dynamic_val = float(rt.get(int(hour), rt.get("__default__", 72.0)))
+
+    # 如果配置传了 min_score 且动态值比配置值还高 → 用配置值（宽松化）
+    if fallback is not None and dynamic_val > fallback:
+        return fallback
+
+    return dynamic_val
 
 
 def v565_quality_gate(
@@ -139,10 +150,13 @@ def v565_quality_gate(
     else:
         meta["passed_checks"].append("model_ev")
 
-    # ========================================================
+        # ========================================================
     # 2. 动态分数门槛
     # ========================================================
-    min_score = _get_adaptive_min_score(regime, hour, cfg.get("regime_hour_min_score"))
+    # config.min_score 作为 fallback：如果动态表的值比它高，优先用 config 值
+    _config_min_score = cfg.get("min_score")
+    _config_min_score_f = float(_config_min_score) if _config_min_score is not None else None
+    min_score = _get_adaptive_min_score(regime, hour, cfg.get("regime_hour_min_score"), fallback=_config_min_score_f)
     if score < min_score:
         reasons.append(f"SCORE_LOW_{score:.1f}<{min_score:.0f}_REGIME={regime}_HOUR={hour}")
         meta["failed_checks"].append("score")

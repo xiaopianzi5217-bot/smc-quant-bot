@@ -31,22 +31,29 @@ def _title_direction(v: Any) -> str:
 
 
 class V9DecisionKernel:
-    """V9 Decision Kernel — 轻量审批层。
+    """V9 Decision Kernel — 轻量审批层（严格版）。
 
     设计原则：
     - 只做两件事：选方向（多/空比较），做审批（是否允许成交）
     - 不做评分（评分由 smc_impulse_score 完成）
     - 不做 feature 工程
     - 不做 filters/rejects 以外的任何逻辑
-    - 低门槛以让 SMC-Impulse Engine 的连续分数充分表现
+
+    严格版本变更（2026-07-15）：
+    - 默认阈值从 20.0 → 35.0（滤掉大量假信号）
+    - 默认 min_edge 从 2.0 → 5.0（要求多空方向更明确）
+    - EV 门槛从 -0.20 → 0.0（不允许负期望的信号通过）
+    - 配置从 v9_kernel 子段读取（v1.5+），兼容旧版 v9_threshold/v9_min_edge
     """
 
     def __init__(self, cfg: Optional[Dict[str, Any]] = None, *args, **kwargs):
         self.cfg = _as_dict(cfg) or _as_dict(kwargs.get("params")) or _as_dict(kwargs.get("config"))
-        self.version = "v9.STABLE_20260701"
-        # 低门槛：让 SMC-Impulse 评分器本身决定质量，kernel 不做硬 reject
-        self._threshold = float(self.cfg.get("v9_threshold", 20.0))
-        self._min_edge = float(self.cfg.get("v9_min_edge", 2.0))
+        self.version = "v9.STABLE_20260701_STRICT"
+        # 从配置中读取 v9_kernel 子段，兼容旧版直接配置
+        _kernel_cfg = self.cfg.get("v9_kernel", self.cfg)
+        self._threshold = float(_kernel_cfg.get("threshold", _kernel_cfg.get("v9_threshold", 35.0)))
+        self._min_edge = float(_kernel_cfg.get("min_edge", _kernel_cfg.get("v9_min_edge", 5.0)))
+        self._ev_threshold = float(_kernel_cfg.get("ev_threshold", 0.0))
 
     def _normalize_args(self, *args, **kwargs) -> Tuple[str, Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         params = dict(kwargs)
@@ -85,26 +92,20 @@ class V9DecisionKernel:
         price = _num(_pick(curr, "close", "price", "last", default=_pick(params, "price", default=0)), 0.0)
         base_min_rr = 1.0
 
-        # 审批门槛：使用 self._threshold (v9_threshold) 和 self._min_edge (v9_min_edge)
-        # 默认值 20.0 / 2.0，可通过 config 中的 v9_threshold / v9_min_edge 覆盖
-        # 另加 EV 条件：如果 EV 已知（通过 params 传入），必须 EV > -0.20 才能过
+        # ===== 三重门槛：评分 + edge + EV =====
         primary_score = long_score if direction == "Long" else short_score
-        
-        # 【修复20260701】edge = abs(多空分差)，不分方向
         edge = abs(long_score - short_score)
-        
-        # 【修复20260701】双重门槛：评分门槛 + EV 门槛
+
+        # EV 门槛（从 self._ev_threshold 读取）
         long_ev = _num(params.get("long_ev", _pick(params, "long_ev", default=0)), 0.0)
         short_ev = _num(params.get("short_ev", _pick(params, "short_ev", default=0)), 0.0)
         selected_ev = long_ev if direction == "Long" else short_ev
         ev_reason = ""
         ev_ok = True
-        
-        # EV 门槛：负 EV 但不太恶劣（> -0.20）仍可通过，仓位由 risk_budget 控制
-        # 但是 EV <= -0.20 的信号基本是无效信号，直接拒绝
-        if selected_ev < -0.20:
+
+        if selected_ev < self._ev_threshold:
             ev_ok = False
-            ev_reason = f"ev_{selected_ev:.2f}_too_low"
+            ev_reason = f"ev_{selected_ev:.2f}_below_{self._ev_threshold:.2f}"
         
         score_ok = primary_score >= self._threshold
         # HTF 强制方向时不要求 edge 高分（可能弱方向反而分数低）
@@ -117,7 +118,7 @@ class V9DecisionKernel:
         approved = score_ok and ev_ok
 
         if not approved:
-            reason_parts = [f"score={primary_score:.1f}_edge={edge:.1f}"]
+            reason_parts = [f"score={primary_score:.1f}_edge={edge:.1f}_ev={selected_ev:.2f}"]
             if not score_ok: reason_parts.append("below_min")
             if not ev_ok: reason_parts.append(ev_reason)
             return self._hold(symbol, price, direction, long_score, short_score, self._threshold, self._threshold,
@@ -155,7 +156,7 @@ class V9DecisionKernel:
             "short_score": short_score,
             "threshold": self._threshold,
             "rr": passed_rr,
-            "reason": f"score_{primary_score:.1f}_edge_{edge:.1f}_approved",
+            "reason": f"score_{primary_score:.1f}_edge_{edge:.1f}_ev_{selected_ev:.2f}_approved",
             "primary": {
                 "direction": direction,
                 "priority": "A",

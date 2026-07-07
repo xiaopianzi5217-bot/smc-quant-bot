@@ -16,6 +16,7 @@ from strategy.trade_filters import mark_strategy_approval, check_strategy_filter
 from notifier.observer.risk_plan import build_rr_plan
 from notifier.observer.signal_collector import build_signal_snapshot
 from strategy.intelligence_engine import estimate_expected_value
+from strategy.v565_quality_gate import v565_quality_gate
 from config import SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.ctx_builder import _enrich_common_fields, build_directional_contexts
@@ -343,10 +344,48 @@ def evaluate_symbol(symbol, cfg):
             msg_preview=f"observer|symbol={symbol}|score={l_score:.1f}/{s_score:.1f}"[:120],
             status="sent" if observer_sent else "skipped",
             reason="" if observer_sent else ("dispatch_unavailable" if not dispatch_observer_snapshot else "no_structural_change"),
-        )
+                )
     except Exception as _pd_err:
         print(f"[{symbol}] PushDiary observer 记录失败: {_pd_err}")
 
+            # ===== V56.5 质量门：前置过滤假信号（在 V9 决策之前拦截弱信号） =====
+    # 如果门禁启用且信号未通过，直接 return HOLD，不走 V9 决策流程
+    _v565_cfg = cfg.get("v565_gate", {})
+    if _v565_cfg.get("enabled", True):
+        _score_for_gate = l_score if direction == "Long" else s_score
+        _ev_for_gate = long_ev if direction == "Long" else short_ev
+        _gate_row = {
+            "score": _score_for_gate,
+            "hour": int(curr.get("hour", -1)),
+            "regime": str(macro_ctx.get("regime", "mixed")),
+            "model_ev": _ev_for_gate,
+            "setup_type": str(exec_ctx.get("setup_type", "V37_CORE")),
+            "trend_strength": float(curr.get("trend_strength", 0)),
+            "mitigation_strength": float(exec_ctx.get("mitigation_strength", 0)),
+            "liquidity_sweep_confirmed": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
+        }
+        _gate_passed, _gate_reason, _gate_meta = v565_quality_gate(_gate_row, _v565_cfg)
+        if not _gate_passed:
+            print(f"[{symbol}] V56.5 质量门拦截: {_gate_reason} (score={_score_for_gate:.1f}, ev={_ev_for_gate:.4f})")
+            decision = {
+                "symbol": symbol, "approved": False, "decision_approved": False, "is_approved": False,
+                "action": "HOLD", "side": "NONE", "state": "V565_GATE_BLOCKED",
+                "state_name": "V56.5质量门拦截", "reason": _gate_reason,
+                "reason_cn": _gate_reason, "long_score": l_score, "short_score": s_score,
+                "direction": direction, "price": price,
+                "long_ev": long_ev, "short_ev": short_ev,
+            }
+            marked = {
+                "symbol": symbol, "approved": False, "state": "V565_GATE_BLOCKED",
+                "state_name": "V56.5质量门拦截", "reason": _gate_reason,
+                "decision": decision,
+            }
+            return {
+                "symbol": symbol, "approved": False, "state": "V565_GATE_BLOCKED",
+                "reason": _gate_reason, "decision": decision,
+            }
+
+# ===== V9 决策（入口统一，不再区分 V56.5 gate 是否启用） =====
     kernel = V9DecisionKernel(params=cfg)
     decision = kernel.decide(
         curr=curr,
@@ -381,21 +420,16 @@ def evaluate_symbol(symbol, cfg):
     decision["take_profit_2"] = tp2
     decision["take_profit_3"] = tp3
     decision["rr_calculated"] = rr
-        # 【修复20260715】将 htf_allowed 注入 decision 顶层供 CSV 日志使用
     decision["htf_allowed"] = htf_allowed
-    decision["exec_ctx"] = dict(exec_ctx)  # 用完整的原始 exec_ctx 而不是重建空 dict
+    decision["exec_ctx"] = dict(exec_ctx)
     decision["exec_ctx"]["htf_allowed"] = htf_allowed
 
     # Strategy filters are post-decision guards: they may only downgrade/block
     # an already approved decision. They must never turn HOLD into approved.
     if decision.get("approved"):
         filter_result = check_strategy_filters({
-            "symbol": symbol,
-            "curr": curr,
-            "macro_ctx": macro_ctx,
-            "exec_ctx": exec_ctx,
-            "decision": decision,
-            "cfg": cfg,
+            "symbol": symbol, "curr": curr, "macro_ctx": macro_ctx,
+            "exec_ctx": exec_ctx, "decision": decision, "cfg": cfg,
         })
         decision["strategy_filters"] = filter_result
         if not filter_result.get("approved", filter_result.get("allowed", False)):
@@ -410,7 +444,6 @@ def evaluate_symbol(symbol, cfg):
     guard = GlobalRiskGuard(cfg)
     portfolio_state = PortfolioStateManager().load()
     portfolio_check = guard.check(portfolio_state)
-
     if decision.get("approved") and not portfolio_check.get("allowed"):
         portfolio_reasons = portfolio_check.get("reasons") or []
         decision["approved"] = False
@@ -423,15 +456,13 @@ def evaluate_symbol(symbol, cfg):
         try:
             result = dispatch_strategy_decision(snapshot, decision)
             print(f"[{symbol}] Strategy 消息发送结果: {result}")
-            # 记录 Strategy 推送日记
             try:
                 from state.push_diary import push_logger as _pd2
                 _pd2.record(
                     symbol=symbol, channel="telegram", msg_type="strategy_approved",
                     direction=direction, score=l_score if direction == "Long" else s_score,
                     ev=long_ev if direction == "Long" else short_ev, price=price,
-                    msg_preview=str(result)[:120] if result else "sent",
-                    status="sent",
+                    msg_preview=str(result)[:120] if result else "sent", status="sent",
                 )
             except Exception as _pd2_err:
                 print(f"[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
@@ -441,14 +472,11 @@ def evaluate_symbol(symbol, cfg):
         print(f"[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")
     else:
         print(f"[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
-    
-    # 【Debug 增强】打印完整评分和 EV 诊断
-    _pri_score = l_score if direction == "Long" else s_score
+
     print(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
           f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
           f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
 
-    # 【增强】SignalDiary 记录
     try:
         from state.signal_diary import diary as _sd
         _sd.record(
@@ -460,10 +488,8 @@ def evaluate_symbol(symbol, cfg):
             long_ev=long_ev, short_ev=short_ev,
             price=price, sl=sl, tp1=tp1, rr=rr,
             regime=str(macro_ctx.get("regime", "")),
-            htf_allowed=htf_allowed,
-            volume_ratio=volume_ratio,
-            adx=float(curr.get('adx',0)),
-            atr_pct=float(curr.get('atr_pct',0)),
+            htf_allowed=htf_allowed, volume_ratio=volume_ratio,
+            adx=float(curr.get('adx',0)), atr_pct=float(curr.get('atr_pct',0)),
             squeeze=str(curr.get('squeeze','')),
             has_bot_div=bool(curr.get('has_bot_div', False)),
             has_top_div=bool(curr.get('has_top_div', False)),
@@ -478,88 +504,50 @@ def evaluate_symbol(symbol, cfg):
         print(f"[{symbol}] SignalDiary 记录失败: {_sd_err}")
 
     marked = mark_strategy_approval({
-        "symbol": symbol,
-        "curr": curr,
-        "macro_ctx": macro_ctx,
-        "exec_ctx": exec_ctx,
-        "decision": decision,
-        "cfg": cfg,
+        "symbol": symbol, "curr": curr, "macro_ctx": macro_ctx,
+        "exec_ctx": exec_ctx, "decision": decision, "cfg": cfg,
     })
     if marked is None:
-        marked = {
-            "symbol": symbol,
-            "approved": False,
-            "state": "MARK_APPROVAL_ERROR",
-            "state_name": "MARK_APPROVAL_ERROR",
-            "reason": "mark_strategy_approval returned None",
-        }
-
-    # Hard invariant: a non-approved DecisionKernel result cannot be re-approved
-    # by downstream filters or audit formatting.
+        marked = {"symbol": symbol, "approved": False, "state": "MARK_APPROVAL_ERROR",
+                  "state_name": "MARK_APPROVAL_ERROR", "reason": "mark_strategy_approval returned None"}
     if not decision.get("approved"):
         marked["approved"] = False
-
     FilterAuditLogger().record(symbol, curr, marked)
 
-    # 决策批准时写入 feature_store（开单特征记录）
     if marked.get("approved"):
         try:
             from feature_store import feature_store as _fs
             _fs.save_trade({
-                "symbol": symbol,
-                "direction": direction,
-                "entry": price,
-                "sl": sl,
-                "tp1": tp1,
-                "rr": rr,
-                "ev": 0.0,
+                "symbol": symbol, "direction": direction, "entry": price,
+                "sl": sl, "tp1": tp1, "rr": rr, "ev": 0.0,
                 "score": l_score if direction == "Long" else s_score,
-                "regime": exec_ctx.get("regime", ""),
-                "regime2": "",
-                "book": decision.get("book", ""),
-                "adx": exec_ctx.get("adx", 0),
-                "atr": atr,
-                "div_count": 0,
-                "signal_age": 0,
-                "mfe": 0.0,
-                "mae": 0.0,
-                "max_r": 0.0,
-                "max_r_before_stop": 0.0,
-                "exit_reason": "OPEN",
-                "pnl_r": None,
+                "regime": exec_ctx.get("regime", ""), "regime2": "",
+                "book": decision.get("book", ""), "adx": exec_ctx.get("adx", 0),
+                "atr": atr, "div_count": 0, "signal_age": 0,
+                "mfe": 0.0, "mae": 0.0, "max_r": 0.0, "max_r_before_stop": 0.0,
+                "exit_reason": "OPEN", "pnl_r": None,
                 "weekday": __import__("datetime").datetime.now().weekday(),
                 "hour": __import__("datetime").datetime.now().hour,
             })
         except Exception as _fs_err:
             print(f"[{symbol}] FeatureStore 写入失败: {_fs_err}")
 
-                # 写入交易日志（Trade Journal）
         try:
             from state.trade_journal import journal as _tj
             _tj.open_trade(
-                symbol=symbol,
-                direction=direction,
-                open_price=price,
-                sl=sl,
-                tp1=tp1,
-                tp2=tp2 if tp2 else 0,
-                tp3=tp3 if tp3 else 0,
-                rr=rr,
-                score=l_score if direction == "Long" else s_score,
+                symbol=symbol, direction=direction, open_price=price,
+                sl=sl, tp1=tp1, tp2=tp2 if tp2 else 0, tp3=tp3 if tp3 else 0,
+                rr=rr, score=l_score if direction == "Long" else s_score,
                 regime=str(exec_ctx.get("regime", "")),
                 note=f"adx={round(float(curr.get('adx',0)),1)} atr={round(atr,1)} vol_ratio={round(volume_ratio,2)}",
             )
         except Exception as _tj_err:
             print(f"[{symbol}] TradeJournal 写入失败: {_tj_err}")
 
-        # 🧠 学习型 EV：记录开单时的 regime/setup_type（平仓时通过 close_trade 传 won）
         try:
             from strategy.intelligence_engine import ev_learner
-            _setup_type = str(exec_ctx.get("setup_type", "V37_CORE") or "V37_CORE")
-            _regime_key = str(macro_ctx.get("regime", "MIXED")).upper()
-            # 暂时记录到 trade_journal 扩展字段，平仓时回传
             if hasattr(_tj, "journal") or True:
-                pass  # 平仓时在 close_trade 里调用 ev_learner.record_trade
+                pass
         except Exception:
             pass
 
