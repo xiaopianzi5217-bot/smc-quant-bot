@@ -1,0 +1,21 @@
+{
+  "config": "{'version': 'v11_v3_institutional_upgrade', 'mode': 'dry_run', 'data_mode': 'live', 'exchange': 'bitget', 'symbols': ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'], 'symbol_blacklist': ['SOL/USDT'], 'exec_timeframe': '15m', 'macro_timeframe': '1h', 'scan_interval_seconds': 45, 'risk': {'leverage': 1, 'max_open_positions': 4, 'max_same_direction_positions': 2, 'max_daily_loss_r': 3.0, 'max_drawdown_pct': 0.1, 'max_consecutive_losses': 3, 'min_rr': 1.5, 'risk_per_trade': 0.008}, 'position_sizing': {'enabled': True, 'grade_risk_multiplier': {'S': 1.0, 'A': 0.5, 'B': 0.25, 'C': 0.0}, 'observe_grades': ['S', 'A']}, 'strategy_params': {'wvf_std_mult': 1.8, 'min_score_edge': 0.15, 'score_base_threshold': 3.2, 'rsi_ob': 72, 'rsi_os': 28, 'min_setup_quality': 55, 'strong_setup_quality': 75}, 'strategy_filters': {'enabled': True, 'multi_timeframe_trend': {'enabled': True, 'allow_both': False, 'block_long_when_exec_red': True, 'block_short_when_exec_blue': True}, 'fib_ote': {'enabled': True, 'min_fib': 0.5, 'max_fib': 0.88, 'premium_penalty': 0.5, 'ote_bonus': 1.3}, 'symbol_cooldown': {'enabled': True, 'bars': 1, 'state_file': 'state/strategy_filter_state.json'}, 'atr_volatility': {'enabled': True, 'min_atr_pct': 0.0009, 'max_atr_pct': 0.06}, 'volume_confirmation': {'enabled': True, 'soft_min_volume_ratio': 0.75}, 'structure_distance': {'enabled': False, 'max_chase_atr': 1.6}, 'trading_session': {'enabled': False}, 'vwap': {'enabled': True}}, 'execution': {'order_type': 'limit', 'tp_target': 'structural', 'move_sl_to_be_after_tp1': True, 'trail_after_tp1': True, 'trail_atr_mult': 1.1, 'smart_sl_multiplier': 0.8}, 'squeeze_filter': {'enabled': True, 'block_building': False, 'allow_strong_signal': True, 'strong_score': 5.5}, 'smc_quality': {'enabled': True, 'near_zone_atr_mult': 0.55, 'sweep_lookback_bars': 8, 'fvg_lookback_bars': 80, 'ob_lookback_bars': 20, 'min_quality_to_trade': 55, 'prefer_quality_over_quantity': True, 'notes': 'V3严格风控版：强制趋势对齐，严控逆势操作。'}, 'telegram': {'send_observer': False, 'send_observer_all': False, 'send_approved': False}, 'v9_kernel': {'threshold': 35.0, 'min_edge': 5.0, 'ev_threshold': 0.0}, 'v565_gate': {'enabled': True, 'min_score': 55.0, 'min_model_ev': -0.28, 'hard_block_hours': [4, 6, 7, 23]}, 'secrets': {}}",
+  "results": [
+    {
+      "symbol": "BTC/USDT",
+      "approved": true,
+      "state": "APPROVED",
+      "score": 42.33,
+      "ev": 0,
+      "reason": "score_42.3_edge_30.4_ev_0.02_approved"
+    },
+    {
+      "symbol": "ETH/USDT",
+      "approved": false,
+      "state": "V565_GATE_BLOCKED",
+      "score": 37.91,
+      "ev": 0.0096,
+      "reason": "SCORE_LOW_37.9<55_REGIME=mixed_HOUR=-1"
+    }
+  ]
+}

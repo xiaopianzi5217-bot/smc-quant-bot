@@ -309,6 +309,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
     print(f"[{symbol}] V56.5 选定: {direction} score={score:.1f} ev={ev:.4f} "
           f"setup={best.get('setup_type','?')} price={entry_price:.2f}")
     
+    # 【修复20260705】多空评分改为使用 exec_ctx 中的独立质量评分
+    _exec_lq = float(exec_ctx.get("long_quality", 0))
+    _exec_sq = float(exec_ctx.get("short_quality", 0))
+    _use_long_score = _exec_lq if _exec_lq > 0 else (float(score) if direction == "Long" else 0.0)
+    _use_short_score = _exec_sq if _exec_sq > 0 else (0.0 if direction == "Long" else float(score))
+
     # 构建兼容返回格式
     return {
         "symbol": symbol,
@@ -333,8 +339,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "macro_ctx": macro_ctx,
         "curr": curr,
         "observer_events": [],
-        "long_score": float(score) if direction == "Long" else 0.0,
-        "short_score": 0.0 if direction == "Long" else float(score),
+        "long_score": _use_long_score,
+        "short_score": _use_short_score,
         "long_ev": round(ev, 4) if direction == "Long" else 0.0,
         "short_ev": 0.0 if direction == "Long" else round(ev, 4),
         "long_entry": entry_price,
@@ -391,13 +397,15 @@ def _detect_observer_events(curr, exec_ctx, macro_ctx, long_score: float, short_
         except:
             return default
             
-    sqzmom_white_long = _bool(curr.get("sqzmom_white_reversal_long")) if hasattr(curr, 'get') else False
-    if not sqzmom_white_long:
-        sqzmom_white_long = _bool(exec_ctx.get("sqzmom_white_reversal_long", False))
-        
-    sqzmom_white_short = _bool(curr.get("sqzmom_white_reversal_short")) if hasattr(curr, 'get') else False
-    if not sqzmom_white_short:
-        sqzmom_white_short = _bool(exec_ctx.get("sqzmom_white_reversal_short", False))
+    # 【修复20260705】SQZMOM 白线检测优先从 exec_ctx 读取
+    sqzmom_white_long = _bool(exec_ctx.get("sqzmom_white_reversal_long", False))
+    sqzmom_white_short = _bool(exec_ctx.get("sqzmom_white_reversal_short", False))
+    # 兜底：如果 curr 有则覆盖
+    if hasattr(curr, 'get'):
+        if _bool(curr.get("sqzmom_white_reversal_long")):
+            sqzmom_white_long = True
+        if _bool(curr.get("sqzmom_white_reversal_short")):
+            sqzmom_white_short = True
         
     if sqzmom_white_long:
         events.append({"type": "SQZMOM_WHITE", "dir": "Long", "desc": "SQZMOM 白线（多头动量衰竭）", "key": "sqz_white_long"})
@@ -489,16 +497,31 @@ def _detect_observer_events(curr, exec_ctx, macro_ctx, long_score: float, short_
     return events
 
 def _new_observer_events(symbol: str, events: list) -> list:
-    global _OBSERVER_HISTORY
+    """用时间窗去重：同一 key 在 OBSERVER_COOL_DOWN 秒内不重复推送。
+    超过冷却期则重置，允许同类事件再次触发。
+    """
+    global _OBSERVER_HISTORY, _OBSERVER_COOL_DOWN
     if symbol not in _OBSERVER_HISTORY:
         _OBSERVER_HISTORY[symbol] = {}
+    if symbol not in _OBSERVER_COOL_DOWN:
+        _OBSERVER_COOL_DOWN[symbol] = {}
     last = _OBSERVER_HISTORY[symbol]
+    cool = _OBSERVER_COOL_DOWN[symbol]
+    now = time.time()
+    COOLDOWN_SECS = 300  # 5 分钟后同类事件可再次触发
     new_events = []
     for ev in events:
         key = ev.get("key", ev.get("type", ""))
-        if not last.get(key, False):
+        last_seen = cool.get(key, 0)
+        if now - last_seen > COOLDOWN_SECS:
             new_events.append(ev)
+            cool[key] = now
         last[key] = True
+    # 清理过期冷却记录（超过 1 小时未更新的 key 删除，防内存泄漏）
+    stale_keys = [k for k, v in cool.items() if now - v > 3600]
+    for k in stale_keys:
+        cool.pop(k, None)
+        last.pop(k, None)
     return new_events
 
 
@@ -574,13 +597,47 @@ def _push_observer_event(
         try: return f"{float(fvg):.2f}"
         except: return str(fvg)
 
+    # ── 操作建议统一格式 ──────────────────────
+    lp = long_score
+    sp = short_score
+    score_gap = abs(lp - sp)
+    # 推断方向中文名与对应 EV
+    if v37_dir == "Long":
+        dir_cn_local = "多头"
+        ev_local = long_ev
+    elif v37_dir == "Short":
+        dir_cn_local = "空头"
+        ev_local = short_ev
+    else:
+        dir_cn_local = "多军" if lp >= sp else "空军"
+        ev_local = max(long_ev, short_ev)
+    if score_gap >= 15 and ((v37_dir == "Long" and lp > sp) or (v37_dir == "Short" and sp > lp)):
+        suggest_text = (
+            f"✅ 【建议开{v37_dir}】\n"
+            f"原因：{dir_cn_local}评分 {max(lp,sp):.0f}分，EV {ev_local:+.4f}，"
+            f"反向 {min(lp,sp):.0f}分，分差 {score_gap:.0f}分，AI 判断此方向可执行。\n"
+            f"操作：按下方风控计划挂单，不建议追高，等价格回到入场参考附近。"
+        )
+    elif score_gap >= 8:
+        suggest_text = (
+            f"⚠️ 【偏向{dir_cn_local}，但暂不开单】\n"
+            f"多头 {lp:.0f}分 vs 空头 {sp:.0f}分，接近开单门槛。\n"
+            f"操作：等回踩下方防守区（SSL/买方OB），或等放量/扫止损确认后再入场，不追高。"
+        )
+    else:
+        suggest_text = (
+            f"⏸️ 【优势不明显，不开单】\n"
+            f"多头 {lp:.0f}分 / 空头 {sp:.0f}分，分差 {score_gap:.0f}分，两者均不够突出。\n"
+            f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
+        )
+
     lines = [
         f"{icon} [{type_name}] {symbol}",
         f"方向: {dir_text} | {ev['desc']}",
         "",
         "━━━ 多空博弈 ━━━",
-        f"多头: {long_score:.1f}分 EV:{long_ev:+.4f}  空头: {short_score:.1f}分 EV:{short_ev:+.4f}",
-        f"分差: {abs(long_score-short_score):.1f}分 | 建议: {suggestion}",
+        f"多头: {lp:.1f}分 EV:{long_ev:+.4f}  空头: {sp:.1f}分 EV:{short_ev:+.4f}",
+        f"分差: {score_gap:.1f}分 | 建议: {suggestion}",
         "",
         "━━━ 行情环境 ━━━",
         f"趋势: {trend_direction or 'N/A'} | 状态: {regime_cn.get(regime, regime)}",
@@ -608,13 +665,24 @@ def _push_observer_event(
             lines.append(f"资金费率: {fr:.4f}%")
         except: pass
 
+    # ── 操作建议（替代旧的简短建议） ──
+    lines.append("")
+    lines.append("━━━ 操作建议 ━━━")
+    lines.append(suggest_text)
+
     ref_entry = long_entry if v37_dir == "Long" else (short_entry if v37_dir == "Short" else 0)
     ref_sl = long_sl if v37_dir == "Long" else (short_sl if v37_dir == "Short" else 0)
     ref_tp1 = long_tp1 if v37_dir == "Long" else (short_tp1 if v37_dir == "Short" else 0)
     ref_rr = long_rr if v37_dir == "Long" else (short_rr if v37_dir == "Short" else 0)
     if v37_dir in ("Long", "Short") and ref_sl and ref_sl > 0 and ref_entry > 0:
         lines.append("")
-        lines.append(f"参考开单: {dir_emoji.get(v37_dir, v37_dir)} 入场{ref_entry:.2f} SL{ref_sl:.2f} TP1{ref_tp1:.2f} RR{ref_rr:.2f}")
+        lines.append("━━━ 开单参数 ━━━")
+        lines.append(f"入场: {ref_entry:.2f} SL: {ref_sl:.2f} TP1: {ref_tp1:.2f}")
+        lines.append(f"RR: {ref_rr:.2f} EV: {ev_local:+.4f} Score: {max(lp,sp):.1f}")
+    elif v37_dir in ("Long", "Short"):
+        lines.append("")
+        lines.append("━━━ 开单参数 ━━━")
+        lines.append("暂无可用入场参数")
 
     safe_send("\n".join(lines))
     print(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
@@ -784,16 +852,52 @@ def check_and_open(result: dict) -> bool:
     atr_pct = atr / entry * 100 if entry > 0 and atr > 0 else 0
     vol_ratio_str = f"{result.get('volume_ratio', 1.0):.2f}x"
 
+    # ── 操作建议 ──
+    lp_s = result.get('long_score', 0)
+    sp_s = result.get('short_score', 0)
+    ev_dir = result.get('long_ev', 0) if direction == 'Long' else result.get('short_ev', 0)
+    sg = abs(lp_s - sp_s)
+    suggest_text_strategy = (
+        f"✅ 【建议开{direction}】\n"
+        f"原因：{dir_cn}评分 {max(lp_s,sp_s):.0f}分，EV {ev_dir:+.4f}，"
+        f"反向 {min(lp_s,sp_s):.0f}分，分差 {sg:.0f}分，AI 判断此方向可执行。\n"
+        f"操作：按下方风控计划挂单，不建议追高，等价格回到入场参考附近。"
+    )
+    # ── 流动性/关键位 ──
+    _bsl_x = result.get('bsl_level', 0)
+    _ssl_x = result.get('ssl_level', 0)
+    _price_x = result.get('price', 0)
+    _liq_lines = []
+    if _bsl_x > 0:
+        _bsl_dx = abs(_price_x - _bsl_x) / _price_x * 100 if _price_x > 0 else 0
+        _liq_lines.append(f"BSL: {_bsl_x:.2f}(距离{_bsl_dx:.2f}%) | 已扫: {'是' if result.get('is_bsl_swept',False) else '否'}")
+    if _ssl_x > 0:
+        _ssl_dx = abs(_price_x - _ssl_x) / _price_x * 100 if _price_x > 0 else 0
+        _liq_lines.append(f"SSL: {_ssl_x:.2f}(距离{_ssl_dx:.2f}%) | 已扫: {'是' if result.get('is_ssl_swept',False) else '否'}")
+    def _fmt_ob_x(ob): return '暂无' if ob is None else (f'{float(ob[0]):.2f}~{float(ob[1]):.2f}' if isinstance(ob, (list, tuple)) and len(ob) >= 2 else str(ob))
+    def _fmt_fvg_x(fvg): return '暂无' if fvg is None else (f'{float(fvg):.2f}' if isinstance(fvg, (str, int, float)) else str(fvg))
+    _liq_lines.append(f"买方OB: {_fmt_ob_x(result.get('bullish_ob'))}  卖方OB: {_fmt_ob_x(result.get('bearish_ob'))}")
+    _liq_lines.append(f"多头FVG: {_fmt_fvg_x(result.get('bullish_fvg'))}  空头FVG: {_fmt_fvg_x(result.get('bearish_fvg'))}")
+    _fr_x = result.get('funding_rate')
+    if _fr_x is not None:
+        try: _liq_lines.append(f'资金费率: {float(_fr_x):.4f}%')
+        except: pass
+    _liq_text_x = '\n'.join(_liq_lines) if _liq_lines else ''
+
     msg = (
         f"━━━ [信号单] {dir_emoji2} {dir_cn} {symbol} ━━━\n"
         f"📐 [价格失衡区] {result.get('bsl_level',0):.0f}~{result.get('ssl_level',0):.0f}\n"
         f"方向: {dir_emoji2} {dir_cn}\n"
         f"━━━ 多空博弈 ━━━\n"
-        f"多头: {result.get('long_score',0):.1f}分 EV:{result.get('long_ev',0):+.4f}  空头: {result.get('short_score',0):.1f}分 EV:{result.get('short_ev',0):+.4f}  分差: {abs(result.get('long_score',0)-result.get('short_score',0)):.1f}分\n"
+        f"多头: {lp_s:.1f}分 EV:{result.get('long_ev',0):+.4f}  空头: {sp_s:.1f}分 EV:{result.get('short_ev',0):+.4f}  分差: {sg:.1f}分\n"
         f"━━━ 行情环境 ━━━\n"
         f"趋势: {regime_cn} | 波动: {vol_cn} | 成交量: {vol_ratio_str}\n"
         f"━━━ 指标透视 ━━━\n"
         f"RSI: {result.get('rsi',0):.1f}({rsi_zone}) ATR: {atr:.2f} | {atr_pct:.2f}%\n"
+        f"━━━ 流动性/关键位 ━━━\n"
+        f"{_liq_text_x}\n"
+        f"━━━ 操作建议 ━━━\n"
+        f"{suggest_text_strategy}\n"
         f"━━━ 开单参数 ━━━\n"
         f"入场: {entry:.2f} SL: {sl:.2f} TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
         f"RR: {rr:.2f} EV: {ev:.4f} Score: {score:.1f}\n"
