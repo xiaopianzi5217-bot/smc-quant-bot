@@ -86,6 +86,12 @@ _OBSERVER_HISTORY: dict = {} # symbol -> {event_key: bool}
 _LAST_SAFE_SEND_TIME: float = 0.0
 _OBSERVER_COOL_DOWN: dict = {} # symbol -> last_push_time
 
+# ========== 新: Observer 事件状态跟踪（状态变化时才推送） ==========
+_OBSERVER_EVENT_ACTIVE: dict = {}   # symbol -> {event_key: bool}  记录事件当前是否激活
+_OBSERVER_EVENT_PUSHED: dict = {}   # symbol -> {event_key: bool}  记录事件是否已推送过（避免重复）
+_OBSERVER_PERIODIC_LAST: dict = {}  # symbol -> {event_type: last_periodic_send_time}
+OBSERVER_PERIODIC_INTERVAL = 1800  # 连续状态事件每 30 分钟汇总推送一次
+
 _OBSERVER_ICONS = {
     "SQZMOM_WHITE": "⚪",
     "DIVERGENCE_R": "🔮",
@@ -497,31 +503,89 @@ def _detect_observer_events(curr, exec_ctx, macro_ctx, long_score: float, short_
     return events
 
 def _new_observer_events(symbol: str, events: list) -> list:
-    """用时间窗去重：同一 key 在 OBSERVER_COOL_DOWN 秒内不重复推送。
-    超过冷却期则重置，允许同类事件再次触发。
+    """状态变化去重：事件从无→有才推送（首次触发）；持续存在不再重复推送。
+    连续状态事件（背离/接近side/K线变白等）每 30 分钟汇总推送一次状态摘要。
     """
-    global _OBSERVER_HISTORY, _OBSERVER_COOL_DOWN
-    if symbol not in _OBSERVER_HISTORY:
-        _OBSERVER_HISTORY[symbol] = {}
-    if symbol not in _OBSERVER_COOL_DOWN:
-        _OBSERVER_COOL_DOWN[symbol] = {}
-    last = _OBSERVER_HISTORY[symbol]
-    cool = _OBSERVER_COOL_DOWN[symbol]
+    global _OBSERVER_EVENT_ACTIVE, _OBSERVER_EVENT_PUSHED, _OBSERVER_PERIODIC_LAST
+    if symbol not in _OBSERVER_EVENT_ACTIVE:
+        _OBSERVER_EVENT_ACTIVE[symbol] = {}
+    if symbol not in _OBSERVER_EVENT_PUSHED:
+        _OBSERVER_EVENT_PUSHED[symbol] = {}
+    if symbol not in _OBSERVER_PERIODIC_LAST:
+        _OBSERVER_PERIODIC_LAST[symbol] = {}
+
+    active = _OBSERVER_EVENT_ACTIVE[symbol]
+    pushed = _OBSERVER_EVENT_PUSHED[symbol]
+    periodic_last = _OBSERVER_PERIODIC_LAST[symbol]
     now = time.time()
-    COOLDOWN_SECS = 300  # 5 分钟后同类事件可再次触发
-    new_events = []
+
+    # --- 连续状态类事件类型（状态持续时，只发一次，之后每30分钟汇总）---
+    _CONTINUOUS_TYPES = {"DIVERGENCE_R", "NEAR_OB", "NEAR_LIQUIDITY", "CANDLE_COLOR", "SQZMOM_WHITE"}
+
+    # 1) 构建本次扫描到的 events key 集合
+    current_keys = set()
+    event_map = {}  # key -> ev dict
     for ev in events:
         key = ev.get("key", ev.get("type", ""))
-        last_seen = cool.get(key, 0)
-        if now - last_seen > COOLDOWN_SECS:
+        current_keys.add(key)
+        event_map[key] = ev
+
+    # 2) 检测状态变化，返回应推送的新事件
+    new_events = []
+    for key, ev in event_map.items():
+        was_active = active.get(key, False)
+        ev_type = ev.get("type", "")
+
+        if not was_active:
+            # 事件从无→有：首次触发，必须推送
             new_events.append(ev)
-            cool[key] = now
-        last[key] = True
-    # 清理过期冷却记录（超过 1 小时未更新的 key 删除，防内存泄漏）
-    stale_keys = [k for k, v in cool.items() if now - v > 3600]
-    for k in stale_keys:
-        cool.pop(k, None)
-        last.pop(k, None)
+            active[key] = True
+            pushed[key] = True
+            # 对于连续状态类型，记录本次推送时间为周期性汇总的起点
+            if ev_type in _CONTINUOUS_TYPES:
+                periodic_last[ev_type] = now
+            print(f"[{symbol}] Observer 事件触发: {key} (首次)")
+        else:
+            # 事件持续存在（连续状态）
+            # 如果之前已经推送过，不再重复推送
+            if pushed.get(key, False):
+                # 但对于连续状态类型，每 OBSERVER_PERIODIC_INTERVAL 秒汇总一次
+                if ev_type in _CONTINUOUS_TYPES:
+                    last_periodic = periodic_last.get(ev_type, 0)
+                    if now - last_periodic >= OBSERVER_PERIODIC_INTERVAL:
+                        # 标记为"定期汇总推送"（在调用方会生成摘要消息而非完整推送）
+                        ev["is_periodic_summary"] = True
+                        new_events.append(ev)
+                        periodic_last[ev_type] = now
+                        print(f"[{symbol}] Observer 状态持续汇总: {key} ({OBSERVER_PERIODIC_INTERVAL//60}min)")
+            else:
+                # 理论上不应走到这里，但以防万一
+                active[key] = True
+                pushed[key] = True
+                new_events.append(ev)
+
+    # 3) 检测事件从有→无：清除激活状态
+    for key in list(active.keys()):
+        if key not in current_keys:
+            was_active = active.pop(key, False)
+            pushed.pop(key, None)  # 清除推送标记，下次出现时可重新触发
+            if was_active:
+                print(f"[{symbol}] Observer 事件消失: {key}")
+
+    # 4) 对于未激活的事件（不在 current_keys），确保推送标记也清除
+    for key in list(pushed.keys()):
+        if key not in current_keys:
+            pushed.pop(key, None)
+
+    # 5) 清理过期记录（超过 2 小时未更新的 key 删除）
+    stale_active = [k for k in list(active.keys()) if k not in current_keys]
+    for k in stale_active:
+        active.pop(k, None)
+        pushed.pop(k, None)
+    stale_periodic = [k for k, v in list(periodic_last.items()) if now - v > 7200]
+    for k in stale_periodic:
+        periodic_last.pop(k, None)
+
     return new_events
 
 
@@ -1163,48 +1227,70 @@ async def main_loop():
                     _exec_ctx = result.get("exec_ctx", {}) or {}
                     _macro_ctx = result.get("macro_ctx", {}) or {}
                     _events = _detect_observer_events(_curr, _exec_ctx, _macro_ctx,
-                                                      result.get("long_score", 0), result.get("short_score", 0))
+                                  result.get("long_score", 0), result.get("short_score", 0))
                     print(f"[{symbol}] _detect_observer_events 返回 {len(_events)} 个事件: {[e['type'] for e in _events]}")
                     obs_events = _new_observer_events(symbol, _events)
                     print(f"[{symbol}] 新 Observer 事件: {len(obs_events)} 个 (总 {len(_events)} 个)")
                     for ev in obs_events:
-                        _push_observer_event(
-                            symbol, ev,
-                            long_score=result.get("long_score", 0),
-                            short_score=result.get("short_score", 0),
-                            long_ev=result.get("long_ev", 0),
-                            short_ev=result.get("short_ev", 0),
-                            long_entry=result.get("long_entry", 0),
-                            long_sl=result.get("long_sl", 0),
-                            long_tp1=result.get("long_tp1", 0),
-                            long_rr=result.get("long_rr", 0),
-                            short_entry=result.get("short_entry", 0),
-                            short_sl=result.get("short_sl", 0),
-                            short_tp1=result.get("short_tp1", 0),
-                            short_rr=result.get("short_rr", 0),
-                            v37_dir=result.get("direction", "N/A") or "N/A",
-                            price=result.get("price", 0),
-                            rsi=result.get("rsi", 0),
-                            adx=result.get("adx", 0),
-                            atr=result.get("atr", 0),
-                            macd_hist=result.get("macd_hist", 0),
-                            volume_ratio=result.get("volume_ratio", 1.0),
-                            candle_color=result.get("candle_color", ""),
-                            color_changed=result.get("color_changed", False),
-                            regime=result.get("regime", ""),
-                            vol_state=result.get("vol_state", ""),
-                            squeeze=result.get("squeeze", ""),
-                            trend_direction=result.get("trend_direction", ""),
-                            bsl_level=result.get("bsl_level", 0),
-                            ssl_level=result.get("ssl_level", 0),
-                            is_bsl_swept=result.get("is_bsl_swept", False),
-                            is_ssl_swept=result.get("is_ssl_swept", False),
-                            bullish_ob=result.get("bullish_ob"),
-                            bearish_ob=result.get("bearish_ob"),
-                            bullish_fvg=result.get("bullish_fvg"),
-                            bearish_fvg=result.get("bearish_fvg"),
-                            funding_rate=result.get("funding_rate"),
-                        )
+                        # 区分：首次触发事件用完整推送；定期汇总用轻量摘要
+                        if ev.get("is_periodic_summary"):
+                            # 轻量汇总：仅发一条简短状态持续消息
+                            _type_names_short = {
+                                "DIVERGENCE_R": "背离R",
+                                "NEAR_OB": "接近OB",
+                                "NEAR_LIQUIDITY": "接近流动性",
+                                "CANDLE_COLOR": "K线变色",
+                                "SQZMOM_WHITE": "SQZMOM白线",
+                            }
+                            _icons_short = {"DIVERGENCE_R": "🔮", "NEAR_OB": "🧱", "NEAR_LIQUIDITY": "🎯", "CANDLE_COLOR": "🎨", "SQZMOM_WHITE": "⚪"}
+                            _icon = _icons_short.get(ev["type"], "📊")
+                            _type_name = _type_names_short.get(ev["type"], ev["type"])
+                            _dir_text = {"Long": "📈多头", "Short": "📉空头", "N/A": "⚖️中性"}.get(ev.get("dir", ""), "")
+                            _summary_msg = (
+                                f"{_icon} [{symbol}] {_type_name} 持续中\n"
+                                f"方向: {_dir_text} | {ev.get('desc', '')}\n"
+                                f"⏱️ 状态已持续30分钟，等待变化"
+                            )
+                            safe_send(_summary_msg)
+                            print(f"[{symbol}] Observer 汇总推送(轻量): {ev['type']}")
+                        else:
+                            _push_observer_event(
+                                symbol, ev,
+                                long_score=result.get("long_score", 0),
+                                short_score=result.get("short_score", 0),
+                                long_ev=result.get("long_ev", 0),
+                                short_ev=result.get("short_ev", 0),
+                                long_entry=result.get("long_entry", 0),
+                                long_sl=result.get("long_sl", 0),
+                                long_tp1=result.get("long_tp1", 0),
+                                long_rr=result.get("long_rr", 0),
+                                short_entry=result.get("short_entry", 0),
+                                short_sl=result.get("short_sl", 0),
+                                short_tp1=result.get("short_tp1", 0),
+                                short_rr=result.get("short_rr", 0),
+                                v37_dir=result.get("direction", "N/A") or "N/A",
+                                price=result.get("price", 0),
+                                rsi=result.get("rsi", 0),
+                                adx=result.get("adx", 0),
+                                atr=result.get("atr", 0),
+                                macd_hist=result.get("macd_hist", 0),
+                                volume_ratio=result.get("volume_ratio", 1.0),
+                                candle_color=result.get("candle_color", ""),
+                                color_changed=result.get("color_changed", False),
+                                regime=result.get("regime", ""),
+                                vol_state=result.get("vol_state", ""),
+                                squeeze=result.get("squeeze", ""),
+                                trend_direction=result.get("trend_direction", ""),
+                                bsl_level=result.get("bsl_level", 0),
+                                ssl_level=result.get("ssl_level", 0),
+                                is_bsl_swept=result.get("is_bsl_swept", False),
+                                is_ssl_swept=result.get("is_ssl_swept", False),
+                                bullish_ob=result.get("bullish_ob"),
+                                bearish_ob=result.get("bearish_ob"),
+                                bullish_fvg=result.get("bullish_fvg"),
+                                bearish_fvg=result.get("bearish_fvg"),
+                                funding_rate=result.get("funding_rate"),
+                            )
 
                     # ---- 【第 2 步】Strategy 开单推送 ----
                     check_and_open(result)
