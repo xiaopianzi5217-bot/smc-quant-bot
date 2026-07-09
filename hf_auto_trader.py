@@ -849,7 +849,8 @@ def check_and_open(result: dict) -> bool:
     regime_cn = {"TREND": "趋势", "CHOP": "震荡", "TRANSITION": "过渡", "CRISIS_RISK_OFF": "避险", "trend": "趋势", "chop": "震荡"}.get(str(regime).upper(), regime)
     vol_cn = {"HIGH_VOL": "高波动", "MID_VOL": "正常", "LOW_VOL": "低波动", "high_vol": "高波动", "mid_vol": "正常", "low_vol": "低波动"}.get(str(vol_state).upper(), vol_state)
     rsi_zone = "超买" if result.get("rsi", 50) > 70 else ("超卖" if result.get("rsi", 50) < 30 else ("偏强" if result.get("rsi", 50) > 55 else ("偏弱" if result.get("rsi", 50) < 45 else "中性")))
-    atr_pct = atr / entry * 100 if entry > 0 and atr > 0 else 0
+    _atr_val = result.get("atr", 0) or 0
+    atr_pct = _atr_val / entry * 100 if entry > 0 and _atr_val > 0 else 0
     vol_ratio_str = f"{result.get('volume_ratio', 1.0):.2f}x"
 
     # ── 操作建议 ──
@@ -893,7 +894,7 @@ def check_and_open(result: dict) -> bool:
         f"━━━ 行情环境 ━━━\n"
         f"趋势: {regime_cn} | 波动: {vol_cn} | 成交量: {vol_ratio_str}\n"
         f"━━━ 指标透视 ━━━\n"
-        f"RSI: {result.get('rsi',0):.1f}({rsi_zone}) ATR: {atr:.2f} | {atr_pct:.2f}%\n"
+        f"RSI: {result.get('rsi',0):.1f}({rsi_zone}) ATR: {_atr_val:.2f} | {atr_pct:.2f}%\n"
         f"━━━ 流动性/关键位 ━━━\n"
         f"{_liq_text_x}\n"
         f"━━━ 操作建议 ━━━\n"
@@ -1036,9 +1037,11 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
             pos["last_sl_msg"] = msg_key
             
         try:
-            profit_r2 = (new_sl - pos["entry"]) / pos["entry"]
+            # 【修复20260705】profit_r2 改为 R 倍数（价格差 / 风险），而非价格百分比
+            _risk = abs(pos["entry"] - pos["current_sl"])
+            profit_r2 = (new_sl - pos["entry"]) / max(_risk, 1e-12)
             if pos["direction"] == "Short":
-                profit_r2 = (pos["entry"] - new_sl) / pos["entry"]
+                profit_r2 = (pos["entry"] - new_sl) / max(_risk, 1e-12)
             
             mfe_val = pos.get("mfe", 0)
             giveback = 0.0
@@ -1092,7 +1095,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
     if pos["direction"] == "Short":
         pnl_pct = ((pos["entry"] / current_price) - 1) * 100
 
-    msg = (
+        msg = (
         f"⛔ [SL] {symbol} {'多头' if pos['direction'] == 'Long' else '空头'}\n"
         f"入场: {pos['entry']:.2f} 出场: {current_price:.2f}\n"
         f"盈亏: {pnl_pct:+.2f}%"
@@ -1101,7 +1104,24 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
     safe_send(msg)
 
     try:
-        profit_r = pnl_pct / 100.0
+        profit_r = pnl_pct / 100.0  # 价格变化百分比 → R 倍数
+        
+        # 【修复20260705】止损时同步写入 TradeJournal
+        _oid = pos.get("order_id", "")
+        if _oid:
+            try:
+                trade_journal.close_trade(
+                    order_id=_oid,
+                    close_price=current_price,
+                    pnl_r=profit_r,
+                    exit_reason="SL",
+                    mfe_r=pos.get("mfe", 0),
+                    mae_r=pos.get("mae", 0),
+                    max_r_before_stop=pos.get("max_r", 0),
+                )
+            except Exception as tj_err:
+                print(f"[TradeJournal] 止损记录失败: {tj_err}")
+        
         feature_store.save_trade({
             "symbol": symbol,
             "direction": pos["direction"],

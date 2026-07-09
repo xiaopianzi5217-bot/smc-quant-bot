@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Outcome Attribution — 收益归因分析（V40 核心新增）
 
@@ -206,106 +206,6 @@ class OutcomeAttribution:
             "win_rate_by_factor": win_rate_by_factor,
         }
 
-
-    # ------------------------------------------------------------------
-    #  内部：从记录列表生成分组统计
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _group_stats(records):
-        """从一组记录生成统计字典（内部复用）"""
-        if not records:
-            return {
-                "total_trades": 0,
-                "total_realized_r": 0.0,
-                "avg_realized_r": 0.0,
-                "win_rate": 0.0,
-                "total_contributions": {},
-                "contribution_pct": {},
-                "win_rate_by_factor": {},
-            }
-
-        n = len(records)
-        total_r = sum(r.realized_r for r in records)
-        wins = sum(1 for r in records if r.realized_r > 0)
-
-        total_contrib = {}
-        for r in records:
-            for k, v in r.contributions.items():
-                total_contrib[k] = total_contrib.get(k, 0.0) + v
-
-        abs_total = sum(abs(v) for v in total_contrib.values()) or 1.0
-        contrib_pct = {k: round(abs(v) / abs_total * 100, 1) for k, v in total_contrib.items()}
-
-        win_by_factor = {}
-        for r in records:
-            for k, v in r.contributions.items():
-                if v > 0:
-                    win_by_factor[k] = win_by_factor.get(k, 0) + 1
-        win_rate_by_factor = {k: round(v / n, 4) for k, v in win_by_factor.items()}
-
-        return {
-            "total_trades": n,
-            "total_realized_r": round(total_r, 4),
-            "avg_realized_r": round(total_r / n, 4),
-            "win_rate": round(wins / n, 4),
-            "total_contributions": {k: round(v, 4) for k, v in total_contrib.items()},
-            "contribution_pct": contrib_pct,
-            "win_rate_by_factor": win_rate_by_factor,
-        }
-
-    # ------------------------------------------------------------------
-    #  按币种分组归因
-    # ------------------------------------------------------------------
-    def aggregate_by_symbol(self):
-        """按币种分组归因——识别哪些品种贡献最大"""
-        groups = {}
-        for r in self.history:
-            sym = r.symbol or "UNKNOWN"
-            groups.setdefault(sym, []).append(r)
-        return {
-            sym: self._group_stats(recs)
-            for sym, recs in sorted(groups.items(), key=lambda x: -sum(r.realized_r for r in x[1]))
-        }
-
-    # ------------------------------------------------------------------
-    #  按方向分组归因
-    # ------------------------------------------------------------------
-    def aggregate_by_direction(self):
-        """按方向（LONG / SHORT）分组归因"""
-        groups = {}
-        for r in self.history:
-            d = r.direction or "UNKNOWN"
-            groups.setdefault(d.upper(), []).append(r)
-        return {
-            d: self._group_stats(recs)
-            for d, recs in sorted(groups.items(), key=lambda x: -sum(r.realized_r for r in x[1]))
-        }
-
-    # ------------------------------------------------------------------
-    #  按市场状态分组归因
-    # ------------------------------------------------------------------
-    def aggregate_by_regime(self):
-        """按市场状态（TREND / CHOP / TRANSITION）分组归因"""
-        def map_regime(val):
-            if isinstance(val, str):
-                return val.upper()
-            if val >= 0.8:
-                return "TREND"
-            elif val <= 0.4:
-                return "CHOP"
-            else:
-                return "TRANSITION"
-
-        groups = {}
-        for r in self.history:
-            raw_regime = r.feature_strengths.get("regime", 0.5)
-            regime = map_regime(raw_regime)
-            groups.setdefault(regime, []).append(r)
-
-        return {
-            regime: self._group_stats(recs)
-            for regime, recs in sorted(groups.items(), key=lambda x: -sum(r.realized_r for r in x[1]))
-        }
     # ------------------------------------------------------------------
     #  工具方法
     # ------------------------------------------------------------------
@@ -332,4 +232,3 @@ class OutcomeAttribution:
 
 # 全局单例
 outcome_attribution = OutcomeAttribution()
-
