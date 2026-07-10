@@ -240,9 +240,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
     # 使用 V56_5_Engine 的候选-评分-选择-执行链路
     # 注意：V565Config 默认 min_score=65.0，生产环境已足够
     # 但 scan_and_decide 的 DataFreme 只有 320 bars（15m），回测引擎需要更多数据
-    # 因此这里用宽松的 V56 Config
+        # 因此这里用宽松的 V56 Config
     from final_forge.v56_5_stable_engine import V565Config
-    _loose_cfg = V565Config(min_score=55.0)  # 放低分数门槛
+    _loose_cfg = V565Config(
+        min_score=55.0,  # 放低分数门槛
+        allowed_hours=tuple(range(24)),  # ✅ 生产环境放开全部时间段，让评分做最终筛选
+    )
   
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
@@ -263,26 +266,24 @@ async def scan_and_decide(symbol: str) -> dict | None:
     
     enriched = enrich_v565_candidates(broad, _loose_cfg)
     
-    # 用 Quality Gate 做最终筛选
-    gate_passed = []
-    gate_reasons = []
-    for _, row in enriched.iterrows():
-        passed, reason, meta = v565_quality_gate(row.to_dict())
-        gate_passed.append(passed)
-        gate_reasons.append(reason)
-    enriched["gate_passed"] = gate_passed
-    enriched["gate_reason"] = gate_reasons
-    enriched = enriched[enriched["gate_passed"]].copy()
-    
-    if enriched.empty:
-        print(f"[{symbol}] Quality Gate 拦截全部信号，本次不开单")
-        return None
-    
+    # 直接交给 select_v565_portfolio（它内部已有 Quality Gate + Top-N 逻辑）
+    # 无需在外部重复筛选，避免双重拦截
     selected = select_v565_portfolio(enriched, _loose_cfg)
     
     if selected is None or selected.empty:
-        print(f"[{symbol}] Top-N 选择后无信号")
-        return None
+        print(f"[{symbol}] select_v565_portfolio 选择后无信号，使用宽松Top-N模式重试")
+        # 策略2：绕过 Tier 限制，允许所有通过 min_score 的信号进入
+        cand2 = enriched[
+            (pd.to_numeric(enriched["score"], errors="coerce") >= float(_loose_cfg.min_score))
+        ].copy()
+        if not cand2.empty:
+            # 直接取前3名
+            cand2 = cand2.sort_values("decision_score", ascending=False).head(3)
+            selected = cand2
+            print(f"[{symbol}] 宽松模式选中 {len(selected)} 条信号")
+        else:
+            print(f"[{symbol}] 宽松模式也无候选信号")
+            return None
     
     trades = execute_v565(df_v56, selected, _loose_cfg)
     
