@@ -14,6 +14,20 @@ SYMBOLS = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
 TIMEFRAME_MACRO = '1h'
 TIMEFRAME_EXEC = '15m'
 
+# ===============================
+# Production Risk Guard
+# ===============================
+# 信号冷却时间（秒）
+SIGNAL_COOLDOWN_SECONDS = 900
+# 每日最大亏损 R 倍数
+MAX_DAILY_LOSS_R = 3
+# 每日最大交易次数
+MAX_TRADES_DAY = 5
+# 最大连续亏损次数
+MAX_CONSECUTIVE_LOSS = 3
+# 是否启用运行时状态恢复
+ENABLE_RUNTIME_RECOVERY = True
+
 STRATEGY_PARAMS = {
     'rsi_ob': 75,
     'rsi_os': 25,
@@ -98,3 +112,4 @@ TELEGRAM = {
 if __name__ == '__main__':
     print('TG_BOT_TOKEN =', os.getenv('TG_BOT_TOKEN'))
     print('TG_CHAT_ID =', os.getenv('TG_CHAT_ID'))
+

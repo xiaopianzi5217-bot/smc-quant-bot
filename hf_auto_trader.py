@@ -27,7 +27,15 @@ from strategy.risk import calculate_dynamic_tp_sl, check_partial_close_and_trail
 from notifier.observer.funding import fetch_funding_rate_safe, normalize_swap_symbol
 from notifier.telegram import send_telegram
 from state.trade_journal import journal as trade_journal
-from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
+from config import (
+    STRATEGY_PARAMS,
+    SYMBOL_STRATEGY,
+    SIGNAL_COOLDOWN_SECONDS,
+    MAX_DAILY_LOSS_R,
+    MAX_TRADES_DAY,
+    MAX_CONSECUTIVE_LOSS,
+    ENABLE_RUNTIME_RECOVERY,
+)
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
 
@@ -43,6 +51,13 @@ from final_forge.v56_5_stable_engine import (
 )
 from strategy.v565_quality_gate import v565_quality_gate
 from decision.v37_gate import v37_final_gate
+
+# ---------- 优化模块：增强决策管线 ----------
+from strategy.statistical_ev_gate import StatisticalEVGate, get_statistical_ev_gate
+from strategy.htf_regime_filter import HTFRegimeFilter, get_htf_regime_filter
+from strategy.score_grade import ScoreGrader, get_score_grader
+from strategy.feature_penalty import calculate_feature_overlap, apply_feature_penalty
+from strategy.statistical_ev import StatisticalEV, get_statistical_ev
 
 # ---------- 状态与特征存储 ----------
 from state.position_manager import position_manager
@@ -63,16 +78,15 @@ SCAN_INTERVAL = 300
 MAX_CANDLES = 320 
 
 # Strategy 推送阈值
-MIN_EV_FOR_PUSH = 0.15 
+MIN_EV_FOR_PUSH = 0.01  # ⚠️ 20260706修复: 从0.15降到0.01，匹配实时model_ev实际分布（通常在-0.2~0.08）
 MIN_SCORE_FOR_PUSH = 35 
-MIN_SCORE_GAP = 6.0 
+MIN_SCORE_GAP = 4.0  # 20260706修复: 从6.0降到4.0，匹配V37 Gate gap要求
 
 # ----- 止损冷却 -----
 STOP_LOSS_COOLDOWN = 300
 _last_stop_loss_time = {}
 
 # 【修复20260704】去重与质量加强参数
-SIGNAL_COOLDOWN_SECONDS = 900  # 同品种同方向 15 分钟内不再重复开单
 TREND_END_PULLBACK_ATR = 3.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
 
 def _check_cooldown(symbol):
@@ -322,6 +336,41 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _use_long_score = _exec_lq if _exec_lq > 0 else (float(score) if direction == "Long" else 0.0)
     _use_short_score = _exec_sq if _exec_sq > 0 else (0.0 if direction == "Long" else float(score))
 
+    # ===== 【优化2 - HTF Regime Filter】用 1H 数据校验大方向 =====
+    _htf_state = get_htf_regime_filter().analyze(df_macro)
+    result_htf_blocked = False
+    if direction == "Long" and not _htf_state["allow_long"]:
+        print(f"[{symbol}] HTF Regime 拦截 Long: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
+        result_htf_blocked = True
+    elif direction == "Short" and not _htf_state["allow_short"]:
+        print(f"[{symbol}] HTF Regime 拦截 Short: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
+        result_htf_blocked = True
+    else:
+        print(f"[{symbol}] HTF Regime 通过: 1H={_htf_state['regime']}, allow_long={_htf_state['allow_long']}, allow_short={_htf_state['allow_short']}")
+
+    # ===== 【特征收集 - 用于优化4/5】构建特征字典 =====
+    _features = {
+        "ema_trend": _htf_state.get("trend_strength", 0) > 0.4,
+        "adx": float(exec_ctx.get("adx", 0)) > 25,
+        "structure_break": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
+        "momentum": abs(_exec_lq - _exec_sq) > 15 if (_exec_lq > 0 or _exec_sq > 0) else False,
+        "trend_direction": direction == str(_htf_state.get("regime", "")).upper().replace("BULL", "Long").replace("BEAR", "Short") or False,
+        "atr_expand": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))) > float(curr.get("ATRr_14", 0)) * 1.2 if hasattr(curr, 'get') else False,
+        "squeeze_release": str(exec_ctx.get("squeeze", "")).lower() in ("release", "squeeze_release"),
+        "volume_break": float(curr.get("volume_ratio", 1)) > 1.5 if hasattr(curr, 'get') else False,
+        "bb_width_expand": False,
+        "rsi_momentum": abs(float(curr.get("rsi", 50)) - 50) > 20 if hasattr(curr, 'get') else False,
+        "macd_cross": abs(float(curr.get("MACDh_12_26_9", 0))) > 0.0001 if hasattr(curr, 'get') else False,
+        "price_acceleration": False,
+        "volume_surge": float(curr.get("volume_ratio", 1)) > 2.0 if hasattr(curr, 'get') else False,
+        "ema_alignment": _htf_state.get("regime") in ("BULL", "BEAR"),
+    }
+
+        # ===== 【优化5 - Statistical EV】混合历史EV =====
+    _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
+    if _blended_ev != ev:
+        print(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
+
     # 构建兼容返回格式
     return {
         "symbol": symbol,
@@ -372,8 +421,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "color_changed": bool(exec_ctx.get("color_changed", False)),
         "squeeze": str(exec_ctx.get("squeeze", "")),
         "trend_direction": str(exec_ctx.get("trend_direction", "")),
-        "bsl_level": float(exec_ctx.get("bsl_level", 0)),
-        "ssl_level": float(exec_ctx.get("ssl_level", 0)),
+        "bsl_level": float(exec_ctx.get("bsl_level") or 0.0),
+        "ssl_level": float(exec_ctx.get("ssl_level") or 0.0),
         "is_bsl_swept": bool(exec_ctx.get("is_bsl_swept", False)),
         "is_ssl_swept": bool(exec_ctx.get("is_ssl_swept", False)),
         "bullish_ob": exec_ctx.get("bullish_ob", None),
@@ -381,6 +430,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "bullish_fvg": exec_ctx.get("bullish_fvg", None),
         "bearish_fvg": exec_ctx.get("bearish_fvg", None),
         "funding_rate": None,
+        # ===== 优化模块字段 =====
+        "htf_state": _htf_state,
+        "htf_blocked": result_htf_blocked,
+        "features": _features,
+        "blended_ev": _blended_ev,
+        "grade_result": None,  # check_and_open 中填充
+        "feature_penalty": 0.0,  # check_and_open 中填充
     }
 
 # ============================================================
@@ -775,22 +831,99 @@ def _is_signal_processed(signal_id: str) -> bool:
         del _PROCESSED_SIGNALS[k]
     return False
 
-def check_and_open(result: dict) -> bool:
-    symbol = result["symbol"]
-    direction = result["direction"]
-    
+def check_and_open(result: dict | None) -> bool:
+    """开单检查与推送
+
+    保护链（按执行顺序）：
+      1. result 非空检查
+      2. 止损冷却 _check_cooldown()
+      3. approved + direction 有效性
+      4. HTF Regime 宏观方向拦截
+      5. Score Grade 分级过滤
+      6. Feature Penalty 特征惩罚
+      7. Statistical EV Gate 动态阈值
+      8. EV/Score 硬阈值兜底
+      9. 多空评分差距 MIN_SCORE_GAP
+      10. 信号去重 _is_signal_processed()
+      11. 已有持仓检查 position_manager.exists()
+      12. 趋势末端位置检查
+      13. RR 硬校验 >= 1.0
+      14. V37 Final Gate 最终闸门
+    """
+    if not result:
+        print("[check_and_open] result 为空，拒绝开单")
+        return False
+
+    symbol = result.get("symbol", "?")
+    direction = result.get("direction", None)
+
     # ---- 止损冷却 ----
     if not _check_cooldown(symbol):
         print(f"[{symbol}] cooling skip")
         return False
-        
-    approved = result["approved"]
+
+    approved = result.get("approved", False)
     if not approved or not direction:
         return False
-        
-    ev = result.get("expected_value", 0.0)
+    
+    # ===== 提取优化模块字段 =====
+    htf_blocked = result.get("htf_blocked", False)
+    features = result.get("features", {})
+    blended_ev = result.get("blended_ev", result.get("expected_value", 0.0))
+    
+    # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
+    if htf_blocked:
+        print(f"[{symbol}] HTF Regime 拦截 {direction}, 不开单")
+        return False
+    
+    # ===== 【优化5 - Statistical EV】使用 blended_ev 替代原始 ev =====
+    # blended_ev = 历史实际 EV * 0.6 + model_ev * 0.4
+    # 当历史样本不足时 = model_ev
+    ev = blended_ev
     score = result.get("score", 0.0)
     
+    # ===== 【优化3 - Score Grade】分级过滤 =====
+    _grade_result = get_score_grader().grade(score=score, ev=ev, regime=result.get("regime", "UNKNOWN"))
+    result["grade_result"] = _grade_result
+    if not _grade_result["allow"]:
+        print(f"[{symbol}] ScoreGrade 拒绝: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']} (min_score={_grade_result['min_score_for_grade']}, min_ev={_grade_result['min_ev_for_grade']})")
+        return False
+    else:
+        print(f"[{symbol}] ScoreGrade 通过: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']}")
+    
+    # ===== 【优化4 - Feature Penalty】特征重叠惩罚 =====
+    _overlap_penalty = calculate_feature_overlap(features)
+    result["feature_penalty"] = _overlap_penalty
+    _adjusted_score = apply_feature_penalty(score, features)
+    print(f"[{symbol}] FeaturePenalty: 原始score={score:.1f} -> 调整后={_adjusted_score:.1f} (penalty={_overlap_penalty})")
+    if _adjusted_score < MIN_SCORE_FOR_PUSH:
+        print(f"[{symbol}] FeaturePenalty 后 score={_adjusted_score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
+        return False
+    # 用调整后的 score 替代原始 score 用于后续检查
+    score = _adjusted_score
+    
+    # ===== 【优化1 - Statistical EV Gate】动态EV阈值 =====
+    _regime = str(result.get("regime", "unknown"))
+    _vol_state = str(result.get("vol_state", "unknown"))
+    _volatility = 0.02
+    if "high" in _vol_state.lower():
+        _volatility = 0.04
+    elif "low" in _vol_state.lower():
+        _volatility = 0.01
+    _ev_gate_passed = get_statistical_ev_gate().allow(
+        model_ev=ev,
+        regime=_regime,
+        confidence=0.5,
+        volatility=_volatility,
+    )
+    _ev_threshold = get_statistical_ev_gate().dynamic_ev_threshold(_regime, 0.5, _volatility)
+    if not _ev_gate_passed:
+        print(f"[{symbol}] StatisticalEVGate 拒绝: ev={ev:.4f} < threshold={_ev_threshold} (regime={_regime}, vol={_vol_state})")
+        return False
+    else:
+        print(f"[{symbol}] StatisticalEVGate 通过: ev={ev:.4f} >= threshold={_ev_threshold}")
+    
+    # ---- 原有低阈值检查（已由 StatisticalEVGate 覆盖，保留为安全兜底）----
     if ev < MIN_EV_FOR_PUSH:
         print(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
         return False
@@ -1212,13 +1345,18 @@ async def main_loop():
     """
     print("[hf_auto_trader] 自动信号扫描主循环已启动...")
     await asyncio.sleep(5)  # 启动缓冲
-    
+
     while True:
         try:
             for symbol in SYMBOLS:
-                print(f"[hf_auto_trader] 正在扫描 {symbol}...")
-                result = await scan_and_decide(symbol)
-                print(f"[hf_auto_trader] {symbol} scan_and_decide 返回: {'非空' if result else 'None'}")
+                try:
+                    print(f"[hf_auto_trader] 正在扫描 {symbol}...")
+                    result = await scan_and_decide(symbol)
+                    print(f"[hf_auto_trader] {symbol} scan_and_decide 返回: {'非空' if result else 'None'}")
+                except Exception as scan_e:
+                    print(f"[{symbol}] scan_and_decide 异常: {scan_e}")
+                    traceback.print_exc()
+                    result = None
                 
                 if result:
                     print(f"[{symbol}] main_loop: result 非空，curr={type(result.get('curr'))}, exec_ctx={type(result.get('exec_ctx'))}, macro_ctx={type(result.get('macro_ctx'))}")
@@ -1318,7 +1456,7 @@ async def main_loop():
                     
             # 扫描间隔休眠
             await asyncio.sleep(SCAN_INTERVAL)
-            
+
         except Exception as e:
             print(f"[hf_auto_trader] 主循环发生异常: {e}")
             traceback.print_exc()
