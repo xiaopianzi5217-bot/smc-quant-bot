@@ -146,7 +146,7 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
                    volume_ratio, adx_val):
     """
     质量分：用于提高 PF 的软过滤字段。
-    不直接砍掉信号，而是把高胜率特征写进 exec_ctx，给 decision/scoring/risk 层使用。
+        不直接砍掉信号，而是把高胜率特征写进 exec_ctx，给 decision/scoring/risk 层使用。
     """
     score = 50.0
     reasons = []
@@ -171,6 +171,12 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
             score -= 8; reasons.append("opposite sweep risk")
         if chan_pos >= 0.82:
             score -= 7; reasons.append("chasing premium")
+            
+        # ===== 【修复20260715】强趋势逆势惩罚：当ADX>=25且无底部反转信号，强趋势下逆势做多大幅减分 =====
+        if adx_val >= 30 and not has_bot_div and not sqzmom_white_reversal_long:
+            score -= 18; reasons.append(f"strong trend({adx_val:.0f}) vs Long")
+        elif adx_val >= 25 and not has_bot_div and not sqzmom_white_reversal_long:
+            score -= 10; reasons.append(f"trend({adx_val:.0f}) vs Long")
     else:
         if is_bsl_swept:
             score += 14; reasons.append("BSL sweep")
@@ -192,12 +198,16 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
             score -= 8; reasons.append("opposite sweep risk")
         if chan_pos <= 0.18:
             score -= 7; reasons.append("chasing discount")
+            
+        # ===== 【修复20260715】强趋势逆势惩罚：当ADX>=25且无顶部反转信号，强趋势下逆势做空大幅减分 =====
+        if adx_val >= 30 and not has_top_div and not sqzmom_white_reversal_short:
+            score -= 18; reasons.append(f"strong trend({adx_val:.0f}) vs Short")
+        elif adx_val >= 25 and not has_top_div and not sqzmom_white_reversal_short:
+            score -= 10; reasons.append(f"trend({adx_val:.0f}) vs Short")
 
-    # 低流动性不强砍，但降低仓位/质量；强ADX略加分，避免震荡乱开。
+    # 低流动性不强砍，但降低仓位/质量
     if volume_ratio and volume_ratio < 0.65:
         score -= 4; reasons.append("low volume")
-    if adx_val >= 18:
-        score += 3; reasons.append("trend strength")
     return max(0.0, min(100.0, round(score, 2))), reasons
 
 def get_color_state(xtl_val):

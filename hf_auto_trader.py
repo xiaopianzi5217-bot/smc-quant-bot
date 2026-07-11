@@ -313,7 +313,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] 无有效方向")
         return None
     
-    # 用 exec_ctx 计算 entry quality（SMC 结构验证）
+        # 用 exec_ctx 计算 entry quality（SMC 结构验证）
     curr = df_exec.iloc[-1]
     entry_price = float(curr["close"])
     
@@ -326,6 +326,38 @@ async def scan_and_decide(symbol: str) -> dict | None:
     rr = float(best.get("estimated_rr", 0))
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
+    
+    # ===== 【修复20260715】SL方向校验：Long的SL不能>入场，Short的SL不能<入场 =====
+    if direction == "Long" and sl > entry_price:
+        print(f"[{symbol}] SL方向异常: Long SL({sl:.2f}) > 入场({entry_price:.2f}), 方向可能反了, 跳过")
+        return None
+    if direction == "Short" and sl < entry_price:
+        print(f"[{symbol}] SL方向异常: Short SL({sl:.2f}) < 入场({entry_price:.2f}), 方向可能反了, 跳过")
+        return None
+    
+    # ===== 【修复20260715】K线颜色 + ADX方向一致性检查 =====
+    _candle_color = str(exec_ctx.get("curr_color", ""))
+    _candle_adx = float(exec_ctx.get("adx", 0))
+    _has_bot_div = bool(exec_ctx.get("has_bot_div", False))
+    _has_top_div = bool(exec_ctx.get("has_top_div", False))
+    _sqz_white_long = bool(exec_ctx.get("sqzmom_white_reversal_long", False))
+    _sqz_white_short = bool(exec_ctx.get("sqzmom_white_reversal_short", False))
+    # 红色K线(看跌) + ADX>=25 = 强下跌趋势，此时做多需要底背离或白线反转信号
+    if direction == "Long" and ("红" in _candle_color or "red" in _candle_color.lower()):
+        if _candle_adx >= 25 and not _has_bot_div and not _sqz_white_long:
+            print(f"[{symbol}] 方向不一致: Long 但 K线红色(看跌) ADX={_candle_adx:.1f}(强趋势), 无底部反转信号, 跳过")
+            return None
+        elif _candle_adx >= 30:
+            print(f"[{symbol}] 方向风险: Long 但 K线红色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
+            score *= 0.7  # 红K+强趋势下做多评分打7折
+    # 蓝色K线(看涨) + ADX>=25 = 强上涨趋势，此时做空需要顶背离或白线反转信号
+    if direction == "Short" and ("蓝" in _candle_color or "blue" in _candle_color.lower() or "bull" in _candle_color.lower()):
+        if _candle_adx >= 25 and not _has_top_div and not _sqz_white_short:
+            print(f"[{symbol}] 方向不一致: Short 但 K线蓝色(看涨) ADX={_candle_adx:.1f}(强趋势), 无顶部反转信号, 跳过")
+            return None
+        elif _candle_adx >= 30:
+            print(f"[{symbol}] 方向风险: Short 但 K线蓝色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
+            score *= 0.7
     
     print(f"[{symbol}] V56.5 选定: {direction} score={score:.1f} ev={ev:.4f} "
           f"setup={best.get('setup_type','?')} price={entry_price:.2f}")
