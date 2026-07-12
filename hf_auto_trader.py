@@ -717,10 +717,9 @@ def _push_observer_event(
         "LIQUIDITY_SWEEP": "流动性扫单", "CHOCH": "市场结构转变",
         "BOS": "结构突破", "FVG": "价格失衡区",
         "CANDLE_COLOR": "K线变色", "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
-    }
+        }
     type_name = type_names.get(ev["type"], ev["type"])
     dir_emoji = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
-    dir_text = dir_emoji.get(ev.get("dir", ""), ev.get("dir", ""))
 
     # 操作建议
     if abs(long_score - short_score) < 8:
@@ -784,9 +783,9 @@ def _push_observer_event(
             f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
         )
 
-    lines = [
+        lines = [
         f"{icon} [{type_name}] {symbol}",
-        f"方向: {dir_text} | {ev['desc']}",
+        f"方向: {dir_emoji.get(score_dir, '⚖️ 中性')} | {ev['desc']}",
         "",
         "━━━ 多空博弈 ━━━",
         f"多头: {lp:.1f}分 EV:{long_ev:+.4f}  空头: {sp:.1f}分 EV:{short_ev:+.4f}",
@@ -819,15 +818,15 @@ def _push_observer_event(
         except: pass
 
     # ── 操作建议（替代旧的简短建议） ──
-    lines.append("")
+        lines.append("")
     lines.append("━━━ 操作建议 ━━━")
     lines.append(suggest_text)
 
-    ref_entry = long_entry if v37_dir == "Long" else (short_entry if v37_dir == "Short" else 0)
-    ref_sl = long_sl if v37_dir == "Long" else (short_sl if v37_dir == "Short" else 0)
-    ref_tp1 = long_tp1 if v37_dir == "Long" else (short_tp1 if v37_dir == "Short" else 0)
-    ref_rr = long_rr if v37_dir == "Long" else (short_rr if v37_dir == "Short" else 0)
-    if v37_dir in ("Long", "Short") and ref_sl and ref_sl > 0 and ref_entry > 0:
+    ref_entry = long_entry if score_dir == "Long" else (short_entry if score_dir == "Short" else 0)
+    ref_sl = long_sl if score_dir == "Long" else (short_sl if score_dir == "Short" else 0)
+    ref_tp1 = long_tp1 if score_dir == "Long" else (short_tp1 if score_dir == "Short" else 0)
+    ref_rr = long_rr if score_dir == "Long" else (short_rr if score_dir == "Short" else 0)
+    if score_dir in ("Long", "Short") and ref_sl and ref_sl > 0 and ref_entry > 0:
         lines.append("")
         lines.append("━━━ 开单参数 ━━━")
         lines.append(f"入场: {ref_entry:.2f} SL: {ref_sl:.2f} TP1: {ref_tp1:.2f}")
