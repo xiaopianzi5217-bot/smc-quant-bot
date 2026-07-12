@@ -335,24 +335,26 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] SL方向异常: Short SL({sl:.2f}) < 入场({entry_price:.2f}), 方向可能反了, 跳过")
         return None
     
-    # ===== 【修复20260715】K线颜色 + ADX方向一致性检查 =====
+        # ===== 【修复20260715】K线颜色 + ADX方向一致性检查 =====
     _candle_color = str(exec_ctx.get("curr_color", ""))
     _candle_adx = float(exec_ctx.get("adx", 0))
     _has_bot_div = bool(exec_ctx.get("has_bot_div", False))
     _has_top_div = bool(exec_ctx.get("has_top_div", False))
     _sqz_white_long = bool(exec_ctx.get("sqzmom_white_reversal_long", False))
     _sqz_white_short = bool(exec_ctx.get("sqzmom_white_reversal_short", False))
-    # 红色K线(看跌) + ADX>=25 = 强下跌趋势，此时做多需要底背离或白线反转信号
+    _has_fe_bottom = bool(exec_ctx.get("fe_bottom", False))  # CM Williams Vix Fix 摸底信号
+    _has_fe_top = bool(exec_ctx.get("fe_top", False))        # CM Williams Vix Fix 摸顶信号
+    # 红色K线(看跌) + ADX>=25 = 强下跌趋势，此时做多需要底背离/白线反转/FE摸底之一
     if direction == "Long" and ("红" in _candle_color or "red" in _candle_color.lower()):
-        if _candle_adx >= 25 and not _has_bot_div and not _sqz_white_long:
+        if _candle_adx >= 25 and not _has_bot_div and not _sqz_white_long and not _has_fe_bottom:
             print(f"[{symbol}] 方向不一致: Long 但 K线红色(看跌) ADX={_candle_adx:.1f}(强趋势), 无底部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
             print(f"[{symbol}] 方向风险: Long 但 K线红色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
             score *= 0.7  # 红K+强趋势下做多评分打7折
-    # 蓝色K线(看涨) + ADX>=25 = 强上涨趋势，此时做空需要顶背离或白线反转信号
+        # 蓝色K线(看涨) + ADX>=25 = 强上涨趋势，此时做空需要顶背离/白线反转/FE摸顶之一
     if direction == "Short" and ("蓝" in _candle_color or "blue" in _candle_color.lower() or "bull" in _candle_color.lower()):
-        if _candle_adx >= 25 and not _has_top_div and not _sqz_white_short:
+        if _candle_adx >= 25 and not _has_top_div and not _sqz_white_short and not _has_fe_top:
             print(f"[{symbol}] 方向不一致: Short 但 K线蓝色(看涨) ADX={_candle_adx:.1f}(强趋势), 无顶部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
@@ -754,19 +756,17 @@ def _push_observer_event(
     lp = long_score
     sp = short_score
     score_gap = abs(lp - sp)
-    # 推断方向中文名与对应 EV
-    if v37_dir == "Long":
+    # 【修复20260715】方向中文名由评分决定，而非事件方向(v37_dir)
+    score_dir = "Long" if lp >= sp else "Short"
+    if score_dir == "Long":
         dir_cn_local = "多头"
         ev_local = long_ev
-    elif v37_dir == "Short":
+    else:
         dir_cn_local = "空头"
         ev_local = short_ev
-    else:
-        dir_cn_local = "多军" if lp >= sp else "空军"
-        ev_local = max(long_ev, short_ev)
-    if score_gap >= 15 and ((v37_dir == "Long" and lp > sp) or (v37_dir == "Short" and sp > lp)):
+    if score_gap >= 15 and ((score_dir == "Long" and lp > sp) or (score_dir == "Short" and sp > lp)):
         suggest_text = (
-            f"✅ 【建议开{v37_dir}】\n"
+            f"✅ 【建议开{score_dir}】\n"
             f"原因：{dir_cn_local}评分 {max(lp,sp):.0f}分，EV {ev_local:+.4f}，"
             f"反向 {min(lp,sp):.0f}分，分差 {score_gap:.0f}分，AI 判断此方向可执行。\n"
             f"操作：按下方风控计划挂单，不建议追高，等价格回到入场参考附近。"
