@@ -180,25 +180,43 @@ def generate_v56_candidates(df: pd.DataFrame, cfg: Optional[V56Config] = None) -
             continue
         vol_bonus = max(0.0, min(6.0, float(r.get("vol_z", 0.0)) * 1.5))
         # 1) Liquidity sweep: generate opportunity without requiring full CHOCH.
+        # 【修复20260721】基分从 65.0 → 73.0（+8分），因为流动性扫单是强反转信号的重要组成部分。
         if r["low"] < r["ll20"] and r["close"] > r["ll20"] and r["close"] > r["open"]:
             depth = min(10.0, (r["ll20"] - r["low"]) / atr * 8.0)
             reclaim = min(8.0, max(0.0, (r["close"] - r["ll20"]) / atr * 6.0))
-            score = 65.0 + depth + reclaim + max(0.0, 50.0 - r["rsi"]) * 0.12 + vol_bonus
+            score = 73.0 + depth + reclaim + max(0.0, 50.0 - r["rsi"]) * 0.12 + vol_bonus
             _append(rows, df, i, "LIQUIDITY_SWEEP", "Long", score, ["sweep_low", "reclaim"])
         if r["high"] > r["hh20"] and r["close"] < r["hh20"] and r["close"] < r["open"]:
             depth = min(10.0, (r["high"] - r["hh20"]) / atr * 8.0)
             reclaim = min(8.0, max(0.0, (r["hh20"] - r["close"]) / atr * 6.0))
-            score = 65.0 + depth + reclaim + max(0.0, r["rsi"] - 50.0) * 0.12 + vol_bonus
+            score = 73.0 + depth + reclaim + max(0.0, r["rsi"] - 50.0) * 0.12 + vol_bonus
             _append(rows, df, i, "LIQUIDITY_SWEEP", "Short", score, ["sweep_high", "reclaim"])
         # 2) Weak BOS: broad structure break candidate, not a hard final entry filter.
+        # 【修复20260721】WEAK_BOS 基分从 56.0 → 46.0（降10分），趋势加分从 8.0 → 4.0
+        # 因为 WEAK_BOS 只是初步结构突破，不是强趋势反转，不应与 LIQUIDITY_SWEEP / REAL_CHOCH 竞争。
         if r["close"] > r["hh20"] and r["body_pct"] > 0.45:
-            trend = 8.0 if r["ema20"] > r["ema50"] else -4.0
-            score = 56.0 + trend + min(12.0, (r["close"] - r["hh20"]) / atr * 8.0) + vol_bonus
+            trend = 4.0 if r["ema20"] > r["ema50"] else -6.0
+            score = 46.0 + trend + min(10.0, (r["close"] - r["hh20"]) / atr * 6.0) + vol_bonus
             _append(rows, df, i, "WEAK_BOS", "Long", score, ["break_high"])
         if r["close"] < r["ll20"] and r["body_pct"] > 0.45:
-            trend = 8.0 if r["ema20"] < r["ema50"] else -4.0
-            score = 56.0 + trend + min(12.0, (r["ll20"] - r["close"]) / atr * 8.0) + vol_bonus
+            trend = 4.0 if r["ema20"] < r["ema50"] else -6.0
+            score = 46.0 + trend + min(10.0, (r["ll20"] - r["close"]) / atr * 6.0) + vol_bonus
             _append(rows, df, i, "WEAK_BOS", "Short", score, ["break_low"])
+        # 2b) REAL_CHOCH: genuine market structure shift — requires both a sweep of the swing
+        #     point AND a close beyond it, with trend alignment and momentum confirmation.
+        #     【修复20260721新增】基分 66.0（比 LIQUIDITY_SWEEP 高1分），因为这是最强的反转信号之一。
+        #     Long: 扫了 ll20 + 收在 hh20 以上 + ema20>ema50 + rsi>50
+        if r["low"] < r["ll20"] and r["close"] > r["hh20"] and r["ema20"] > r["ema50"] and r["rsi"] > 50:
+            sweep_range = min(8.0, (r["ll20"] - r["low"]) / atr * 6.0)
+            break_range = min(8.0, (r["close"] - r["hh20"]) / atr * 6.0)
+            score = 66.0 + sweep_range + break_range + max(0.0, r["rsi"] - 50.0) * 0.15 + vol_bonus
+            _append(rows, df, i, "REAL_CHOCH", "Long", score, ["choch_sweep_low", "choch_break_high", "trend_align"])
+        #     Short: 扫了 hh20 + 收在 ll20 以下 + ema20<ema50 + rsi<50
+        if r["high"] > r["hh20"] and r["close"] < r["ll20"] and r["ema20"] < r["ema50"] and r["rsi"] < 50:
+            sweep_range = min(8.0, (r["high"] - r["hh20"]) / atr * 6.0)
+            break_range = min(8.0, (r["ll20"] - r["close"]) / atr * 6.0)
+            score = 66.0 + sweep_range + break_range + max(0.0, 50.0 - r["rsi"]) * 0.15 + vol_bonus
+            _append(rows, df, i, "REAL_CHOCH", "Short", score, ["choch_sweep_high", "choch_break_low", "trend_align"])
         # 3) FVG touch: single imbalance-touch candidate.
         if i >= 3:
             c = df.iloc[i - 3]

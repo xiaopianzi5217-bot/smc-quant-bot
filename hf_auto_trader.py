@@ -63,6 +63,13 @@ from strategy.statistical_ev import StatisticalEV, get_statistical_ev
 from state.position_manager import position_manager
 from feature_store import feature_store
 
+# ---------- 【新增20260723】工具类导入 ----------
+from utils.adaptive_features import AdaptiveFeatureWeighter
+from utils.probability_calibrator import ProbabilityCalibrator
+from utils.signal_tracker import SignalTracker
+from utils.daily_risk_guard import DailyRiskGuard
+from utils.signal_audit_log import signal_audit_log
+
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
 _peak_equity = 0.0 
@@ -88,6 +95,79 @@ _last_stop_loss_time = {}
 
 # 【修复20260704】去重与质量加强参数
 TREND_END_PULLBACK_ATR = 3.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
+
+# ----- 信号后验验证参数 -----
+POSTHOC_FUTURE_BARS = 15  # 开单后追踪 15 根 K线（15m = 3.75 小时）
+_POSTHOC_CLOSE_BUFFER: dict = {}  # signal_id -> {future_prices, entry, sl, direction}
+
+# ---------- 【新增20260723】工具实例（全局单例） ----------
+_weighter = AdaptiveFeatureWeighter()
+_calibrator = ProbabilityCalibrator()
+_tracker = SignalTracker()
+_risk_guard = DailyRiskGuard()
+
+def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.DataFrame | None',
+                      max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
+    """用持仓期间的 K线数据计算最大顺向R / 最大逆向R / 最终R。
+
+    假设开单位于 future_df.iloc[0] 的开盘价，SL/TP 用 intrabar high/low 判断。
+
+    Args:
+        entry: 入场价
+        sl: 止损价
+        direction: "Long" / "Short"
+        future_df: 包含高开低收的 DataFrame（至少 max_bars 行）
+        max_bars: 最多追踪的 K线数量
+
+    Returns:
+        (max_forward_r, max_adverse_r, final_r, exit_reason)
+        如果数据不足，返回 (None, None, None, "NO_DATA")
+    """
+    if future_df is None or len(future_df) < 2:
+        return None, None, None, "NO_DATA"
+
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None, None, None, "NO_RISK"
+
+    max_forward = 0.0
+    max_adverse = 0.0
+    final_r = 0.0
+    exit_reason = "TIME_OUT"
+
+    limit = min(max_bars + 1, len(future_df))
+    for j in range(1, limit):  # j=0 是信号K线，从 j=1 开始是未来K线
+        b = future_df.iloc[j]
+        high = float(b["high"])
+        low = float(b["low"])
+
+        if direction == "Long":
+            # 当前bar内的顺向R（高点到入场）
+            this_forward = (high - entry) / risk
+            # 当前bar内的逆向R（低点到入场）
+            this_adverse = (entry - low) / risk
+            max_forward = max(max_forward, this_forward)
+            max_adverse = max(max_adverse, this_adverse)
+            if low <= sl:
+                exit_reason = "SL"
+                final_r = -1.0
+                break
+        else:  # Short
+            this_forward = (entry - low) / risk
+            this_adverse = (high - entry) / risk
+            max_forward = max(max_forward, this_forward)
+            max_adverse = max(max_adverse, this_adverse)
+            if high >= sl:
+                exit_reason = "SL"
+                final_r = -1.0
+                break
+
+        final_r = (float(future_df.iloc[j]["close"]) - entry) / risk if direction == "Long" else (entry - float(future_df.iloc[j]["close"])) / risk
+
+    if exit_reason == "TIME_OUT":
+        final_r = (float(future_df.iloc[limit - 1]["close"]) - entry) / risk if direction == "Long" else (entry - float(future_df.iloc[limit - 1]["close"])) / risk
+
+    return round(max_forward, 4), round(max_adverse, 4), round(final_r, 4), exit_reason
 
 def _check_cooldown(symbol):
     last = _last_stop_loss_time.get(symbol, 0)
@@ -844,20 +924,81 @@ def _push_observer_event(
 # Strategy 信号推送与去重
 # ============================================================
 _PROCESSED_SIGNALS: dict = {}
+_SIGNAL_DIARY_PATH = Path("logs/signal_fingerprint_diary.jsonl")
+
+def _load_processed_signals() -> None:
+    """从磁盘加载已处理信号，确保进程重启后去重仍然生效。"""
+    global _PROCESSED_SIGNALS
+    try:
+        p = _SIGNAL_DIARY_PATH
+        if p.exists() and p.stat().st_size > 0:
+            now = time.time()
+            loaded = 0
+            for line in p.read_text(encoding="utf-8").strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    sig_id = entry.get("signal_id", "")
+                    ts = entry.get("ts", 0)
+                    if sig_id and now - ts < 86400:
+                        _PROCESSED_SIGNALS[sig_id] = ts
+                        loaded += 1
+                except Exception:
+                    continue
+            if loaded > 0:
+                print(f"[_load_processed_signals] 从磁盘加载了 {loaded} 个已处理信号指纹")
+    except Exception as e:
+        print(f"[_load_processed_signals] 加载失败: {e}")
+
+def _persist_signal_fingerprint(signal_id: str) -> None:
+    """将信号指纹持久化到磁盘JSONL文件。"""
+    try:
+        _SIGNAL_DIARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {"signal_id": signal_id, "ts": time.time()}
+        with open(_SIGNAL_DIARY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[_persist_signal_fingerprint] 持久化失败: {e}")
+
+# 模块加载时自动恢复已处理信号
+_load_processed_signals()
 
 def _signal_id(result: dict) -> str:
+    """构建高精度信号指纹，确保每次扫描的每个信号都是唯一可追踪的。
+
+    指纹包含：
+      - symbol / direction（基础标识）
+      - setup_type（模式类型：LIQUIDITY_SWEEP / WEAK_BOS / FVG_TOUCH 等）
+      - idx（K线bar索引，唯一标识触发行情位置）
+      - entry_price（入场价，四舍五入到小数点后1位）
+      - score + ev（量化特征）
+      - scan_slot（扫描槽位 = 当前时间 / SCAN_INTERVAL，300秒粒度）
+
+    这样同一个15-min K线内，不同 setup_type 的信号不会互相覆盖；
+    同一个方向但不同 idx（不同bar）的信号也被区分；
+    避免统计学习把重复信号当作独立样本。
+    """
     symbol = result["symbol"]
     direction = result["direction"] or "NONE"
-    period = 900
-    now_slot = int(time.time()) // period
-    return f"{symbol}_{direction}_{now_slot}"
+    setup_type = result.get("decision", {}).get("signal", {}).get("setup_type", result.get("reason", "UNKNOWN"))
+    idx = result.get("decision", {}).get("signal", {}).get("idx", result.get("entry", 0))
+    entry_price = round(float(result.get("entry", 0.0)), 1)
+    score_ev_bucket = f"s{int(result.get('score', 0) / 10)}_ev{result.get('expected_value', 0.0):+.4f}"
+    period = SCAN_INTERVAL  # 300s，与扫描间隔匹配
+    scan_slot = int(time.time()) // period
+    return f"{symbol}_{direction}_{setup_type}_idx{idx}_p{entry_price}_{score_ev_bucket}_{scan_slot}"
 
 def _is_signal_processed(signal_id: str) -> bool:
     if signal_id in _PROCESSED_SIGNALS:
         return True
     _PROCESSED_SIGNALS[signal_id] = time.time()
-    cutoff = time.time() - 14400
-    stale = [k for k, v in _PROCESSED_SIGNALS.items() if v < cutoff]
+    # 持久化到磁盘，防止进程重启后丢失
+    _persist_signal_fingerprint(signal_id)
+    # 清理过期的信号ID（超过24小时）
+    stale_cutoff = time.time() - 86400
+    stale = [k for k, v in _PROCESSED_SIGNALS.items() if v < stale_cutoff]
     for k in stale:
         del _PROCESSED_SIGNALS[k]
     return False
@@ -1053,7 +1194,7 @@ def check_and_open(result: dict | None) -> bool:
         "atr": result.get("atr", 0),
         "funding_rate": result.get("funding_rate"),
         "symbol": symbol,
-        **result.get("exec_ctx", {}),
+                **result.get("exec_ctx", {}),
     }
     _v37_passed, _v37_reason, _v37_size_mult = v37_final_gate(_v37_decision, _v37_ctx)
     if not _v37_passed:
@@ -1061,6 +1202,30 @@ def check_and_open(result: dict | None) -> bool:
         return False
     else:
         print(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
+
+    # ===== 【新增20260723】DailyRiskGuard 日风险检查 =====
+    if not _risk_guard.can_trade():
+        print(f"[{symbol}] DailyRiskGuard 拦截: 日内风控限制")
+        return False
+
+    # ===== 【新增20260723】AdaptiveFeatureWeighter 自适应加权评分 =====
+    # 构建原始特征分数（用于加权计算）
+    _raw_feature_scores = {}
+    if "OB" in str(reason) or result.get("bullish_ob") or result.get("bearish_ob"):
+        _raw_feature_scores["OB"] = score * 0.15
+    if "FVG" in str(reason) or result.get("bullish_fvg") or result.get("bearish_fvg"):
+        _raw_feature_scores["FVG"] = score * 0.10
+    if "CHOCH" in str(reason) or "MSS" in str(reason):
+        _raw_feature_scores["CHOCH"] = score * 0.20
+    if "SQZMOM" in str(reason):
+        _raw_feature_scores["SQZMOM"] = score * 0.15
+    if features.get("squeeze_release") or "DIVERGENCE" in str(reason):
+        _raw_feature_scores["DIVERGENCE"] = score * 0.12
+    if _raw_feature_scores:
+        _weighted_score = _weighter.get_weighted_score(_raw_feature_scores)
+        print(f"[{symbol}] AdaptiveWeighter: 原始特征分数={_raw_feature_scores}, 加权后={_weighted_score:.2f}")
+        # 加权分数写入V37 ctx（不影响主流程决策，仅做记录）
+        result["weighted_score"] = _weighted_score
 
     # 获取 signal_tier 用于调试消息和日志
     _tier = None
@@ -1143,10 +1308,36 @@ def check_and_open(result: dict | None) -> bool:
         "tp2": tp2,
         "tp3": tp3,
         "stage": 0,
-        "sl_hit": False,
+                "sl_hit": False,
         "last_sl_msg": "",
     })
     print(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
+
+    # ===== 【新增20260723】SignalTracker 记录开单 =====
+    try:
+        _tracker_signal_id = _tracker.record_signal({
+            "symbol": symbol,
+            "direction": direction,
+            "score": score,
+            "ev": ev,
+            "features": features,
+            "entry_price": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr": rr,
+            "regime": regime,
+            "setup_type": reason,
+            "book": book,
+        })
+        # 存入 position_manager 供平仓时更新 outcome
+        _pos_data = position_manager.get(symbol)
+        if _pos_data:
+            _pos_data["tracker_signal_id"] = _tracker_signal_id
+            position_manager.update(symbol, _pos_data)
+    except Exception as _tracker_e:
+        print(f"[SignalTracker] 记录开单失败: {_tracker_e}")
     
     # ===== 【开单日志写入】 =====
     # 1. TradeJournal（日志审计）
@@ -1218,6 +1409,69 @@ def check_and_open(result: dict | None) -> bool:
         feature_store.save_trade(trade_features)
     except Exception as feat_e:
         print(f"[Feature] save trade error: {feat_e}")
+
+    # ===== 【修复20260721】信号后验验证日志 =====
+    try:
+        # 从 result 中提取未来 K线（用于计算 max_forward/adverse R）
+        _audit_df_exec = result.get("df_exec")
+        _audit_future_prices = []
+        if _audit_df_exec is not None and hasattr(_audit_df_exec, "iloc"):
+            # 找到当前信号 idx 在 df_exec 中的位置
+            _audit_signal_idx = result.get("decision", {}).get("signal", {}).get("idx", None)
+            if _audit_signal_idx is not None and isinstance(_audit_signal_idx, (int, float)):
+                _audit_start = int(_audit_signal_idx) + 1  # 开单后的下一根K线
+                _audit_end = min(_audit_start + POSTHOC_FUTURE_BARS, len(_audit_df_exec))
+                if _audit_start < len(_audit_df_exec):
+                    _audit_future_df = _audit_df_exec.iloc[_audit_start:_audit_end]
+                    _audit_future_prices = [float(x) for x in _audit_future_df["close"].tolist()]
+                    # 计算后验 R
+                    _mf, _ma, _fr, _er = _compute_future_r(
+                        entry=entry, sl=sl, direction=direction,
+                        future_df=_audit_future_df, max_bars=POSTHOC_FUTURE_BARS,
+                    )
+                else:
+                    _mf, _ma, _fr, _er = None, None, None, "NO_FUTURE_DATA"
+
+        # 构建开单快照
+        _audit_snapshot = {
+            "symbol": symbol,
+            "direction": direction,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr": rr,
+            "score": score,
+            "ev": ev,
+            "model_ev": result.get("expected_value", 0.0),
+            "regime": result.get("regime", "unknown"),
+            "vol_state": result.get("vol_state", "unknown"),
+            "setup_type": result.get("reason", ""),
+            "book": book,
+            "adx": result.get("adx", 0),
+            "atr": result.get("atr", 0),
+            "rsi": result.get("rsi", 0),
+            "volume_ratio": result.get("volume_ratio", 1.0),
+        }
+        signal_audit_log.record_open(sig_id, _audit_snapshot, _audit_future_prices)
+
+        # 实时日志：打印后验预测
+        if _mf is not None:
+            print(f"[信号后验] {sig_id} "
+                  f"max_forward_r={_mf:.2f} max_adverse_r={_ma:.2f} "
+                  f"final_r={_fr:.2f} exit={_er}")
+            # 存入 position_manager，供 check_trailing 平仓时更新
+            _pos_data2 = position_manager.get(symbol)
+            if _pos_data2:
+                _pos_data2["signal_id"] = sig_id
+                _pos_data2["audit_forward"] = _mf
+                _pos_data2["audit_adverse"] = _ma
+                _pos_data2["audit_final_r"] = _fr
+                _pos_data2["audit_exit"] = _er
+                position_manager.update(symbol, _pos_data2)
+    except Exception as _audit_e:
+        print(f"[SignalAuditLog] 后验记录异常: {_audit_e}")
         
     return True
 
@@ -1304,6 +1558,40 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                 "max_r": pos.get("max_r", 0),
                 "giveback_ratio": round(giveback, 4),
             })
+
+                        # ===== 【修复20260721】后验验证：更新平仓结果 =====
+            try:
+                _audit_sig_id = pos.get("signal_id", "")
+                if _audit_sig_id:
+                    _audit_fwd = pos.get("audit_forward") or mfe_val
+                    _audit_adv = pos.get("audit_adverse") or pos.get("mae", 0.0)
+                    signal_audit_log.record_close(
+                        signal_id=_audit_sig_id,
+                        final_pnl_r=profit_r2,
+                        max_forward_r=_audit_fwd,
+                        max_adverse_r=_audit_adv,
+                        exit_reason=stage_label,
+                    )
+                    print(f"[信号后验][{stage_label}] {_audit_sig_id} pnl_r={profit_r2:.2f}")
+            except Exception as _tp_audit_e:
+                print(f"[SignalAuditLog] TP后验更新失败: {_tp_audit_e}")
+
+            # ===== 【新增20260723】SignalTracker outcome + DailyRiskGuard + AdaptiveWeighter =====
+            try:
+                _ts_id = pos.get("tracker_signal_id", "")
+                if _ts_id:
+                    _tracker.update_outcome(signal_id=_ts_id, final_r=profit_r2)
+                _risk_guard.on_trade_closed(r=profit_r2)
+                # AdaptiveFeatureWeighter：提取特征列表更新
+                _feat_list = []
+                if "OB" in str(pos.get("last_sl_msg", "")):
+                    _feat_list.append("OB")
+                if profit_r2 > 0:
+                    _feat_list.append("CHOCH")
+                if _feat_list:
+                    _weighter.update(features=_feat_list, outcome_r=profit_r2)
+            except Exception as _new_tools_e:
+                print(f"[NewTools] TP平仓更新异常: {_new_tools_e}")
         except Exception:
             pass
 
@@ -1324,7 +1612,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
     if pos["direction"] == "Short":
         pnl_pct = ((pos["entry"] / current_price) - 1) * 100
 
-        msg = (
+    msg = (
         f"⛔ [SL] {symbol} {'多头' if pos['direction'] == 'Long' else '空头'}\n"
         f"入场: {pos['entry']:.2f} 出场: {current_price:.2f}\n"
         f"盈亏: {pnl_pct:+.2f}%"
@@ -1346,7 +1634,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
                     exit_reason="SL",
                     mfe_r=pos.get("mfe", 0),
                     mae_r=pos.get("mae", 0),
-                    max_r_before_stop=pos.get("max_r", 0),
+                                        max_r_before_stop=pos.get("max_r", 0),
                 )
             except Exception as tj_err:
                 print(f"[TradeJournal] 止损记录失败: {tj_err}")
@@ -1358,11 +1646,40 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
             "pnl_r": profit_r,
             "mfe": pos.get("mfe", 0),
             "mae": pos.get("mae", 0),
-            "max_r": pos.get("max_r", 0),
+                        "max_r": pos.get("max_r", 0),
             "max_r_before_stop": pos.get("max_r", 0),
         })
     except Exception as feat_e:
         print(f"[Feature] 止损特征更新异常: {feat_e}")
+
+    # profit_r 已在 try 块内定义（pnl_pct / 100.0）
+    # ===== 【修复20260721】后验验证：更新平仓结果 =====
+    try:
+        _audit_sig_id = pos.get("signal_id", "")
+        if _audit_sig_id:
+            _audit_fwd = pos.get("audit_forward") or (profit_r if profit_r > 0 else 0.0)
+            _audit_adv = pos.get("audit_adverse") or (abs(profit_r) if profit_r < 0 else 0.0)
+            signal_audit_log.record_close(
+                signal_id=_audit_sig_id,
+                final_pnl_r=profit_r,
+                max_forward_r=_audit_fwd,
+                max_adverse_r=_audit_adv,
+                exit_reason="SL",
+            )
+            print(f"[信号后验][SL] {_audit_sig_id} pnl_r={profit_r:.2f}")
+    except Exception as _sl_audit_e:
+        print(f"[SignalAuditLog] 止损后验更新失败: {_sl_audit_e}")
+
+    # ===== 【新增20260723】止损时更新 SignalTracker / RiskGuard / Weighter =====
+    try:
+        _ts_id = pos.get("tracker_signal_id", "")
+        if _ts_id:
+            _tracker.update_outcome(signal_id=_ts_id, final_r=profit_r)
+        _risk_guard.on_trade_closed(r=profit_r)
+        # 止损特征学习：无论盈亏都记录
+        _weighter.update(features=["CHOCH"], outcome_r=profit_r)
+    except Exception as _sl_new_e:
+        print(f"[NewTools] 止损更新异常: {_sl_new_e}")
 
     position_manager.remove(symbol)
 
