@@ -66,9 +66,11 @@ from feature_store import feature_store
 # ---------- 【新增20260723】工具类导入 ----------
 from utils.adaptive_features import AdaptiveFeatureWeighter
 from utils.probability_calibrator import ProbabilityCalibrator
+from utils.feedback_loop import FeedbackLoop  # 全链路闭环
 from utils.signal_tracker import SignalTracker
 from utils.daily_risk_guard import DailyRiskGuard
 from utils.signal_audit_log import signal_audit_log
+from utils.smart_position_sizer import SmartPositionSizer, get_smart_sizer
 
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
@@ -100,14 +102,15 @@ TREND_END_PULLBACK_ATR = 3.0  # 价格离 swing_high（Short）或 swing_low（L
 POSTHOC_FUTURE_BARS = 15  # 开单后追踪 15 根 K线（15m = 3.75 小时）
 _POSTHOC_CLOSE_BUFFER: dict = {}  # signal_id -> {future_prices, entry, sl, direction}
 
-# ---------- 【新增20260723】工具实例（全局单例） ----------
+# ---------- 工具实例（全局单例） ----------
 _weighter = AdaptiveFeatureWeighter()
 _calibrator = ProbabilityCalibrator()
 _tracker = SignalTracker()
 _risk_guard = DailyRiskGuard()
+_feedback = FeedbackLoop()  # 全链路反馈闭环引擎
 
 def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.DataFrame | None',
-                      max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
+                    max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
     """用持仓期间的 K线数据计算最大顺向R / 最大逆向R / 最终R。
 
     假设开单位于 future_df.iloc[0] 的开盘价，SL/TP 用 intrabar high/low 判断。
@@ -340,7 +343,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         min_score=55.0,  # 放低分数门槛
         allowed_hours=tuple(range(24)),  # ✅ 生产环境放开全部时间段，让评分做最终筛选
     )
-  
+
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
         print(f"[{symbol}] V56 指标计算后数据不足")
@@ -442,7 +445,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
             score *= 0.7
     
     print(f"[{symbol}] V56.5 选定: {direction} score={score:.1f} ev={ev:.4f} "
-          f"setup={best.get('setup_type','?')} price={entry_price:.2f}")
+        f"setup={best.get('setup_type','?')} price={entry_price:.2f}")
     
     # 【修复20260705】多空评分改为使用 exec_ctx 中的独立质量评分
     _exec_lq = float(exec_ctx.get("long_quality", 0))
@@ -462,7 +465,9 @@ async def scan_and_decide(symbol: str) -> dict | None:
     else:
         print(f"[{symbol}] HTF Regime 通过: 1H={_htf_state['regime']}, allow_long={_htf_state['allow_long']}, allow_short={_htf_state['allow_short']}")
 
-    # ===== 【特征收集 - 用于优化4/5】构建特征字典 =====
+        # ===== 【特征收集 - 用于优化4/5】构建特征字典 =====
+    # 【修复20260726】注入 regime 信息，让 feature_penalty 能做 regime-aware 惩罚
+    _regime_name = str(_htf_state.get("regime", "UNKNOWN")).upper().strip()
     _features = {
         "ema_trend": _htf_state.get("trend_strength", 0) > 0.4,
         "adx": float(exec_ctx.get("adx", 0)) > 25,
@@ -478,12 +483,32 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "price_acceleration": False,
         "volume_surge": float(curr.get("volume_ratio", 1)) > 2.0 if hasattr(curr, 'get') else False,
         "ema_alignment": _htf_state.get("regime") in ("BULL", "BEAR"),
+        # 【新增20260726】注入 regime 字段，供 feature_penalty 动态调整惩罚系数
+        "regime": _regime_name,
     }
 
         # ===== 【优化5 - Statistical EV】混合历史EV =====
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
     if _blended_ev != ev:
         print(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
+
+    # ===== 【闭环】FeedbackLoop 信号评估 =====
+    _fb_features, _fb_raw_scores = _feedback.get_signal_features(
+        reason=f"{best.get('setup_type','?')}_{best.get('gate_reason','PASSED')}",
+        result={"score": score, "bullish_ob": exec_ctx.get("bullish_ob"), "bearish_ob": exec_ctx.get("bearish_ob"),
+                "bullish_fvg": exec_ctx.get("bullish_fvg"), "bearish_fvg": exec_ctx.get("bearish_fvg")},
+        exec_ctx=exec_ctx,
+    )
+    _fb_result = _feedback.evaluate_signal(
+        regime=_regime_name,
+        features=_fb_features,
+        score=score,
+        raw_feature_scores=_fb_raw_scores,
+        base_ev=_blended_ev,
+    )
+    print(f"[{symbol}] FeedbackLoop: score={score:.1f} -> weighted={_fb_result['weighted_score']:.1f}, "
+          f"confidence={_fb_result['confidence']:.3f}, ev={_fb_result['ev']:.4f}, "
+          f"reject={_fb_result['should_reject']} (threshold={_fb_result['reject_threshold']})")
 
     # 构建兼容返回格式
     return {
@@ -549,6 +574,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "htf_blocked": result_htf_blocked,
         "features": _features,
         "blended_ev": _blended_ev,
+        "_feedback_features": _fb_features,  # 【闭环】特征列表
+        "_feedback_raw_scores": _fb_raw_scores,  # 【闭环】原始特征分数
+        "_feedback_result": _fb_result,  # 【闭环】全文决策统计
+        "_feedback_ev": _fb_result["ev"],  # 【闭环】FeedbackLoop EV
+        "confidence": _fb_result["confidence"],  # 【闭环】置信度
         "grade_result": None,  # check_and_open 中填充
         "feature_penalty": 0.0,  # check_and_open 中填充
     }
@@ -860,10 +890,11 @@ def _push_observer_event(
         suggest_text = (
             f"⏸️ 【优势不明显，不开单】\n"
             f"多头 {lp:.0f}分 / 空头 {sp:.0f}分，分差 {score_gap:.0f}分，两者均不够突出。\n"
-            f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
+                        f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
         )
 
-        lines = [
+    # ===== 【紧急修复20260726】lines 初始化移到条件分支外部 =====
+    lines = [
         f"{icon} [{type_name}] {symbol}",
         f"方向: {dir_emoji.get(score_dir, '⚖️ 中性')} | {ev['desc']}",
         "",
@@ -898,7 +929,7 @@ def _push_observer_event(
         except: pass
 
     # ── 操作建议（替代旧的简短建议） ──
-        lines.append("")
+    lines.append("")
     lines.append("━━━ 操作建议 ━━━")
     lines.append(suggest_text)
 
@@ -969,12 +1000,12 @@ def _signal_id(result: dict) -> str:
     """构建高精度信号指纹，确保每次扫描的每个信号都是唯一可追踪的。
 
     指纹包含：
-      - symbol / direction（基础标识）
-      - setup_type（模式类型：LIQUIDITY_SWEEP / WEAK_BOS / FVG_TOUCH 等）
-      - idx（K线bar索引，唯一标识触发行情位置）
-      - entry_price（入场价，四舍五入到小数点后1位）
-      - score + ev（量化特征）
-      - scan_slot（扫描槽位 = 当前时间 / SCAN_INTERVAL，300秒粒度）
+    - symbol / direction（基础标识）
+    - setup_type（模式类型：LIQUIDITY_SWEEP / WEAK_BOS / FVG_TOUCH 等）
+    - idx（K线bar索引，唯一标识触发行情位置）
+    - entry_price（入场价，四舍五入到小数点后1位）
+    - score + ev（量化特征）
+    - scan_slot（扫描槽位 = 当前时间 / SCAN_INTERVAL，300秒粒度）
 
     这样同一个15-min K线内，不同 setup_type 的信号不会互相覆盖；
     同一个方向但不同 idx（不同bar）的信号也被区分；
@@ -986,6 +1017,9 @@ def _signal_id(result: dict) -> str:
     idx = result.get("decision", {}).get("signal", {}).get("idx", result.get("entry", 0))
     entry_price = round(float(result.get("entry", 0.0)), 1)
     score_ev_bucket = f"s{int(result.get('score', 0) / 10)}_ev{result.get('expected_value', 0.0):+.4f}"
+    # feedback 字段
+    _fb_ev = result.get("_feedback_ev", result.get("expected_value", 0.0))
+    score_ev_bucket += f"_fb{_fb_ev:+.4f}"
     period = SCAN_INTERVAL  # 300s，与扫描间隔匹配
     scan_slot = int(time.time()) // period
     return f"{symbol}_{direction}_{setup_type}_idx{idx}_p{entry_price}_{score_ev_bucket}_{scan_slot}"
@@ -1007,20 +1041,20 @@ def check_and_open(result: dict | None) -> bool:
     """开单检查与推送
 
     保护链（按执行顺序）：
-      1. result 非空检查
-      2. 止损冷却 _check_cooldown()
-      3. approved + direction 有效性
-      4. HTF Regime 宏观方向拦截
-      5. Score Grade 分级过滤
-      6. Feature Penalty 特征惩罚
-      7. Statistical EV Gate 动态阈值
-      8. EV/Score 硬阈值兜底
-      9. 多空评分差距 MIN_SCORE_GAP
-      10. 信号去重 _is_signal_processed()
-      11. 已有持仓检查 position_manager.exists()
-      12. 趋势末端位置检查
-      13. RR 硬校验 >= 1.0
-      14. V37 Final Gate 最终闸门
+    1. result 非空检查
+    2. 止损冷却 _check_cooldown()
+    3. approved + direction 有效性
+    4. HTF Regime 宏观方向拦截
+    5. Score Grade 分级过滤
+    6. Feature Penalty 特征惩罚
+    7. Statistical EV Gate 动态阈值
+    8. EV/Score 硬阈值兜底
+    9. 多空评分差距 MIN_SCORE_GAP
+    10. 信号去重 _is_signal_processed()
+    11. 已有持仓检查 position_manager.exists()
+    12. 趋势末端位置检查
+    13. RR 硬校验 >= 1.0
+    14. V37 Final Gate 最终闸门
     """
     if not result:
         print("[check_and_open] result 为空，拒绝开单")
@@ -1063,6 +1097,14 @@ def check_and_open(result: dict | None) -> bool:
     else:
         print(f"[{symbol}] ScoreGrade 通过: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']}")
     
+        # ===== 【闭环】FeedbackLoop EV 决策替代固定阈值 =====
+    _fb_res = result.get("_feedback_result", {})
+    if _fb_res.get("should_reject", False):
+        print(f"[{symbol}] FeedbackLoop 拒绝: ev={_fb_res.get('ev', 0):.4f}, "
+              f"confidence={_fb_res.get('confidence', 0):.3f} < "
+              f"threshold={_fb_res.get('reject_threshold', 0.30)}")
+        return False
+    
     # ===== 【优化4 - Feature Penalty】特征重叠惩罚 =====
     _overlap_penalty = calculate_feature_overlap(features)
     result["feature_penalty"] = _overlap_penalty
@@ -1097,13 +1139,13 @@ def check_and_open(result: dict | None) -> bool:
     
     # ---- 原有低阈值检查（已由 StatisticalEVGate 覆盖，保留为安全兜底）----
     if ev < MIN_EV_FOR_PUSH:
-        print(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
-        return False
-        
+                print(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
+    return False
+
     if score < MIN_SCORE_FOR_PUSH:
         print(f"[{symbol}] score={score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
         return False
-        
+
     entry = result["entry"]
     sl = result["sl"]
     tp1 = result["tp1"]
@@ -1115,23 +1157,51 @@ def check_and_open(result: dict | None) -> bool:
     book = result["book"]
     size = result["size"]
     reason = result["reason"]
-    
+
     funding = result.get("funding_rate")
     if funding is not None and abs(funding) > 0.0005:
         if (direction == "Long" and funding > 0.0003) or (direction == "Short" and funding < -0.0003):
             print(f"[{symbol}] funding {funding:.6f} adverse for {direction}, skip")
             return False
-            
+
     long_score = result.get("long_score", 0)
     short_score = result.get("short_score", 0)
     score_gap = abs(long_score - short_score)
-    
-    if direction == "Long" and long_score - short_score < MIN_SCORE_GAP:
-        print(f"[{symbol}] Long({long_score:.1f}) vs Short({short_score:.1f}) gap {score_gap:.1f}<{MIN_SCORE_GAP}, skip")
-        return False
-    if direction == "Short" and short_score - long_score < MIN_SCORE_GAP:
-        print(f"[{symbol}] Short({short_score:.1f}) vs Long({long_score:.1f}) gap {score_gap:.1f}<{MIN_SCORE_GAP}, skip")
-        return False
+
+    # ===== 【修复20260726】动态 Gap 阈值 =====
+    # 在震荡市（ADX<25或CHOP/RANGE）降低 gap 要求
+    _regime_for_gap = str(result.get("regime", "UNKNOWN")).upper().strip()
+    _adx_for_gap = float(result.get("adx", 0))  # 修复：从 exec_ctx → result 读取
+    _is_chop = _regime_for_gap in ("CHOP", "RANGE") or _adx_for_gap < 25
+    _dynamic_gap = MIN_SCORE_GAP * (0.75 if _is_chop else 1.0)  # 震荡市 gap 从 4.0 → 3.0
+    print(f"[{symbol}] GapCheck: regime={_regime_for_gap} adx={_adx_for_gap:.1f} "
+        f"is_chop={_is_chop} dynamic_gap={_dynamic_gap} "
+        f"long={long_score:.1f} short={short_score:.1f} gap={score_gap:.1f}")
+
+    gap_passed = False
+    if direction == "Long" and long_score - short_score >= _dynamic_gap:
+        gap_passed = True
+    elif direction == "Short" and short_score - long_score >= _dynamic_gap:
+        gap_passed = True
+
+    if not gap_passed:
+        # 即使 gap 不满足，检查是否进入 probe 模式
+        # probe 模式：EV>0.04 且有 Liquidity Sweep + FVG 组合时允许小仓位试单
+        _can_probe = False
+        _has_sweep = bool(result.get("is_bsl_swept", False) or result.get("is_ssl_swept", False))
+        _has_fvg = bool(result.get("bullish_fvg") or result.get("bearish_fvg"))
+        if ev > 0.04 and _has_sweep and _has_fvg:
+            _can_probe = True
+            print(f"[{symbol}] PROBE 模式触发: ev={ev:.4f}>0.04, sweep={_has_sweep}, fvg={_has_fvg}")
+
+        if not _can_probe:
+            print(f"[{symbol}] Gap 不满足且非 probe 模式, skip. "
+                f"({long_score:.1f} vs {short_score:.1f} gap={score_gap:.1f}<{_dynamic_gap})")
+            return False
+        else:
+            # probe 模式：绕过 gap 检查，但标记为小仓位
+            print(f"[{symbol}] PROBE 模式: gap={score_gap:.1f}<{_dynamic_gap} 但 EV+sweep+FVG 通过, 允许试单")
+            result["is_probe"] = True
         
     sig_id = _signal_id(result)
     if _is_signal_processed(sig_id):
@@ -1153,14 +1223,14 @@ def check_and_open(result: dict | None) -> bool:
     if direction == "Short" and swing_high > 0 and swing_high > entry_price:
         drop_from_high = (swing_high - entry_price) / max(atr_val, 1)
         print(f"[{symbol}] Short: swing_high={swing_high:.1f} price={entry_price:.1f} "
-              f"drop={drop_from_high:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
+            f"drop={drop_from_high:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
         if drop_from_high > TREND_END_PULLBACK_ATR:
             print(f"[{symbol}] 价格已从高位下跌 {drop_from_high:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Short")
             return False
     elif direction == "Long" and swing_low > 0 and swing_low < entry_price:
         rise_from_low = (entry_price - swing_low) / max(atr_val, 1)
         print(f"[{symbol}] Long: swing_low={swing_low:.1f} price={entry_price:.1f} "
-              f"rise={rise_from_low:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
+            f"rise={rise_from_low:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
         if rise_from_low > TREND_END_PULLBACK_ATR:
             print(f"[{symbol}] 价格已从低点上涨 {rise_from_low:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Long")
             return False
@@ -1201,15 +1271,38 @@ def check_and_open(result: dict | None) -> bool:
         print(f"[{symbol}] V37 Gate 拦截: {_v37_reason}")
         return False
     else:
-        print(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
+                print(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
+
+    # ===== 【SmartPositionSizer】智能仓位计算 =====
+    _calib = _fb_res.get("calibration", {})
+    _sizer = get_smart_sizer()
+    _size_result = _sizer.calculate(
+        score=score,
+        confidence=result.get("confidence", 0.5),
+        avg_win_r=_calib.get("avg_win_r", 0.50),
+        avg_loss_r=_calib.get("avg_loss_r", 0.50),
+        base_leverage=0.05,
+        grade_size_mult=_grade_result.get("size_mult", 1.0),
+        env_size_mult=float(_v37_size_mult),
+        regime=str(result.get("regime", "UNKNOWN")),
+        volatility=str(result.get("vol_state", "normal")),
+    )
+    result["size"] = _size_result["final_size"]
+    result["_sizer"] = _size_result  # 调试用
+    print(f"[{symbol}] SmartSizer: final_size={_size_result['final_size']:.4f} "
+          f"(Kelly={_size_result['kelly_pct']:.3f} grade={_size_result['grade_mult']:.2f} "
+          f"env={_size_result['env_mult']:.2f} regime={_size_result['regime_mult']:.2f} "
+          f"vol={_size_result['vol_mult']:.2f} cons_loss={_size_result['cons_loss_mult']:.2f} "
+          f"score_mult={_size_result['score_mult']:.2f})")
 
     # ===== 【新增20260723】DailyRiskGuard 日风险检查 =====
     if not _risk_guard.can_trade():
         print(f"[{symbol}] DailyRiskGuard 拦截: 日内风控限制")
         return False
 
-    # ===== 【新增20260723】AdaptiveFeatureWeighter 自适应加权评分 =====
-    # 构建原始特征分数（用于加权计算）
+    # ===== 【闭环】旧 Weighter 仅用于统计学习跟踪（不再影响评分决策） =====
+    # 评分加权已由 FeedbackLoop.evaluate_signal 在 scan_and_decide 中完成
+    # 此处只更新 Weighter 统计，不重复加权 score
     _raw_feature_scores = {}
     if "OB" in str(reason) or result.get("bullish_ob") or result.get("bearish_ob"):
         _raw_feature_scores["OB"] = score * 0.15
@@ -1223,8 +1316,7 @@ def check_and_open(result: dict | None) -> bool:
         _raw_feature_scores["DIVERGENCE"] = score * 0.12
     if _raw_feature_scores:
         _weighted_score = _weighter.get_weighted_score(_raw_feature_scores)
-        print(f"[{symbol}] AdaptiveWeighter: 原始特征分数={_raw_feature_scores}, 加权后={_weighted_score:.2f}")
-        # 加权分数写入V37 ctx（不影响主流程决策，仅做记录）
+        print(f"[{symbol}] AdaptiveWeighter: 统计跟踪 (不影响评分) raw={_raw_feature_scores} weighted={_weighted_score:.2f}")
         result["weighted_score"] = _weighted_score
 
     # 获取 signal_tier 用于调试消息和日志
@@ -1308,8 +1400,12 @@ def check_and_open(result: dict | None) -> bool:
         "tp2": tp2,
         "tp3": tp3,
         "stage": 0,
-                "sl_hit": False,
+        "sl_hit": False,
         "last_sl_msg": "",
+        "open_score": score,  # 【闭环】用于平仓时回传 Calibrator
+        "open_confidence": result.get("confidence", 0.5),  # 【闭环】
+        "open_regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
+        "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
     })
     print(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
 
@@ -1459,8 +1555,8 @@ def check_and_open(result: dict | None) -> bool:
         # 实时日志：打印后验预测
         if _mf is not None:
             print(f"[信号后验] {sig_id} "
-                  f"max_forward_r={_mf:.2f} max_adverse_r={_ma:.2f} "
-                  f"final_r={_fr:.2f} exit={_er}")
+                f"max_forward_r={_mf:.2f} max_adverse_r={_ma:.2f} "
+                f"final_r={_fr:.2f} exit={_er}")
             # 存入 position_manager，供 check_trailing 平仓时更新
             _pos_data2 = position_manager.get(symbol)
             if _pos_data2:
@@ -1518,82 +1614,95 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         if pos.get("last_sl_msg") != msg_key:
             safe_send(msg)
             pos["last_sl_msg"] = msg_key
-            
-        try:
-            # 【修复20260705】profit_r2 改为 R 倍数（价格差 / 风险），而非价格百分比
-            _risk = abs(pos["entry"] - pos["current_sl"])
-            profit_r2 = (new_sl - pos["entry"]) / max(_risk, 1e-12)
-            if pos["direction"] == "Short":
-                profit_r2 = (pos["entry"] - new_sl) / max(_risk, 1e-12)
-            
-            mfe_val = pos.get("mfe", 0)
-            giveback = 0.0
-            if mfe_val > 0:
-                giveback = abs((mfe_val - profit_r2) / mfe_val)
-            
-            # ===== 写入 TradeJournal 平仓记录 =====
             try:
-                _oid = pos.get("order_id", "")
-                if _oid:
-                    trade_journal.close_trade(
-                        order_id=_oid,
-                        close_price=current_price,
-                        pnl_r=profit_r2,
-                        exit_reason=stage_label,
-                        mfe_r=mfe_val,
-                        mae_r=pos.get("mae", 0),
-                        max_r_before_stop=pos.get("max_r", 0),
-                        note=f"giveback={giveback:.2f}",
-                    )
-            except Exception as tj_err:
-                print(f"[TradeJournal] 平仓记录失败: {tj_err}")
-                
-            feature_store.save_trade({
-                "symbol": symbol,
-                "direction": pos["direction"],
-                "exit_reason": stage_label,
-                "pnl_r": profit_r2,
-                "mfe": mfe_val,
-                "mae": pos.get("mae", 0),
-                "max_r": pos.get("max_r", 0),
-                "giveback_ratio": round(giveback, 4),
-            })
+                # 【修复20260705】profit_r2 改为 R 倍数（价格差 / 风险），而非价格百分比
+                _risk = abs(pos["entry"] - pos["current_sl"])
+                profit_r2 = (new_sl - pos["entry"]) / max(_risk, 1e-12)
+                if pos["direction"] == "Short":
+                    profit_r2 = (pos["entry"] - new_sl) / max(_risk, 1e-12)
+        
+                mfe_val = pos.get("mfe", 0)
+                giveback = 0.0
+                if mfe_val > 0:
+                    giveback = abs((mfe_val - profit_r2) / mfe_val)
+        
+                # ===== 写入 TradeJournal 平仓记录 =====
+                try:
+                    _oid = pos.get("order_id", "")
+                    if _oid:
+                        trade_journal.close_trade(
+                            order_id=_oid,
+                            close_price=current_price,
+                            pnl_r=profit_r2,
+                            exit_reason=stage_label,
+                            mfe_r=mfe_val,
+                            mae_r=pos.get("mae", 0),
+                            max_r_before_stop=pos.get("max_r", 0),
+                            note=f"giveback={giveback:.2f}",
+                        )
+                except Exception as tj_err:
+                    print(f"[TradeJournal] 平仓记录失败: {tj_err}")
+        
+                feature_store.save_trade({
+                    "symbol": symbol,
+                    "direction": pos["direction"],
+                    "exit_reason": stage_label,
+                    "pnl_r": profit_r2,
+                    "mfe": mfe_val,
+                    "mae": pos.get("mae", 0),
+                    "max_r": pos.get("max_r", 0),
+                    "giveback_ratio": round(giveback, 4),
+                })
 
-                        # ===== 【修复20260721】后验验证：更新平仓结果 =====
-            try:
-                _audit_sig_id = pos.get("signal_id", "")
-                if _audit_sig_id:
-                    _audit_fwd = pos.get("audit_forward") or mfe_val
-                    _audit_adv = pos.get("audit_adverse") or pos.get("mae", 0.0)
-                    signal_audit_log.record_close(
-                        signal_id=_audit_sig_id,
-                        final_pnl_r=profit_r2,
-                        max_forward_r=_audit_fwd,
-                        max_adverse_r=_audit_adv,
-                        exit_reason=stage_label,
-                    )
-                    print(f"[信号后验][{stage_label}] {_audit_sig_id} pnl_r={profit_r2:.2f}")
-            except Exception as _tp_audit_e:
-                print(f"[SignalAuditLog] TP后验更新失败: {_tp_audit_e}")
+                # ===== 【修复20260721】后验验证：更新平仓结果 =====
+                try:
+                    _audit_sig_id = pos.get("signal_id", "")
+                    if _audit_sig_id:
+                        _audit_fwd = pos.get("audit_forward") or mfe_val
+                        _audit_adv = pos.get("audit_adverse") or pos.get("mae", 0.0)
+                        signal_audit_log.record_close(
+                            signal_id=_audit_sig_id,
+                            final_pnl_r=profit_r2,
+                            max_forward_r=_audit_fwd,
+                            max_adverse_r=_audit_adv,
+                            exit_reason=stage_label,
+                        )
+                        print(f"[信号后验][{stage_label}] {_audit_sig_id} pnl_r={profit_r2:.2f}")
+                except Exception as _tp_audit_e:
+                    print(f"[SignalAuditLog] TP后验更新失败: {_tp_audit_e}")
 
-            # ===== 【新增20260723】SignalTracker outcome + DailyRiskGuard + AdaptiveWeighter =====
-            try:
-                _ts_id = pos.get("tracker_signal_id", "")
-                if _ts_id:
-                    _tracker.update_outcome(signal_id=_ts_id, final_r=profit_r2)
-                _risk_guard.on_trade_closed(r=profit_r2)
-                # AdaptiveFeatureWeighter：提取特征列表更新
-                _feat_list = []
-                if "OB" in str(pos.get("last_sl_msg", "")):
-                    _feat_list.append("OB")
-                if profit_r2 > 0:
-                    _feat_list.append("CHOCH")
-                if _feat_list:
-                    _weighter.update(features=_feat_list, outcome_r=profit_r2)
-            except Exception as _new_tools_e:
-                print(f"[NewTools] TP平仓更新异常: {_new_tools_e}")
-        except Exception:
-            pass
+                                # ===== 【闭环】FeedbackLoop 全链路更新 =====
+                try:
+                    _ts_id = pos.get("tracker_signal_id", "")
+                    if _ts_id:
+                        _tracker.update_outcome(signal_id=_ts_id, final_r=profit_r2)
+                    _risk_guard.on_trade_closed(r=profit_r2)
+                    # 【SmartPositionSizer】记录结果用于连续亏损统计
+                    get_smart_sizer().record_outcome(pnl_r=profit_r2)
+                    # FeedbackLoop 闭环更新
+                    _open_score = pos.get("open_score", 0)
+                    _open_conf = pos.get("open_confidence", 0.5)
+                    _open_regime = pos.get("open_regime", "UNKNOWN")
+                    _open_features = pos.get("open_features", [])
+                    if "OB" in str(pos.get("last_sl_msg", "")):
+                        _open_features = list(set(_open_features + ["OB"]))
+                    if profit_r2 > 0 and "CHOCH" not in _open_features:
+                        _open_features = list(set(_open_features + ["CHOCH"]))
+                    if _open_score > 0:
+                        _feedback.on_trade_closed(
+                            regime=_open_regime,
+                            features=_open_features,
+                            score=_open_score,
+                            confidence=_open_conf,
+                            pnl_r=profit_r2,
+                            direction=pos.get("direction", ""),
+                        )
+                        # 同时更新旧的 Weighter（兼容旧代码）
+                        _weighter.update(features=_open_features, outcome_r=profit_r2)
+                except Exception as _new_tools_e:
+                    print(f"[NewTools] TP平仓更新异常: {_new_tools_e}")
+            except Exception:
+                pass
 
     # ---- 止损检查 ----
     if direction == "Long" and current_price <= pos["current_sl"]:
@@ -1621,7 +1730,15 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
     safe_send(msg)
 
     try:
-        profit_r = pnl_pct / 100.0  # 价格变化百分比 → R 倍数
+        # 修复：用 R 倍数替代百分比（SL 距离 = 1R）
+        _risk_dist = abs(pos["entry"] - pos["current_sl"])
+        if _risk_dist > 1e-12:
+            if pos["direction"] == "Long":
+                profit_r = (current_price - pos["entry"]) / _risk_dist
+            else:
+                profit_r = (pos["entry"] - current_price) / _risk_dist
+        else:
+            profit_r = pnl_pct / 100.0  # 兜底
         
         # 【修复20260705】止损时同步写入 TradeJournal
         _oid = pos.get("order_id", "")
@@ -1634,7 +1751,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
                     exit_reason="SL",
                     mfe_r=pos.get("mfe", 0),
                     mae_r=pos.get("mae", 0),
-                                        max_r_before_stop=pos.get("max_r", 0),
+                    max_r_before_stop=pos.get("max_r", 0),
                 )
             except Exception as tj_err:
                 print(f"[TradeJournal] 止损记录失败: {tj_err}")
@@ -1646,13 +1763,13 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
             "pnl_r": profit_r,
             "mfe": pos.get("mfe", 0),
             "mae": pos.get("mae", 0),
-                        "max_r": pos.get("max_r", 0),
+            "max_r": pos.get("max_r", 0),
             "max_r_before_stop": pos.get("max_r", 0),
         })
     except Exception as feat_e:
         print(f"[Feature] 止损特征更新异常: {feat_e}")
 
-    # profit_r 已在 try 块内定义（pnl_pct / 100.0）
+    # profit_r 已在上方 try 块内用 R 倍数公式重新计算
     # ===== 【修复20260721】后验验证：更新平仓结果 =====
     try:
         _audit_sig_id = pos.get("signal_id", "")
@@ -1670,13 +1787,28 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
     except Exception as _sl_audit_e:
         print(f"[SignalAuditLog] 止损后验更新失败: {_sl_audit_e}")
 
-    # ===== 【新增20260723】止损时更新 SignalTracker / RiskGuard / Weighter =====
+        # ===== 【闭环】止损时更新 FeedbackLoop =====
     try:
         _ts_id = pos.get("tracker_signal_id", "")
         if _ts_id:
             _tracker.update_outcome(signal_id=_ts_id, final_r=profit_r)
         _risk_guard.on_trade_closed(r=profit_r)
-        # 止损特征学习：无论盈亏都记录
+        # 【SmartPositionSizer】记录止损结果用于连续亏损统计
+        get_smart_sizer().record_outcome(pnl_r=profit_r)
+        # FeedbackLoop 闭环更新
+        _open_score = pos.get("open_score", 0)
+        _open_conf = pos.get("open_confidence", 0.5)
+        _open_regime = pos.get("open_regime", "UNKNOWN")
+        _open_features = pos.get("open_features", [])
+        if _open_score > 0:
+            _feedback.on_trade_closed(
+                regime=_open_regime,
+                features=_open_features or ["CHOCH"],
+                score=_open_score,
+                confidence=_open_conf,
+                pnl_r=profit_r,
+                direction=pos.get("direction", ""),
+            )
         _weighter.update(features=["CHOCH"], outcome_r=profit_r)
     except Exception as _sl_new_e:
         print(f"[NewTools] 止损更新异常: {_sl_new_e}")
@@ -1714,7 +1846,7 @@ async def main_loop():
                     _exec_ctx = result.get("exec_ctx", {}) or {}
                     _macro_ctx = result.get("macro_ctx", {}) or {}
                     _events = _detect_observer_events(_curr, _exec_ctx, _macro_ctx,
-                                  result.get("long_score", 0), result.get("short_score", 0))
+                                result.get("long_score", 0), result.get("short_score", 0))
                     print(f"[{symbol}] _detect_observer_events 返回 {len(_events)} 个事件: {[e['type'] for e in _events]}")
                     obs_events = _new_observer_events(symbol, _events)
                     print(f"[{symbol}] 新 Observer 事件: {len(obs_events)} 个 (总 {len(_events)} 个)")

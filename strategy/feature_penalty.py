@@ -48,6 +48,20 @@ MOMENTUM_FEATURES = [
     "volume_surge",
 ]
 
+# ===== 【修复20260726】regime-aware 惩罚系数 =====
+# 趋势市(TREND)：特征重叠可信度高，惩罚可轻
+# 震荡市(CHOP/RANGE)：同组特征激活多为噪音，惩罚要重
+# 过渡期(TRANSITION)：中等惩罚
+REGIME_PENALTY_MULTIPLIER = {
+    "TREND": 0.6,       # 趋势市 → 惩罚打6折
+    "BULL": 0.6,        # 同上
+    "BEAR": 0.6,        # 同上
+    "RANGE": 1.4,       # 震荡市 → 惩罚加重40%
+    "CHOP": 1.5,        # 强震荡 → 惩罚加重50%
+    "TRANSITION": 1.0,  # 过渡期 → 不变
+    "UNKNOWN": 1.0,     # 未知 → 不变
+}
+
 # 分组内最大允许激活数（超过则开始惩罚）
 MAX_ALLOWED_PER_GROUP = {
     "trend": 2,
@@ -57,7 +71,7 @@ MAX_ALLOWED_PER_GROUP = {
 
 
 def calculate_feature_overlap(features: Dict[str, Any]) -> float:
-    """计算特征重叠惩罚分数
+    """计算特征重叠惩罚分数（regime-aware）
 
     参数:
         features: 特征字典（key=特征名, value=bool/int/float 表示是否激活）
@@ -65,6 +79,10 @@ def calculate_feature_overlap(features: Dict[str, Any]) -> float:
     返回:
         惩罚分数（>=0, 从最终 score 中减去）
     """
+    # ---- 获取市场状态（如果传入） ----
+    regime = str(features.get("regime", "UNKNOWN")).upper().strip()
+    mult = REGIME_PENALTY_MULTIPLIER.get(regime, 1.0)
+
     penalty = 0.0
 
     # —— 趋势特征重叠 ——
@@ -105,6 +123,9 @@ def calculate_feature_overlap(features: Dict[str, Any]) -> float:
     if trend_count >= 2 and vol_count >= 2 and mom_count >= 2:
         penalty += 3.0  # 全组重叠额外惩罚
 
+    # 【修复20260726】应用 regime 系数
+    penalty = penalty * mult
+
     return round(penalty, 2)
 
 
@@ -125,17 +146,38 @@ def apply_feature_penalty(score: float, features: Dict[str, Any]) -> float:
 
 def get_feature_overlap_summary(features: Dict[str, Any]) -> Dict[str, Any]:
     """返回特征重叠诊断信息"""
+    regime = str(features.get("regime", "UNKNOWN")).upper().strip()
+    mult = REGIME_PENALTY_MULTIPLIER.get(regime, 1.0)
     trend_count = sum(1 for f in TREND_FEATURES if features.get(f))
     vol_count = sum(1 for f in VOLATILITY_FEATURES if features.get(f))
     mom_count = sum(1 for f in MOMENTUM_FEATURES if features.get(f))
-    penalty = calculate_feature_overlap(features)
+    penalty_raw = 0.0
+    # 非封装计算，仅用于展示
+    if trend_count > MAX_ALLOWED_PER_GROUP["trend"]:
+        penalty_raw += (trend_count - MAX_ALLOWED_PER_GROUP["trend"]) * 5.0
+    elif trend_count >= 3:
+        penalty_raw += 3.0
+    if vol_count > MAX_ALLOWED_PER_GROUP["volatility"]:
+        penalty_raw += (vol_count - MAX_ALLOWED_PER_GROUP["volatility"]) * 4.0
+    elif vol_count >= 3:
+        penalty_raw += 2.0
+    if mom_count > MAX_ALLOWED_PER_GROUP["momentum"]:
+        penalty_raw += (mom_count - MAX_ALLOWED_PER_GROUP["momentum"]) * 3.0
+    elif mom_count >= 3:
+        penalty_raw += 1.0
+    if trend_count >= 2 and vol_count >= 2 and mom_count >= 2:
+        penalty_raw += 3.0
+    penalty_final = round(penalty_raw * mult, 2)
 
     return {
+        "regime": regime,
+        "regime_multiplier": mult,
         "trend_count": trend_count,
         "volatility_count": vol_count,
         "momentum_count": mom_count,
         "max_allowed_trend": MAX_ALLOWED_PER_GROUP["trend"],
         "max_allowed_volatility": MAX_ALLOWED_PER_GROUP["volatility"],
         "max_allowed_momentum": MAX_ALLOWED_PER_GROUP["momentum"],
-        "penalty": penalty,
+        "penalty_raw": round(penalty_raw, 2),
+        "penalty": penalty_final,
     }
