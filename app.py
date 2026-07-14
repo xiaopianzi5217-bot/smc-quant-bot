@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
-""" 把这一段复制到 app.py 最顶部，用来压制 Gradio/SSR/后台线程环境下的 asyncio fd -1 析构噪音。 这不是策略致命错误，只是启动/退出事件循环清理时的警告。 """
+﻿# -*- coding: utf-8 -*-
+""" 鎶婅繖涓€娈靛鍒跺埌 app.py 鏈€椤堕儴锛岀敤鏉ュ帇鍒?Gradio/SSR/鍚庡彴绾跨▼鐜涓嬬殑 asyncio fd -1 鏋愭瀯鍣煶銆?杩欎笉鏄瓥鐣ヨ嚧鍛介敊璇紝鍙槸鍚姩/閫€鍑轰簨浠跺惊鐜竻鐞嗘椂鐨勮鍛娿€?"""
 
 import asyncio
 import os
 import warnings
 
-# 强制 Python 时区为 Asia/Shanghai，解决日志时间与北京时间不同步的问题
+# 寮哄埗 Python 鏃跺尯涓?Asia/Shanghai锛岃В鍐虫棩蹇楁椂闂翠笌鍖椾含鏃堕棿涓嶅悓姝ョ殑闂
 os.environ["TZ"] = "Asia/Shanghai"
 try:
     import time as _time_mod
@@ -28,7 +28,7 @@ def ensure_thread_event_loop():
         asyncio.set_event_loop(loop)
         return loop
 
-""" SMC V11+V9 Quant System - Integrated Control Console 包含：系统监控、工程体检、策略扫描、快速回测、Telegram 信号工具、后台自愈监控。 """
+""" SMC V11+V9 Quant System - Integrated Control Console 鍖呭惈锛氱郴缁熺洃鎺с€佸伐绋嬩綋妫€銆佺瓥鐣ユ壂鎻忋€佸揩閫熷洖娴嬨€乀elegram 淇″彿宸ュ叿銆佸悗鍙拌嚜鎰堢洃鎺с€?"""
 import os
 import json
 import traceback
@@ -64,22 +64,22 @@ from utils.time_utils import series_ms_to_bj
 
 try:
     from notifier.telegram import send_telegram, test_telegram
-    print("DEBUG: Telegram 模块加载成功")
+    print("DEBUG: Telegram 妯″潡鍔犺浇鎴愬姛")
 except Exception as exc:
     _telegram_import_error = traceback.format_exc()
-    print("!!! DEBUG: Telegram 模块加载失败 !!!")
+    print("!!! DEBUG: Telegram 妯″潡鍔犺浇澶辫触 !!!")
     print(_telegram_import_error)
     send_telegram = None
 
     def test_telegram(_err=_telegram_import_error):
-        return "Telegram 模块导入失败:\n" + _err
+        return "Telegram 妯″潡瀵煎叆澶辫触:\n" + _err
 
 ensure_runtime_dirs()
 
-# 全局探针与持仓字典 (供后台监控线程使用)
+# 鍏ㄥ眬鎺㈤拡涓庢寔浠撳瓧鍏?(渚涘悗鍙扮洃鎺х嚎绋嬩娇鐢?
 health_monitor = HealthCheck(max_data_age_sec=300)
 MANAGED_POSITIONS = {} 
-# 结构示例: {'BTC/USDT': {'direction':'Long', 'entry': 60000, 'current_sl': 59000, 'tp1': 61000, 'tp2': 62500, 'stage': 0}}
+# 缁撴瀯绀轰緥: {'BTC/USDT': {'direction':'Long', 'entry': 60000, 'current_sl': 59000, 'tp1': 61000, 'tp2': 62500, 'stage': 0}}
 
 def is_real_trading_ready():
     return bool(os.getenv('BITGET_API_KEY') and os.getenv('BITGET_SECRET'))
@@ -88,7 +88,7 @@ def _json(x): return json.dumps(x, ensure_ascii=False, indent=2, default=str)
 
 def safe_send_telegram(msg):
     try:
-        if send_telegram is None: return False, "Telegram 模块未加载"
+        if send_telegram is None: return False, "Telegram 妯″潡鏈姞杞?
         return True, send_telegram(msg)
     except Exception: return False, traceback.format_exc()
 
@@ -111,17 +111,17 @@ def dry_run(symbols_text):
         overrides = {}
         symbols = [x.strip() for x in symbols_text.split(",") if x.strip()]
         if symbols: overrides["symbols"] = symbols
-        # 强制使用真实数据模式
+        # 寮哄埗浣跨敤鐪熷疄鏁版嵁妯″紡
         overrides["data_mode"] = "live"
         cfg = load_runtime_config(overrides=overrides)
-        # 确保 telegram 配置启用
+        # 纭繚 telegram 閰嶇疆鍚敤
         if "telegram" not in cfg:
             cfg["telegram"] = {}
         cfg["telegram"]["send_observer"] = True
         cfg["telegram"]["send_approved"] = True
         results = run_once(cfg)
         
-        # 记录健康探针打点
+        # 璁板綍鍋ュ悍鎺㈤拡鎵撶偣
         for s in symbols: health_monitor.mark_tick(s)
             
         path = write_json_report("latest_signals.json", results)
@@ -133,91 +133,80 @@ def dry_run(symbols_text):
 
 def quick_backtest(symbol, exec_csv, macro_csv, max_rows, warmup):
     try:
-        # 兜底：如果没有传入文件，自动使用默认路径
+        # 鍏滃簳锛氬鏋滄病鏈変紶鍏ユ枃浠讹紝鑷姩浣跨敤榛樿璺緞
         exec_path = exec_csv or "data/BTCUSDTUSDT_15m.csv"
         macro_path = macro_csv or "data/BTCUSDTUSDT_1h.csv"
         
-        # 【核心修改：智能解除限制】
-        # 如果滑块数值大于 2900，说明用户想跑全量，直接设为 99万行
+        # 銆愭牳蹇冧慨鏀癸細鏅鸿兘瑙ｉ櫎闄愬埗銆?        # 濡傛灉婊戝潡鏁板€煎ぇ浜?2900锛岃鏄庣敤鎴锋兂璺戝叏閲忥紝鐩存帴璁句负 99涓囪
         rows_to_use = int(max_rows) if int(max_rows) < 2900 else 999999
         
-        # 加载数据
+        # 鍔犺浇鏁版嵁
         df_exec = pd.read_csv(exec_path)
         if rows_to_use and rows_to_use < len(df_exec):
             df_exec = df_exec.tail(rows_to_use + int(warmup)).reset_index(drop=True)
         
-        # 先计算所有技术指标（ATRr_14, ema_50, ema_200, adx 等）
+        # 鍏堣绠楁墍鏈夋妧鏈寚鏍囷紙ATRr_14, ema_50, ema_200, adx 绛夛級
         from config import STRATEGY_PARAMS
         df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
         
-        # 断言式强保障：列出策略运行必须死守的底层指标
+        # 鏂█寮忓己淇濋殰锛氬垪鍑虹瓥鐣ヨ繍琛屽繀椤绘瀹堢殑搴曞眰鎸囨爣
         absolute_required = ["ema_50", "ema_200", "adx", "ATRr_14"]
         missing = [col for col in absolute_required if col not in df_exec.columns]
         if missing:
-            err_msg = f"🛑 拦截：指标计算未成功注入！缺失核心列: {missing}，请检查 add_all_indicators"
+            err_msg = f"馃洃 鎷︽埅锛氭寚鏍囪绠楁湭鎴愬姛娉ㄥ叆锛佺己澶辨牳蹇冨垪: {missing}锛岃妫€鏌?add_all_indicators"
             return err_msg, pd.DataFrame(), "failed"
         
-        # 强保障通过，100% 安全地切掉冷启动 NaN 行
-        df_exec = df_exec.dropna(subset=absolute_required).copy()
+        # 寮轰繚闅滈€氳繃锛?00% 瀹夊叏鍦板垏鎺夊喎鍚姩 NaN 琛?        df_exec = df_exec.dropna(subset=absolute_required).copy()
         if len(df_exec) < 100:
-            return "清洗后可用样本过少（<100 行），请提供更多数据", pd.DataFrame(), "failed"
+            return "娓呮礂鍚庡彲鐢ㄦ牱鏈繃灏戯紙<100 琛岋級锛岃鎻愪緵鏇村鏁版嵁", pd.DataFrame(), "failed"
         
-        # ===== SMC 结构点位向量化计算 =====
-        # 用 rolling 窗口计算 eq_high / eq_low（结构高低点）
-        # 回溯窗口 20 根 K 线：平衡捕捉短期结构变动与避免假突破骗炮
+        # ===== SMC 缁撴瀯鐐逛綅鍚戦噺鍖栬绠?=====
+        # 鐢?rolling 绐楀彛璁＄畻 eq_high / eq_low锛堢粨鏋勯珮浣庣偣锛?        # 鍥炴函绐楀彛 20 鏍?K 绾匡細骞宠　鎹曟崏鐭湡缁撴瀯鍙樺姩涓庨伩鍏嶅亣绐佺牬楠楃偖
         df_exec["eq_high"] = df_exec["high"].rolling(20, min_periods=5).max()
         df_exec["eq_low"] = df_exec["low"].rolling(20, min_periods=5).min()
         
-        # last_lower_high：最近一个未被突破的 Lower High（次高点）
-        # 用 diff 找出 eq_high 下降的位置 → 只保留这些下降高点 → ffill 向后顺延
+        # last_lower_high锛氭渶杩戜竴涓湭琚獊鐮寸殑 Lower High锛堟楂樼偣锛?        # 鐢?diff 鎵惧嚭 eq_high 涓嬮檷鐨勪綅缃?鈫?鍙繚鐣欒繖浜涗笅闄嶉珮鐐?鈫?ffill 鍚戝悗椤哄欢
         is_lower_high = df_exec["eq_high"] < df_exec["eq_high"].shift(1)
         lower_high_values = df_exec["eq_high"].where(is_lower_high)
         df_exec["last_lower_high"] = lower_high_values.ffill()
         
-        # last_higher_low：最近一个未被突破的 Higher Low（次低点）
-        # 用 diff 找出 eq_low 上升的位置 → 只保留这些上升低点 → ffill 向后顺延
+        # last_higher_low锛氭渶杩戜竴涓湭琚獊鐮寸殑 Higher Low锛堟浣庣偣锛?        # 鐢?diff 鎵惧嚭 eq_low 涓婂崌鐨勪綅缃?鈫?鍙繚鐣欒繖浜涗笂鍗囦綆鐐?鈫?ffill 鍚戝悗椤哄欢
         is_higher_low = df_exec["eq_low"] > df_exec["eq_low"].shift(1)
         higher_low_values = df_exec["eq_low"].where(is_higher_low)
         df_exec["last_higher_low"] = higher_low_values.ffill()
         
-        # last_swing_low / last_swing_high：用 rolling 最低/最高价作为结构参考
-        df_exec["last_swing_low"] = df_exec["low"].rolling(10, min_periods=3).min()
+        # last_swing_low / last_swing_high锛氱敤 rolling 鏈€浣?鏈€楂樹环浣滀负缁撴瀯鍙傝€?        df_exec["last_swing_low"] = df_exec["low"].rolling(10, min_periods=3).min()
         df_exec["last_swing_high"] = df_exec["high"].rolling(10, min_periods=3).max()
-        # ob_low / ob_high：用 rolling 5 根作为 OB 区域参考
-        df_exec["ob_low"] = df_exec["low"].rolling(5, min_periods=2).min()
+        # ob_low / ob_high锛氱敤 rolling 5 鏍逛綔涓?OB 鍖哄煙鍙傝€?        df_exec["ob_low"] = df_exec["low"].rolling(5, min_periods=2).min()
         df_exec["ob_high"] = df_exec["high"].rolling(5, min_periods=2).max()
-        # high_5 / low_5：最近 5 根 K 线的最高/最低（用于突破探针）
-        df_exec["high_5"] = df_exec["high"].rolling(5, min_periods=2).max()
+        # high_5 / low_5锛氭渶杩?5 鏍?K 绾跨殑鏈€楂?鏈€浣庯紙鐢ㄤ簬绐佺牬鎺㈤拡锛?        df_exec["high_5"] = df_exec["high"].rolling(5, min_periods=2).max()
         df_exec["low_5"] = df_exec["low"].rolling(5, min_periods=2).min()
         
-        # bsl / ssl：Buyside / Sellside 流动性（用 20 根最高/最低作为参考）
+        # bsl / ssl锛欱uyside / Sellside 娴佸姩鎬э紙鐢?20 鏍规渶楂?鏈€浣庝綔涓哄弬鑰冿級
         df_exec["bsl"] = df_exec["high"].rolling(20, min_periods=5).max()
         df_exec["ssl"] = df_exec["low"].rolling(20, min_periods=5).min()
         
-        # liquidity_target：用 eq_high/eq_low 均值作为流动性目标
-        df_exec["liquidity_target"] = (df_exec["eq_high"] + df_exec["eq_low"]) / 2
+        # liquidity_target锛氱敤 eq_high/eq_low 鍧囧€间綔涓烘祦鍔ㄦ€х洰鏍?        df_exec["liquidity_target"] = (df_exec["eq_high"] + df_exec["eq_low"]) / 2
         
-        # squeeze_on：直接用 SQZMOM 的挤压状态（已在 add_all_indicators 中计算）
-        # lowsqz = BB 收缩进 KCL（最紧），midsqz = 收缩进 KCM，highsqz = 收缩进 KCH
+        # squeeze_on锛氱洿鎺ョ敤 SQZMOM 鐨勬尋鍘嬬姸鎬侊紙宸插湪 add_all_indicators 涓绠楋級
+        # lowsqz = BB 鏀剁缉杩?KCL锛堟渶绱э級锛宮idsqz = 鏀剁缉杩?KCM锛宧ighsqz = 鏀剁缉杩?KCH
         df_exec["squeeze_on"] = df_exec.get("lowsqz", pd.Series(False, index=df_exec.index))
         
-        # signal_age：信号年龄计数器（避免 ffill 导致的过度平滑）
-        # 当 MSS 信号产生时 age=0，之后每根 K 线 +1，超过 3 根后 runner 拒绝开仓
-        from backtest.structure_engine import structure_signal
+        # signal_age锛氫俊鍙峰勾榫勮鏁板櫒锛堥伩鍏?ffill 瀵艰嚧鐨勮繃搴﹀钩婊戯級
+        # 褰?MSS 淇″彿浜х敓鏃?age=0锛屼箣鍚庢瘡鏍?K 绾?+1锛岃秴杩?3 鏍瑰悗 runner 鎷掔粷寮€浠?        from backtest.structure_engine import structure_signal
         raw_signal = structure_signal(df_exec)
-        # 用 groupby + cumcount：每次 signal 变化时重置计数
-        # signal 为 True 时 age=0,1,2,...；signal 为 False 时 age=999
+        # 鐢?groupby + cumcount锛氭瘡娆?signal 鍙樺寲鏃堕噸缃鏁?        # signal 涓?True 鏃?age=0,1,2,...锛泂ignal 涓?False 鏃?age=999
         signal_group = (raw_signal != raw_signal.shift()).cumsum()
         df_exec["signal_age"] = raw_signal.groupby(signal_group).cumcount()
         df_exec.loc[~raw_signal, "signal_age"] = 999
         
-        # 用 ffill() 向前填充所有 SMC 字段的缺失值（冷启动区间）
+        # 鐢?ffill() 鍚戝墠濉厖鎵€鏈?SMC 瀛楁鐨勭己澶卞€硷紙鍐峰惎鍔ㄥ尯闂达級
         _smc_cols = ["eq_high", "eq_low", "last_lower_high", "last_higher_low",
                      "last_swing_low", "last_swing_high", "ob_low", "ob_high",
                      "bsl", "ssl", "liquidity_target", "squeeze_on"]
         df_exec[_smc_cols] = df_exec[_smc_cols].ffill()
         
-        # 如果 ffill 后仍有 NaN（数据太少），用 close 兜底
+        # 濡傛灉 ffill 鍚庝粛鏈?NaN锛堟暟鎹お灏戯級锛岀敤 close 鍏滃簳
         for col in ["last_lower_high", "last_higher_low", "last_swing_low", "last_swing_high", "ob_low", "ob_high"]:
             df_exec[col] = df_exec[col].fillna(df_exec["close"])
         for col in ["eq_high", "bsl", "liquidity_target"]:
@@ -226,7 +215,7 @@ def quick_backtest(symbol, exec_csv, macro_csv, max_rows, warmup):
             df_exec[col] = df_exec[col].fillna(df_exec["low"])
         df_exec["squeeze_on"] = df_exec["squeeze_on"].fillna(False)
         
-        # ===== 加载 1H 大级别数据，计算 htf_direction =====
+        # ===== 鍔犺浇 1H 澶х骇鍒暟鎹紝璁＄畻 htf_direction =====
         try:
             df_macro = pd.read_csv(macro_path)
             df_macro = add_all_indicators(df_macro, STRATEGY_PARAMS["wvf_std_mult"])
@@ -235,15 +224,15 @@ def quick_backtest(symbol, exec_csv, macro_csv, max_rows, warmup):
             htf_dir = macro_ctx.get("allowed_direction", "")
         except Exception:
             htf_dir = ""
-        # 将 htf_direction 映射到每根 15m K 线上（整列填充）
+        # 灏?htf_direction 鏄犲皠鍒版瘡鏍?15m K 绾夸笂锛堟暣鍒楀～鍏咃級
         df_exec["htf_direction"] = htf_dir
-        print(f"🔍 1H 大级别方向: {htf_dir}")
+        print(f"馃攳 1H 澶х骇鍒柟鍚? {htf_dir}")
         
-        # 使用新的 backtest.runner.run(df) API
+        # 浣跨敤鏂扮殑 backtest.runner.run(df) API
         trades_list = run_backtest(df_exec)
         trades = pd.DataFrame(trades_list)
         
-        # 使用 analytics.report.summarize_closed_trades
+        # 浣跨敤 analytics.report.summarize_closed_trades
         if not trades.empty:
             summary = summarize_backtest(trades)
         else:
@@ -258,7 +247,7 @@ def quick_backtest(symbol, exec_csv, macro_csv, max_rows, warmup):
 def _normalize_symbol(symbol): return normalize_swap_symbol(symbol)
 
 def _fetch_live_ohlcv(symbol, timeframe="15m", limit=320):
-    """拉取OHLCV（使用requests直连，绕过ccxt SSL问题）"""
+    """鎷夊彇OHLCV锛堜娇鐢╮equests鐩磋繛锛岀粫杩嘽cxt SSL闂锛?""
     import requests
     sym_raw = _normalize_symbol(symbol)
     sym = sym_raw.split("/")[0] + sym_raw.split("/")[1].split(":")[0]
@@ -303,7 +292,7 @@ def fetch_live_funding_rate(symbol):
             if data.get("code") == "00000":
                 fr = data.get("data", {}).get("fundingRate", "N/A")
                 if fr != "N/A":
-                    return float(fr) * 100  # 转百分比
+                    return float(fr) * 100  # 杞櫨鍒嗘瘮
         return "N/A"
     except Exception:
         return "N/A"
@@ -314,8 +303,7 @@ def build_local_snapshot_and_decision(symbol):
     try:
         df_exec = _fetch_live_ohlcv(symbol, "15m", 320)
         df_macro = _fetch_live_ohlcv(symbol, "1h", 320)
-        health_monitor.mark_tick(symbol) # 数据拉取成功，标记心跳
-    except Exception:
+        health_monitor.mark_tick(symbol) # 鏁版嵁鎷夊彇鎴愬姛锛屾爣璁板績璺?    except Exception:
         source = "sample_fallback"
         df_exec = make_sample_ohlcv(start=100.0)
         df_macro = make_sample_ohlcv(start=102.0)
@@ -331,7 +319,7 @@ def build_local_snapshot_and_decision(symbol):
     avg_vol = df_exec["volume"].rolling(20).mean().iloc[-1]
     is_vol = bool(curr["volume"] > avg_vol * 1.5) if avg_vol == avg_vol else False
 
-    # ===== 补充评分系统所需字段 =====
+    # ===== 琛ュ厖璇勫垎绯荤粺鎵€闇€瀛楁 =====
     exec_ctx["htf_direction"] = macro_ctx.get("allowed_direction", "")
     exec_ctx["setup_type"] = "ob" if exec_ctx.get("ob_valid") else ("fvg" if exec_ctx.get("bearish_fvg") or exec_ctx.get("bullish_fvg") else "")
     exec_ctx["squeeze_released"] = str(exec_ctx.get("squeeze", "")).lower() in ("release", "squeeze_release", "released")
@@ -356,12 +344,11 @@ def build_local_snapshot_and_decision(symbol):
     exec_ctx["liquidity"] = 1.0 if (exec_ctx.get("is_bsl_swept") or exec_ctx.get("is_ssl_swept")) else 0.0
     # ==================================
 
-    # 构建多头和空头各自的评分上下文（方向相关字段分开设置）
-    long_ctx = dict(exec_ctx)
+    # 鏋勫缓澶氬ご鍜岀┖澶村悇鑷殑璇勫垎涓婁笅鏂囷紙鏂瑰悜鐩稿叧瀛楁鍒嗗紑璁剧疆锛?    long_ctx = dict(exec_ctx)
     short_ctx = dict(exec_ctx)
     
-    # 多头方向相关字段
-    long_ctx["divergence_confirmed"] = bool(curr.get("has_bot_div", False))  # 底背离 = 多头
+    # 澶氬ご鏂瑰悜鐩稿叧瀛楁
+    long_ctx["divergence_confirmed"] = bool(curr.get("has_bot_div", False))  # 搴曡儗绂?= 澶氬ご
     long_ctx["sqzmom_divergence_dir"] = "Long" if bool(curr.get("has_bot_div", False)) else ""
     long_ctx["sqzmom_divergence_age"] = int(float(curr.get("bot_div_age", 999) or 999))
     long_ctx["sqzmom_divergence_strength"] = float(curr.get("bot_div_strength", 0) or 0)
@@ -374,11 +361,11 @@ def build_local_snapshot_and_decision(symbol):
     long_ctx["dmi_bull"] = bool(curr.get("dmi_bull", False))
     long_ctx["dmi_bear"] = False
     long_ctx["momentum"] = float(curr.get("momentum", 0) or 0)
-    long_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 多头信号
-    long_ctx["liquidity_wrong_side"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 空头信号，对多头是反方向
+    long_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 澶氬ご淇″彿
+    long_ctx["liquidity_wrong_side"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 绌哄ご淇″彿锛屽澶氬ご鏄弽鏂瑰悜
     
-    # 空头方向相关字段
-    short_ctx["divergence_confirmed"] = bool(curr.get("has_top_div", False))  # 顶背离 = 空头
+    # 绌哄ご鏂瑰悜鐩稿叧瀛楁
+    short_ctx["divergence_confirmed"] = bool(curr.get("has_top_div", False))  # 椤惰儗绂?= 绌哄ご
     short_ctx["sqzmom_divergence_dir"] = "Short" if bool(curr.get("has_top_div", False)) else ""
     short_ctx["sqzmom_divergence_age"] = int(float(curr.get("top_div_age", 999) or 999))
     short_ctx["sqzmom_divergence_strength"] = float(curr.get("top_div_strength", 0) or 0)
@@ -391,8 +378,8 @@ def build_local_snapshot_and_decision(symbol):
     short_ctx["dmi_bull"] = False
     short_ctx["dmi_bear"] = bool(curr.get("dmi_bear", False))
     short_ctx["momentum"] = float(curr.get("momentum", 0) or 0)
-    short_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 空头信号
-    short_ctx["liquidity_wrong_side"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 多头信号，对空头是反方向
+    short_ctx["liquidity_sweep_confirmed"] = bool(curr.get("is_bsl_swept", False))  # buyside sweep = 绌哄ご淇″彿
+    short_ctx["liquidity_wrong_side"] = bool(curr.get("is_ssl_swept", False))  # sellside sweep = 澶氬ご淇″彿锛屽绌哄ご鏄弽鏂瑰悜
 
     l_score, l_thresh, l_reasons = adaptive_signal_score(long_ctx, macro_ctx, "Long", is_vol)
     s_score, s_thresh, s_reasons = adaptive_signal_score(short_ctx, macro_ctx, "Short", is_vol)
@@ -403,7 +390,7 @@ def build_local_snapshot_and_decision(symbol):
     sl, tp1, tp2, tp3, rr = calculate_dynamic_tp_sl(direction, curr, df_exec, exec_ctx, min_rr, sym_strategy)
     rr_plan = build_rr_plan(direction, float(curr["close"]), sl, tp1, tp2, tp3)
 
-    # 将 smc_impulse_score 的分数注入 curr 供 V9DecisionKernel 读取
+    # 灏?smc_impulse_score 鐨勫垎鏁版敞鍏?curr 渚?V9DecisionKernel 璇诲彇
     curr_with_scores = dict(curr)
     curr_with_scores["long_score"] = l_score
     curr_with_scores["short_score"] = s_score
@@ -417,7 +404,7 @@ def build_local_snapshot_and_decision(symbol):
     print(f"Source/Version: {decision.get('source', 'unknown')} / {decision.get('version', 'unknown')}")
     print(f"Long score: {l_score:.2f}, Short score: {s_score:.2f}, Direction: {direction}")
 
-    # ---- Observer 事件检测 ----
+    # ---- Observer 浜嬩欢妫€娴?----
     observer_events = detect_observer_events(curr, exec_ctx)
 
     # ---- V37 Final Gate ----
@@ -427,27 +414,27 @@ def build_local_snapshot_and_decision(symbol):
         **exec_ctx
     })
     if passed and decision.get("approved"):
-        # ===== 顺发：Observer 结构事件 =====
+        # ===== 椤哄彂锛歄bserver 缁撴瀯浜嬩欢 =====
         if observer_events:
             try:
                 dispatch_observer_snapshot(snapshot, send_all=True)
-                print(f"[{symbol}] Observer 结构事件顺发完成 ({len(observer_events)} 个)")
+                print(f"[{symbol}] Observer 缁撴瀯浜嬩欢椤哄彂瀹屾垚 ({len(observer_events)} 涓?")
             except Exception as exc:
-                print(f"[{symbol}] Observer 顺发异常: {exc}")
+                print(f"[{symbol}] Observer 椤哄彂寮傚父: {exc}")
 
-        # ===== 顺发：开单信号推送 (Telegram) =====
-        _emoji = "📈" if direction == "Long" else "📉"
+        # ===== 椤哄彂锛氬紑鍗曚俊鍙锋帹閫?(Telegram) =====
+        _emoji = "馃搱" if direction == "Long" else "馃搲"
         _msg = (
-            f"{_emoji} [{symbol}] V37 Gate 通过\n"
-            f"方向: {direction} | 入场: {float(curr['close']):.2f}\n"
-            f"止损: {sl:.2f} | TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
-            f"RR: {rr:.2f} | 评分: L{l_score:.1f} S{s_score:.1f}\n"
+            f"{_emoji} [{symbol}] V37 Gate 閫氳繃\n"
+            f"鏂瑰悜: {direction} | 鍏ュ満: {float(curr['close']):.2f}\n"
+            f"姝㈡崯: {sl:.2f} | TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
+            f"RR: {rr:.2f} | 璇勫垎: L{l_score:.1f} S{s_score:.1f}\n"
             f"size_mult: {size_mult} | Gate: {reason}\n"
-            f"形态: {exec_ctx.get('setup_type','?')} | 大级别: {macro_ctx.get('allowed_direction','?')}"
+            f"褰㈡€? {exec_ctx.get('setup_type','?')} | 澶х骇鍒? {macro_ctx.get('allowed_direction','?')}"
         )
         safe_send_telegram(_msg)
 
-        # ===== 写入全局持仓 =====
+        # ===== 鍐欏叆鍏ㄥ眬鎸佷粨 =====
         position_manager.update(symbol, {
             "direction": decision["direction"],
             "entry": curr["close"],
@@ -457,8 +444,7 @@ def build_local_snapshot_and_decision(symbol):
             "tp3": tp3,
             "stage": 0,
         })
-        # 同时写入 MANAGED_POSITIONS（供原有后台监控线程使用）
-        MANAGED_POSITIONS[symbol] = {
+        # 鍚屾椂鍐欏叆 MANAGED_POSITIONS锛堜緵鍘熸湁鍚庡彴鐩戞帶绾跨▼浣跨敤锛?        MANAGED_POSITIONS[symbol] = {
             'direction': decision["direction"],
             'entry': curr["close"],
             'tp1': tp1,
@@ -466,9 +452,9 @@ def build_local_snapshot_and_decision(symbol):
             'current_sl': sl,
             'stage': 0
         }
-        print(f"[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
+        print(f"[{symbol}] V37 Gate 閫氳繃 | size_mult={size_mult} | 寮€鍗曚俊鍙峰凡鎺ㄩ€?)
     else:
-        print(f"[{symbol}] V37 Gate 拦截: {reason}")
+        print(f"[{symbol}] V37 Gate 鎷︽埅: {reason}")
 
     return snapshot, decision, source
 
@@ -489,14 +475,14 @@ def strategy_layer_signal(symbol):
 
 def execution_layer_status(symbol):
     try:
-        event = {"type": "PORTFOLIO_BLOCK", "symbol": (symbol or "BTC/USDT").strip(), "message": "Execution 测试事件"}
+        event = {"type": "PORTFOLIO_BLOCK", "symbol": (symbol or "BTC/USDT").strip(), "message": "Execution 娴嬭瘯浜嬩欢"}
         return dispatch_execution_event(event), _json(event)
     except Exception: return "failed", traceback.format_exc()
 
-# ----------------- 后台监控守护线程 -----------------
+# ----------------- 鍚庡彴鐩戞帶瀹堟姢绾跨▼ -----------------
 def background_monitor_worker():
     import requests
-    print("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损)...")
+    print("[Monitor] 鍚庡彴瀹堟姢绾跨▼宸插惎鍔?(鐏鹃毦鐩戞帶 & 杩借釜姝㈡崯)...")
     
     def _get_price(sym):
         try:
@@ -514,23 +500,20 @@ def background_monitor_worker():
         return None
     
     while True:
-        time.sleep(60) # 每分钟循环一次
-        try:
-            # 1. 灾难自愈检测
-            if not health_monitor.is_healthy():
+        time.sleep(60) # 姣忓垎閽熷惊鐜竴娆?        try:
+            # 1. 鐏鹃毦鑷剤妫€娴?            if not health_monitor.is_healthy():
                 stales = health_monitor.check_stale_symbols()
-                # 精准控制：只有实盘环境才发送心跳报错，扁平化代码防缩进出错
-                if is_real_trading_ready(): safe_send_telegram(f"🚨 [系统警告] 数据超时掉线: {stales}，可能API受限或网络中断！")
+                # 绮惧噯鎺у埗锛氬彧鏈夊疄鐩樼幆澧冩墠鍙戦€佸績璺虫姤閿欙紝鎵佸钩鍖栦唬鐮侀槻缂╄繘鍑洪敊
+                if is_real_trading_ready(): safe_send_telegram(f"馃毃 [绯荤粺璀﹀憡] 鏁版嵁瓒呮椂鎺夌嚎: {stales}锛屽彲鑳紸PI鍙楅檺鎴栫綉缁滀腑鏂紒")
             
-            # 2. 追踪止损检测
-            if not MANAGED_POSITIONS: continue
+            # 2. 杩借釜姝㈡崯妫€娴?            if not MANAGED_POSITIONS: continue
                 
             for sym, pos in list(MANAGED_POSITIONS.items()):
                 curr_price = _get_price(sym)
                 if curr_price is None:
                     continue
                 
-                # 调用我们在 risk.py 中写的超强分批止盈逻辑
+                # 璋冪敤鎴戜滑鍦?risk.py 涓啓鐨勮秴寮哄垎鎵规鐩堥€昏緫
                 action_plan = check_partial_close_and_trail(
                     direction=pos['direction'],
                     current_price=curr_price,
@@ -542,70 +525,67 @@ def background_monitor_worker():
                 )
                 
                 if action_plan['action'] == 'PARTIAL_CLOSE':
-                    msg = f"🏆 [{sym}] 到达目标位! 平仓 {action_plan['close_pct']*100}%，止损移至 {action_plan['new_sl']}"
+                    msg = f"馃弳 [{sym}] 鍒拌揪鐩爣浣? 骞充粨 {action_plan['close_pct']*100}%锛屾鎹熺Щ鑷?{action_plan['new_sl']}"
                     safe_send_telegram(msg)
                     pos['current_sl'] = action_plan['new_sl']
                     pos['stage'] = action_plan['new_stage']
                     
                 elif action_plan['action'] == 'TRAIL_ONLY' and abs(pos['current_sl'] - action_plan['new_sl']) > curr_price * 0.001:
                     pos['current_sl'] = action_plan['new_sl']
-                    safe_send_telegram(f"🛡️ [{sym}] 追踪止损已推移至 {action_plan['new_sl']}")
+                    safe_send_telegram(f"馃洝锔?[{sym}] 杩借釜姝㈡崯宸叉帹绉昏嚦 {action_plan['new_sl']}")
 
         except Exception as e:
-            print(f"后台线程异常: {e}")
+            print(f"鍚庡彴绾跨▼寮傚父: {e}")
 
-# 后台守护线程不要在 import app 时自动启动；否则测试/热加载导入时会触发 ccxt 连接。
-# 实际 launch 时在 __main__ 中启动。
-def start_background_monitor():
+# 鍚庡彴瀹堟姢绾跨▼涓嶈鍦?import app 鏃惰嚜鍔ㄥ惎鍔紱鍚﹀垯娴嬭瘯/鐑姞杞藉鍏ユ椂浼氳Е鍙?ccxt 杩炴帴銆?# 瀹為檯 launch 鏃跺湪 __main__ 涓惎鍔ㄣ€?def start_background_monitor():
     t = threading.Thread(target=background_monitor_worker, daemon=True)
     t.start()
     return t
 # --------------------------------------------------
 
 with gr.Blocks(title="SMC Quant System") as demo:
-    gr.Markdown("# SMC V11+V9 工程化量化系统")
+    gr.Markdown("# SMC V11+V9 宸ョ▼鍖栭噺鍖栫郴缁?)
 
-    with gr.Tab("系统状态"):
-        btn = gr.Button("检查配置"); status = gr.Textbox(label="Status"); cfg_box = gr.Code(label="Redacted config", language="json")
+    with gr.Tab("绯荤粺鐘舵€?):
+        btn = gr.Button("妫€鏌ラ厤缃?); status = gr.Textbox(label="Status"); cfg_box = gr.Code(label="Redacted config", language="json")
         btn.click(system_status, outputs=[status, cfg_box])
 
-    with gr.Tab("策略干运行"):
-        symbols = gr.Textbox(label="Symbols", value="BTC/USDT,ETH/USDT"); run_btn = gr.Button("运行信号扫描")
+    with gr.Tab("绛栫暐骞茶繍琛?):
+        symbols = gr.Textbox(label="Symbols", value="BTC/USDT,ETH/USDT"); run_btn = gr.Button("杩愯淇″彿鎵弿")
         table = gr.Dataframe(label="Signals"); raw = gr.Code(label="Raw decision JSON", language="json"); saved = gr.Textbox(label="Report")
         run_btn.click(dry_run, inputs=[symbols], outputs=[table, raw, saved])
 
-    with gr.Tab("快速回测"):
+    with gr.Tab("蹇€熷洖娴?):
         bt_symbol = gr.Textbox(label="Symbol", value="BTC/USDT:USDT"); exec_csv = gr.File(label="Execution CSV 15m", type="filepath"); macro_csv = gr.File(label="Macro CSV 1h", type="filepath")
-        # 【修改：滑块上限拉到 50000】
-        max_rows = gr.Slider(120, 50000, value=50000, step=1000, label="Max rows (设大即可全量读取)")
+        # 銆愪慨鏀癸細婊戝潡涓婇檺鎷夊埌 50000銆?        max_rows = gr.Slider(120, 50000, value=50000, step=1000, label="Max rows (璁惧ぇ鍗冲彲鍏ㄩ噺璇诲彇)")
         warmup = gr.Slider(50, 500, value=120, step=10, label="Warmup")
-        bt_btn = gr.Button("运行快速回测")
+        bt_btn = gr.Button("杩愯蹇€熷洖娴?)
         summary = gr.Code(label="Summary", language="json"); trades = gr.Dataframe(label="Recent trades"); out_path = gr.Textbox(label="Output file")
         bt_btn.click(quick_backtest, inputs=[bt_symbol, exec_csv, macro_csv, max_rows, warmup], outputs=[summary, trades, out_path])
 
-    with gr.Tab("信号工具"):
-        test_btn = gr.Button("1. 测试 Telegram与微信", variant="secondary"); test_out = gr.Textbox(label="连接测试结果"); test_btn.click(test_telegram, outputs=test_out)
-        manual_symbol = gr.Textbox(label="交易对 Symbol", value="BTC/USDT")
-        obs_btn = gr.Button("2. Observer 层瞬发信号 (无视打分)", variant="primary"); obs_out = gr.Textbox(label="Observer 推送结果"); shared_raw = gr.Code(label="快照", language="json")
+    with gr.Tab("淇″彿宸ュ叿"):
+        test_btn = gr.Button("1. 娴嬭瘯 Telegram涓庡井淇?, variant="secondary"); test_out = gr.Textbox(label="杩炴帴娴嬭瘯缁撴灉"); test_btn.click(test_telegram, outputs=test_out)
+        manual_symbol = gr.Textbox(label="浜ゆ槗瀵?Symbol", value="BTC/USDT")
+        obs_btn = gr.Button("2. Observer 灞傜灛鍙戜俊鍙?(鏃犺鎵撳垎)", variant="primary"); obs_out = gr.Textbox(label="Observer 鎺ㄩ€佺粨鏋?); shared_raw = gr.Code(label="蹇収", language="json")
         obs_btn.click(direct_observer_signal, inputs=[manual_symbol], outputs=[obs_out, shared_raw])
-        open_btn = gr.Button("3. Strategy 层严谨信号", variant="secondary"); open_out = gr.Textbox(label="Strategy 推送结果")
+        open_btn = gr.Button("3. Strategy 灞備弗璋ㄤ俊鍙?, variant="secondary"); open_out = gr.Textbox(label="Strategy 鎺ㄩ€佺粨鏋?)
         open_btn.click(strategy_layer_signal, inputs=[manual_symbol], outputs=[open_out, shared_raw])
 
-    with gr.Tab("持仓管理 (后台自愈)"):
-        gr.Markdown("### 模拟注册持仓 (交由后台线程追踪)")
+    with gr.Tab("鎸佷粨绠＄悊 (鍚庡彴鑷剤)"):
+        gr.Markdown("### 妯℃嫙娉ㄥ唽鎸佷粨 (浜ょ敱鍚庡彴绾跨▼杩借釜)")
         track_sym = gr.Textbox(label="Symbol", value="BTC/USDT")
-        track_dir = gr.Dropdown(choices=["Long", "Short"], label="方向", value="Long")
-        track_entry = gr.Number(label="开仓价", value=60000)
+        track_dir = gr.Dropdown(choices=["Long", "Short"], label="鏂瑰悜", value="Long")
+        track_entry = gr.Number(label="寮€浠撲环", value=60000)
         track_tp1 = gr.Number(label="TP1", value=61000)
         track_tp2 = gr.Number(label="TP2", value=62500)
-        track_sl = gr.Number(label="初始止损", value=59000)
+        track_sl = gr.Number(label="鍒濆姝㈡崯", value=59000)
         
-        reg_btn = gr.Button("注入持仓监控", variant="primary")
-        reg_out = gr.Textbox(label="结果")
+        reg_btn = gr.Button("娉ㄥ叆鎸佷粨鐩戞帶", variant="primary")
+        reg_out = gr.Textbox(label="缁撴灉")
         
         def mock_register_position(sym, d, entry, tp1, tp2, sl):
             MANAGED_POSITIONS[sym] = {'direction': d, 'entry': float(entry), 'tp1': float(tp1), 'tp2': float(tp2), 'current_sl': float(sl), 'stage': 0}
-            return f"成功接管: {sym}，后台线程已开始盯盘追踪止损。"
+            return f"鎴愬姛鎺ョ: {sym}锛屽悗鍙扮嚎绋嬪凡寮€濮嬬洴鐩樿拷韪鎹熴€?
             
         reg_btn.click(mock_register_position, inputs=[track_sym, track_dir, track_entry, track_tp1, track_tp2, track_sl], outputs=[reg_out])
 
@@ -613,29 +593,52 @@ if __name__ == "__main__":
     start_background_monitor()
     # 启动 HF 自动扫描线程（信号扫描+开单+追踪止损推送）
     try:
-        # 在启动 HF 扫描前，禁用 ccxt 的 async support（防止未关闭的 session 警告）
         import sys
         for mod_name in list(sys.modules.keys()):
             if 'ccxt' in mod_name:
                 del sys.modules[mod_name]
-        # 重新确保 ccxt 加载为同步版本
         import ccxt as _ccxt
-        _ccxt # silence
-        
+        _ccxt
+
         import hf_auto_trader
         import asyncio
+        from execution.micro.feeder import MicroFeeder
+
+        # ===== 创建微观数据喂价器 =====
+        _feeder = None
+        try:
+            _feeder = MicroFeeder("BTCUSDT")
+            print("[Feeder] MicroFeeder 已创建，微观订单流即将启动")
+        except Exception as feeder_err:
+            print(f"[Feeder] MicroFeeder 创建失败: {feeder_err}")
+
         def _run_async_main():
             try:
-                asyncio.run(hf_auto_trader.main_loop())
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                if _feeder is not None:
+                    # gather 方式：feeder + main_loop 在同一协程组中运行
+                    # 避免 HF Spaces "not enough hardware capacity" 错误
+                    print("[Feeder] 以 gather 方式启动 feeder + main_loop")
+                    loop.run_until_complete(
+                        asyncio.gather(
+                            _feeder.run(),
+                            hf_auto_trader.main_loop(),
+                        )
+                    )
+                else:
+                    loop.run_until_complete(hf_auto_trader.main_loop())
             except Exception as e:
                 import traceback
                 print(f"[hf_auto_trader] 主循环崩溃: {e}")
                 traceback.print_exc()
+
         _hf_thread = threading.Thread(target=_run_async_main, daemon=True)
         _hf_thread.start()
         print("[HF] 自动信号扫描+追踪推送已启动")
+        print("[Feeder] 微观订单流协程已挂载至主循环")
     except Exception as e:
         print(f"[HF] 自动扫描启动失败: {e}")
         traceback.print_exc()
-    # 加入 share=True，让框架绕过本地网络死板的检查，直接生成公网链接
     demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
