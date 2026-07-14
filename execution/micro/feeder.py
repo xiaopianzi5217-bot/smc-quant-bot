@@ -78,16 +78,14 @@ class MicroFeeder:
 
         异常时自动重连，永不退出（除非被取消）。
         """
-        ws_url = (
-            f"wss://stream.binance.com:9443/ws/"
-            f"{self.symbol}@depth10@100ms/"
-            f"{self.symbol}@aggTrade"
-        )
+        _ws_urls = [
+            f"wss://stream.binance.com:9443/ws/{self.symbol}@depth10@100ms/{self.symbol}@aggTrade",
+        ]
         print(f"[MicroFeeder] 正在连接 WS: {self.symbol}")
 
         while True:
             connected = False
-            for url in _ws_alt_urls:
+            for url in _ws_urls:
                 try:
                     async with websockets.connect(url, ping_interval=20, open_timeout=10) as ws:
                         print(f"[MicroFeeder] ✅ WS 已连接: {self.symbol}")
