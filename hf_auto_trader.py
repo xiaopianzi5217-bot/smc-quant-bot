@@ -410,6 +410,24 @@ async def scan_and_decide(symbol: str) -> dict | None:
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
     
+    # ===== 【修复20260714】Short SL 方向纠正 =====
+    # V56.5 执行引擎的 _execute_one_v565 计算 initial_sl 正确，但 select_v565_portfolio
+    # 返回的候选信号行可能包含自前任意的 initial_sl 值（来自 enrich 阶段）。
+    # 当 Short 的 sl < entry 时，说明 SL 方向反了，需要纠正。
+    if direction == "Short" and sl < entry_price:
+        # 用 V56.5 计算方式重新计算 SL
+        _atr_val = max(float(curr.get("ATRr_14", exec_ctx.get("atr", 0))), entry_price * 0.0025)
+        _stop_dist = max(0.80 * _atr_val, entry_price * 0.0025)
+        _correct_sl = entry_price + _stop_dist
+        print(f"[{symbol}] 纠正 Short SL: {sl:.2f} -> {_correct_sl:.2f} (entry={entry_price:.2f}, stop_dist={_stop_dist:.2f})")
+        sl = _correct_sl
+        # 同步纠正 tp1/tp2/tp3（Short TP 应在 entry 下方）
+        if tp1 > entry_price or tp1 == 0:
+            tp1 = entry_price - 1.00 * _stop_dist
+            tp2 = entry_price - 1.80 * _stop_dist
+            tp3 = entry_price - 2.80 * _stop_dist
+            print(f"[{symbol}] 纠正 Short TP: tp1={tp1:.2f}, tp2={tp2:.2f}, tp3={tp3:.2f}")
+    
     # ===== 【修复20260715】SL方向校验：Long的SL不能>入场，Short的SL不能<入场 =====
     if direction == "Long" and sl > entry_price:
         print(f"[{symbol}] SL方向异常: Long SL({sl:.2f}) > 入场({entry_price:.2f}), 方向可能反了, 跳过")
@@ -1819,3 +1837,31 @@ async def main_loop():
             print(f"[hf_auto_trader] 主循环发生异常: {e}")
             traceback.print_exc()
             await asyncio.sleep(60)  # 发生异常时等待60秒后重试
+# ============================================================
+# 优化后的 SL/TP 计算模块（20260714）
+# ============================================================
+def calculate_risk_levels(entry_price, atr_value, side, sl_multiplier=1.5, tp_multiplier=2.0):
+    """统一方向 SL/TP 计算
+
+    使用方向乘数：做多为 1，做空为 -1
+    统一计算公式，利用乘数自动处理方向
+
+    Args:
+        entry_price: 入场价
+        atr_value: ATR 值
+        side: "LONG" 或 "SHORT"
+        sl_multiplier: SL 距离的 ATR 倍数，默认 1.5
+        tp_multiplier: TP 距离的 ATR 倍数，默认 2.0
+
+    Returns:
+        (sl_price, tp_price)
+        Long:  sl = entry - atr * mult, tp = entry + atr * mult
+        Short: sl = entry + atr * mult, tp = entry - atr * mult
+    """
+    dir_mult = 1 if side.upper() == "LONG" else -1
+    sl_distance = atr_value * sl_multiplier * dir_mult
+    tp_distance = atr_value * tp_multiplier * dir_mult
+    sl_price = entry_price - sl_distance  # Short: -(-distance) = +distance, SL 在上方
+    tp_price = entry_price + tp_distance  # Short: +(-distance) = -distance, TP 在下方
+    return sl_price, tp_price
+
