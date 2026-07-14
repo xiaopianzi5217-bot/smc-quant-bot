@@ -165,7 +165,7 @@ new6 = '''                # ===== 【闭环】Calibrator + SignalTracker + RiskG
                     # ProbabilityCalibrator 回传更新
                     _open_score = pos.get("open_score", 0)
                     if _open_score > 0:
-                        _calibrator.update(score=_open_score, is_win=(profit_r2 > 0))
+                        _calibrator.update(score=_open_score, pnl_r=profit_r2)
                     # AdaptiveFeatureWeighter：提取特征列表更新
                     _feat_list = []
                     if "OB" in str(pos.get("last_sl_msg", "")):
@@ -207,7 +207,7 @@ new7 = '''    # ===== 【闭环】止损时更新 Calibrator / SignalTracker / R
         # ProbabilityCalibrator 回传更新（止损无论盈亏都记录）
         _open_score = pos.get("open_score", 0)
         if _open_score > 0:
-            _calibrator.update(score=_open_score, is_win=(profit_r > 0))
+            _calibrator.update(score=_open_score, pnl_r=profit_r)
         # 止损特征学习：无论盈亏都记录
         _weighter.update(features=["CHOCH"], outcome_r=profit_r)
     except Exception as _sl_new_e:

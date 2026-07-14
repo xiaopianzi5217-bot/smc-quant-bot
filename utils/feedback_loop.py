@@ -54,7 +54,7 @@ class CalibrationTable:
         bin_key = int(score // 5) * 5
         b = self.bins[bin_key]
         b["total"] += 1
-        if pnl_r > 0:
+        if pnl_r > 0.2:  # 噪音过滤
             b["wins"] += 1
             prev_total = b.get("avg_win_r", 0) * (b["wins"] - 1)
             b["avg_win_r"] = (prev_total + pnl_r) / b["wins"]
@@ -132,7 +132,7 @@ class RegimeFeatureStats:
             s = self.data[regime][feat]
             decay = self._time_decay_weight(s["last_update"])
             s["total_trades"] += 1
-            if pnl_r > 0:
+            if pnl_r > 0.2:  # 噪音过滤
                 s["wins"] += 1
                 s["recent_wins"] += 1
             else:
@@ -223,7 +223,7 @@ class AdaptiveRejector:
         c = self.clusters[key]
         c["total"] += 1
         c["recent_total"] += 1
-        if pnl_r > 0:
+        if pnl_r > 0.2:  # 噪音过滤
             c["wins"] += 1
             c["recent_wins"] += 1
         if c["recent_total"] > self.window:
@@ -290,6 +290,8 @@ class FeedbackLoop:
             weighted_score = score
         else:
             weighted_score = score * 0.7 + weighted_score * 0.3
+        # 防止分数越界：上限 100
+        weighted_score = min(weighted_score, 100.0)
 
         calib = self.calibration.predict(weighted_score)
         confidence = calib["prob"]

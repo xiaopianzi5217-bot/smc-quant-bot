@@ -52,16 +52,18 @@ class AdaptiveFeatureWeighter:
             features: 该笔交易激活的特征名称列表（如 ["OB", "DIVERGENCE"]）
             outcome_r: 该笔交易的最终盈亏 R 倍数
         """
-        self.history.append((features, outcome_r))
-        if len(self.history) > self.window:
-            self.history.pop(0)
+        # 噪音过滤：|outcome_r| < 0.2R 不纳入学习
+        if abs(outcome_r) >= 0.2:
+            self.history.append((features, outcome_r))
+            if len(self.history) > self.window:
+                self.history.pop(0)
 
-        for feat in features:
-            if feat in self.feature_stats:
-                s = self.feature_stats[feat]
-                s["trades"] += 1
-                if outcome_r > 0:
-                    s["wins"] += 1
+            for feat in features:
+                if feat in self.feature_stats:
+                    s = self.feature_stats[feat]
+                    s["trades"] += 1
+                    if outcome_r > 0.2:  # 仅 >0.2R 才算胜局
+                        s["wins"] += 1
                 # 递推更新 avg_r：new_avg = (old_avg * (n-1) + new_r) / n
                 prev_total = s.get("avg_r", 0) * (s["trades"] - 1)
                 s["avg_r"] = (prev_total + outcome_r) / s["trades"]
@@ -83,6 +85,8 @@ class AdaptiveFeatureWeighter:
     def get_weighted_score(self, raw_scores: dict) -> float:
         """用自适应权重计算加权总分。
 
+        限制：总乘数上限 1.5，防止连续优秀特征导致分数爆炸越界。
+
         Args:
             raw_scores: 特征名 -> 原始分值 dict
 
@@ -90,7 +94,11 @@ class AdaptiveFeatureWeighter:
             加权后的总分
         """
         total = 0.0
+        factor = 1.0
         for feat, value in raw_scores.items():
             weight = self.feature_stats.get(feat, {}).get("weight", 1.0)
             total += value * weight
-        return total
+            factor *= weight
+        # 乘数上限 1.5，防止分数越界破坏后续阈值
+        factor = max(0.5, min(factor, 1.5))
+        return round(total * factor, 2)
