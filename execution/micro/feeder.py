@@ -83,27 +83,19 @@ class MicroFeeder:
         ]
         print(f"[MicroFeeder] 正在连接 WS: {self.symbol}")
 
-        while True:
-            connected = False
-            for url in _ws_urls:
-                try:
-                    async with websockets.connect(url, ping_interval=20, open_timeout=10) as ws:
-                        print(f"[MicroFeeder] ✅ WS 已连接: {self.symbol}")
-                        connected = True
-                        async for raw_message in ws:
-                            self._process_message(json.loads(raw_message))
-                except asyncio.TimeoutError:
-                    print(f"[MicroFeeder] WS 连接超时: {url[:60]}...")
-                    continue
-                except asyncio.CancelledError:
-                    print("[MicroFeeder] 协程已取消")
-                    return
-                except Exception as exc:
-                    print(f"[MicroFeeder] WS 异常: {exc}，尝试下一个地址...")
-                    continue
-            if not connected:
-                print(f"[MicroFeeder] 所有 WS 地址连接失败，{RECONNECT_DELAY}s 后重试...")
-                await asyncio.sleep(RECONNECT_DELAY)
+        for url in _ws_urls:
+            try:
+                async with websockets.connect(url, ping_interval=20, open_timeout=10) as ws:
+                    print(f"[MicroFeeder] WS 已连接: {self.symbol}")
+                    async for raw_message in ws:
+                        self._process_message(json.loads(raw_message))
+            except asyncio.CancelledError:
+                print("[MicroFeeder] 协程已取消")
+                return
+            except Exception:
+                print(f"[MicroFeeder] WS 连接失败: {url[:65]}...")
+        # 所有地址都失败，静默退出（不阻塞主循环）
+        print(f"[MicroFeeder] 无法连接到 {self.symbol} (环境受限)，微观数据不可用")
 
     def get_snapshot(self) -> Dict[str, Any]:
         """获取当前微观状态快照（线程安全，纯读取）"""
