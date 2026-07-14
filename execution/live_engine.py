@@ -92,7 +92,7 @@ class LiveExecutionEngine:
             return False, "risk_plan入场价/止损价无效"
         return True, "OK"
 
-    def _normalize_order(self, order: Dict[str, Any] | None, requested_size: float, fallback_price: float) -> Dict[str, Any]:
+    def _normalize_order(self, order: Optional[Dict[str, Any]], requested_size: float, fallback_price: float) -> Dict[str, Any]:
         order = dict(order or {})
         status = str(order.get("status") or "").lower()
         if status in {"open", "new", "partially_filled", "partial"} and order.get("id"):
