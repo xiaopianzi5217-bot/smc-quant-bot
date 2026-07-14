@@ -22,6 +22,39 @@ try:
 except ImportError:
     websockets = None  # type: ignore
 
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore
+
+
+def _check_binance_connectivity() -> bool:
+    """测试 Binance REST API 是否可达（3秒超时）
+
+    在 Hugging Face 海外节点上，请求 Binance 可能返回 403/451 或被墙超时。
+    提前检测可以避免 WS 连接漫长的 10 秒超时等待。
+
+    Returns:
+        True = 可达，False = 被拦截/不可达
+    """
+    if requests is None:
+        return True  # 没有 requests 库则无法检测，默认放行让 WS 去试
+    try:
+        res = requests.get("https://api.binance.com/api/v3/ping", timeout=3)
+        if res.status_code in (403, 451):
+            print(f"[MicroFeeder] Binance API 返回 {res.status_code}，环境受限")
+            return False
+        return True
+    except requests.ConnectionError:
+        print("[MicroFeeder] Binance API 连接失败（ConnectionError），环境受限")
+        return False
+    except requests.Timeout:
+        print("[MicroFeeder] Binance API 超时，环境受限")
+        return False
+    except Exception as exc:
+        print(f"[MicroFeeder] Binance API 检测异常: {exc}，放行由 WS 尝试")
+        return True  # 不确定时放行
+
 # ============================================================
 # 配置常量
 # ============================================================
@@ -82,6 +115,11 @@ class MicroFeeder:
             f"wss://stream.binance.com:9443/ws/{self.symbol}@depth10@100ms/{self.symbol}@aggTrade",
         ]
         print(f"[MicroFeeder] 正在连接 WS: {self.symbol}")
+
+        # 联通性预检查：避免被墙时等 10 秒超时
+        if not _check_binance_connectivity():
+            print(f"[MicroFeeder] 跳过 WS 连接（环境受限），微观数据不可用")
+            return
 
         for url in _ws_urls:
             try:
