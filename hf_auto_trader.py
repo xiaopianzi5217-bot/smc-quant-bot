@@ -1032,8 +1032,8 @@ def check_and_open(result: dict | None) -> bool:
     
     # ---- 原有低阈值检查（已由 StatisticalEVGate 覆盖，保留为安全兜底）----
     if ev < MIN_EV_FOR_PUSH:
-                print(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
-    return False
+        print(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
+        return False
 
     if score < MIN_SCORE_FOR_PUSH:
         print(f"[{symbol}] score={score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
@@ -1401,6 +1401,26 @@ def check_and_open(result: dict | None) -> bool:
                 if _audit_start < len(_audit_df_exec):
                     _audit_future_df = _audit_df_exec.iloc[_audit_start:_audit_end]
                     _audit_future_prices = [float(x) for x in _audit_future_df["close"].tolist()]
+                    _audit_snapshot = {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "entry": entry,
+                        "sl": sl,
+                        "tp1": tp1,
+                        "tp2": tp2,
+                        "tp3": tp3,
+                        "rr": rr,
+                        "score": score,
+                        "ev": ev,
+                        "regime": result.get("regime", "unknown"),
+                        "vol_state": result.get("vol_state", "unknown"),
+                        "setup_type": str(reason),
+                        "book": book,
+                        "adx": result.get("adx", 0),
+                        "atr": result.get("atr", 0),
+                        "rsi": result.get("rsi", 0),
+                        "volume_ratio": result.get("volume_ratio", 1.0),
+                    }
                     # 计算后验 R
                     _mf, _ma, _fr, _er = _compute_future_r(
                         entry=entry, sl=sl, direction=direction,
