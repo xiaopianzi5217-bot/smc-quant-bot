@@ -87,3 +87,21 @@ class ProbabilityEngine:
     def get_prob(self, score: float) -> float:
         """兼容旧接口。"""
         return self.predict(score)
+
+    def calculate_ev(self, score: float, reward: float, risk: float = 1.0) -> dict:
+        """计算给定评分和盈亏比的预期价值（EV）。
+
+        Args:
+            score: 模型评分（0~100）
+            reward: 当前信号的实际预期盈利 R 倍数（动态 RR）
+            risk: 当前信号的实际预期亏损 R 倍数（固定为 1.0）
+
+        Returns:
+            {"probability": P(win), "ev": expected_value}
+        """
+        p = self.predict(score)
+        ev = p * reward - (1 - p) * risk
+        return {
+            "probability": round(p, 4),
+            "ev": round(ev, 4),
+        }

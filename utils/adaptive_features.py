@@ -100,5 +100,5 @@ class AdaptiveFeatureWeighter:
             total += value * weight
             factor *= weight
         # 乘数上限 1.5，防止分数越界破坏后续阈值
-        factor = max(0.5, min(factor, 1.5))
+        factor = max(0.8, min(factor, 1.2))
         return round(total * factor, 2)
