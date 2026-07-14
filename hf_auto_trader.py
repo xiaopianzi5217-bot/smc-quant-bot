@@ -812,146 +812,39 @@ def _push_observer_event(
     bullish_fvg=None, bearish_fvg=None,
     funding_rate=None,
 ):
-    """推送 Observer 指标事件 + 完整技术数据（从 V37 z_fixer 增强版移植）"""
+    """精简版 Observer 推送：只推结构级别事件，去掉所有冗余指标"""
     icons = {
-        "SQZMOM_WHITE": "⚪", "DIVERGENCE_R": "🔮", "SQZMOM_EF": "🌀",
-        "NEAR_OB": "🧱", "NEAR_LIQUIDITY": "🎯",
-        "LIQUIDITY_SWEEP": "🗑️", "CHOCH": "🔄", "BOS": "💥",
-        "FVG": "📐", "CANDLE_COLOR": "🎨", "SQUEEZE_RELEASE": "💨",
+        "CHOCH": "🔄", "LIQUIDITY_SWEEP": "🗑️",
+        "DIVERGENCE_R": "🔮", "SQZMOM_WHITE": "⚪",
+        "SQUEEZE_RELEASE": "💨",
     }
     icon = icons.get(ev["type"], "📊")
     type_names = {
-        "SQZMOM_WHITE": "SQZMOM K线变白", "DIVERGENCE_R": "背离R",
-        "SQZMOM_EF": "SQZMOM 力竭", "NEAR_OB": "接近主力建仓区",
-        "NEAR_LIQUIDITY": "接近流动性区",
-        "LIQUIDITY_SWEEP": "流动性扫单", "CHOCH": "市场结构转变",
-        "BOS": "结构突破", "FVG": "价格失衡区",
-        "CANDLE_COLOR": "K线变色", "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
-        }
+        "CHOCH": "结构转变", "LIQUIDITY_SWEEP": "流动性扫单",
+        "DIVERGENCE_R": "背离", "SQZMOM_WHITE": "动量衰竭",
+        "SQUEEZE_RELEASE": "挤压释放",
+    }
     type_name = type_names.get(ev["type"], ev["type"])
     dir_emoji = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
 
-    # 操作建议
-    if abs(long_score - short_score) < 8:
-        suggestion = "方向分歧大（分差<8），等待关键位确认。"
-    elif long_score >= short_score:
-        suggestion = "偏多占优；等回踩防守区，不追高。"
-    else:
-        suggestion = "偏空占优；等反弹防守区，不追低。"
-
-    vr = volume_ratio or 1.0
-    vol_zone = "极度缩量" if vr < 0.35 else ("缩量" if vr < 0.65 else ("正常" if vr < 1.20 else ("温和放量" if vr < 1.80 else "明显放量")))
-    rsi_zone = "超卖" if rsi < 30 else ("偏弱" if rsi < 45 else ("中性" if rsi < 55 else ("偏强" if rsi < 70 else "超买")))
-    adx_zone = "弱趋势/震荡" if adx < 20 else ("趋势萌芽" if adx < 25 else ("有效趋势" if adx < 35 else "强趋势"))
-    macd_dir = "偏多" if macd_hist > 0 else ("偏空" if macd_hist < 0 else "中性")
-    atr_pct = atr / price * 100 if price > 0 and atr > 0 else 0
-    atr_zone = "低波动" if atr_pct < 0.25 else ("正常" if atr_pct < 0.70 else ("高波动" if atr_pct < 1.20 else "极高波动"))
-    regime_cn = {"TREND": "趋势", "CHOP": "震荡", "TRANSITION": "过渡", "CRISIS_RISK_OFF": "避险"}
-    vol_cn = {"HIGH_VOL": "高波动", "MID_VOL": "正常", "LOW_VOL": "低波动"}
-    squeeze_cn = {"release": "已释放", "building": "压缩中", "released": "已释放"}
-
-    def _fmt_ob(ob):
-        if ob is None: return "暂无"
-        if isinstance(ob, (list, tuple)) and len(ob) >= 2:
-            try: return f"{float(ob[0]):.2f}~{float(ob[1]):.2f}"
-            except: return str(ob)
-        return str(ob)
-    def _fmt_fvg(fvg):
-        if fvg is None: return "暂无"
-        try: return f"{float(fvg):.2f}"
-        except: return str(fvg)
-
-    # ── 操作建议统一格式 ──────────────────────
-    lp = long_score
-    sp = short_score
-    score_gap = abs(lp - sp)
-    # 【修复20260715】方向中文名由评分决定，而非事件方向(v37_dir)
+    # 方向由评分决定
+    lp, sp = long_score, short_score
     score_dir = "Long" if lp >= sp else "Short"
-    if score_dir == "Long":
-        dir_cn_local = "多头"
-        ev_local = long_ev
-    else:
-        dir_cn_local = "空头"
-        ev_local = short_ev
-    if score_gap >= 15 and ((score_dir == "Long" and lp > sp) or (score_dir == "Short" and sp > lp)):
-        suggest_text = (
-            f"✅ 【建议开{score_dir}】\n"
-            f"原因：{dir_cn_local}评分 {max(lp,sp):.0f}分，EV {ev_local:+.4f}，"
-            f"反向 {min(lp,sp):.0f}分，分差 {score_gap:.0f}分，AI 判断此方向可执行。\n"
-            f"操作：按下方风控计划挂单，不建议追高，等价格回到入场参考附近。"
-        )
-    elif score_gap >= 8:
-        suggest_text = (
-            f"⚠️ 【偏向{dir_cn_local}，但暂不开单】\n"
-            f"多头 {lp:.0f}分 vs 空头 {sp:.0f}分，接近开单门槛。\n"
-            f"操作：等回踩下方防守区（SSL/买方OB），或等放量/扫止损确认后再入场，不追高。"
-        )
-    else:
-        suggest_text = (
-            f"⏸️ 【优势不明显，不开单】\n"
-            f"多头 {lp:.0f}分 / 空头 {sp:.0f}分，分差 {score_gap:.0f}分，两者均不够突出。\n"
-                        f"操作：以观察为主，等待评分差距扩大或有流动性触发信号。"
-        )
+    msg = (
+        f"{icon} [{type_name}] {symbol}\n"
+        f"方向: {dir_emoji.get(score_dir, dir_emoji['N/A'])} | {ev['desc']}\n"
+        f"多头: {lp:.1f}分  空头: {sp:.1f}分 | 分差: {abs(lp-sp):.1f}分"
+    )
 
-    # ===== 【紧急修复20260726】lines 初始化移到条件分支外部 =====
-    lines = [
-        f"{icon} [{type_name}] {symbol}",
-        f"方向: {dir_emoji.get(score_dir, '⚖️ 中性')} | {ev['desc']}",
-        "",
-        "━━━ 多空博弈 ━━━",
-        f"多头: {lp:.1f}分 EV:{long_ev:+.4f}  空头: {sp:.1f}分 EV:{short_ev:+.4f}",
-        f"分差: {score_gap:.1f}分 | 建议: {suggestion}",
-        "",
-        "━━━ 行情环境 ━━━",
-        f"趋势: {trend_direction or 'N/A'} | 状态: {regime_cn.get(regime, regime)}",
-        f"波动: {vol_cn.get(vol_state, vol_state)} | 压缩: {squeeze_cn.get(squeeze.lower(), squeeze)}",
-        f"成交量: {vr:.2f}x ({vol_zone})",
-        "",
-        "━━━ 指标透视 ━━━",
-        f"K线: {candle_color or 'N/A'} | 变色: {'是' if color_changed else '否'}",
-        f"RSI: {rsi:.1f}({rsi_zone}) ADX: {adx:.1f}({adx_zone}) MACD: {macd_hist:.4f}({macd_dir})",
-        f"ATR: {atr:.2f} | {atr_pct:.2f}% ({atr_zone})",
-        "",
-        "━━━ 流动性/关键位 ━━━",
-    ]
-    if bsl_level > 0:
-        bsl_dist = abs(price - bsl_level) / price * 100 if price > 0 else 0
-        lines.append(f"BSL: {bsl_level:.2f}(距离{bsl_dist:.2f}%) | 已扫: {'是' if is_bsl_swept else '否'}")
-    if ssl_level > 0:
-        ssl_dist = abs(price - ssl_level) / price * 100 if price > 0 else 0
-        lines.append(f"SSL: {ssl_level:.2f}(距离{ssl_dist:.2f}%) | 已扫: {'是' if is_ssl_swept else '否'}")
-    lines.append(f"买方OB: {_fmt_ob(bullish_ob)}  卖方OB: {_fmt_ob(bearish_ob)}")
-    lines.append(f"多头FVG: {_fmt_fvg(bullish_fvg)}  空头FVG: {_fmt_fvg(bearish_fvg)}")
-    if funding_rate is not None:
-        try:
-            fr = float(funding_rate)
-            lines.append(f"资金费率: {fr:.4f}%")
-        except: pass
+    # CHOCH / 流动性事件附关键价位
+    if ev["type"] in ("CHOCH", "LIQUIDITY_SWEEP"):
+        if bsl_level > 0:
+            msg += f"\nBSL: {bsl_level:.1f}"
+        if ssl_level > 0:
+            msg += f"  SSL: {ssl_level:.1f}"
 
-    # ── 操作建议（替代旧的简短建议） ──
-    lines.append("")
-    lines.append("━━━ 操作建议 ━━━")
-    lines.append(suggest_text)
-
-    ref_entry = long_entry if score_dir == "Long" else (short_entry if score_dir == "Short" else 0)
-    ref_sl = long_sl if score_dir == "Long" else (short_sl if score_dir == "Short" else 0)
-    ref_tp1 = long_tp1 if score_dir == "Long" else (short_tp1 if score_dir == "Short" else 0)
-    ref_rr = long_rr if score_dir == "Long" else (short_rr if score_dir == "Short" else 0)
-    if score_dir in ("Long", "Short") and ref_sl and ref_sl > 0 and ref_entry > 0:
-        lines.append("")
-        lines.append("━━━ 开单参数 ━━━")
-        lines.append(f"入场: {ref_entry:.2f} SL: {ref_sl:.2f} TP1: {ref_tp1:.2f}")
-        lines.append(f"RR: {ref_rr:.2f} EV: {ev_local:+.4f} Score: {max(lp,sp):.1f}")
-    elif v37_dir in ("Long", "Short"):
-        lines.append("")
-        lines.append("━━━ 开单参数 ━━━")
-        lines.append("暂无可用入场参数")
-
-    safe_send("\n".join(lines))
+    safe_send(msg)
     print(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
-
-
-# ============================================================
 # Strategy 信号推送与去重
 # ============================================================
 _PROCESSED_SIGNALS: dict = {}
@@ -1371,25 +1264,13 @@ def check_and_open(result: dict | None) -> bool:
         except: pass
     _liq_text_x = '\n'.join(_liq_lines) if _liq_lines else ''
 
-    msg = (
-        f"━━━ [信号单] {dir_emoji2} {dir_cn} {symbol} ━━━\n"
-        f"📐 [价格失衡区] {result.get('bsl_level',0):.0f}~{result.get('ssl_level',0):.0f}\n"
-        f"方向: {dir_emoji2} {dir_cn}\n"
-        f"━━━ 多空博弈 ━━━\n"
-        f"多头: {lp_s:.1f}分 EV:{result.get('long_ev',0):+.4f}  空头: {sp_s:.1f}分 EV:{result.get('short_ev',0):+.4f}  分差: {sg:.1f}分\n"
-        f"━━━ 行情环境 ━━━\n"
-        f"趋势: {regime_cn} | 波动: {vol_cn} | 成交量: {vol_ratio_str}\n"
-        f"━━━ 指标透视 ━━━\n"
-        f"RSI: {result.get('rsi',0):.1f}({rsi_zone}) ATR: {_atr_val:.2f} | {atr_pct:.2f}%\n"
-        f"━━━ 流动性/关键位 ━━━\n"
-        f"{_liq_text_x}\n"
-        f"━━━ 操作建议 ━━━\n"
-        f"{suggest_text_strategy}\n"
-        f"━━━ 开单参数 ━━━\n"
-        f"入场: {entry:.2f} SL: {sl:.2f} TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
-        f"RR: {rr:.2f} EV: {ev:.4f} Score: {score:.1f}\n"
-        f"书签: {book} | 仓位: {size*100:.1f}%"
-    )
+    msg = "\n".join([
+        f"{dir_emoji2} [{symbol}] {dir_cn} 信号通过",
+        f"入场: {entry:.2f}  SL: {sl:.2f}  TP1: {tp1:.2f}  TP2: {tp2:.2f}  TP3: {tp3:.2f}",
+        f"评分: {score:.1f} | EV: {ev:.4f} | RR: {rr:.2f}",
+        f"原因: {reason}",
+        f"多头: {lp_s:.1f}分  空头: {sp_s:.1f}分  分差: {sg:.1f}分",
+    ])
     safe_send(msg)
     
     position_manager.update(symbol, {
@@ -1527,29 +1408,6 @@ def check_and_open(result: dict | None) -> bool:
                     )
                 else:
                     _mf, _ma, _fr, _er = None, None, None, "NO_FUTURE_DATA"
-
-        # 构建开单快照
-        _audit_snapshot = {
-            "symbol": symbol,
-            "direction": direction,
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "rr": rr,
-            "score": score,
-            "ev": ev,
-            "model_ev": result.get("expected_value", 0.0),
-            "regime": result.get("regime", "unknown"),
-            "vol_state": result.get("vol_state", "unknown"),
-            "setup_type": result.get("reason", ""),
-            "book": book,
-            "adx": result.get("adx", 0),
-            "atr": result.get("atr", 0),
-            "rsi": result.get("rsi", 0),
-            "volume_ratio": result.get("volume_ratio", 1.0),
-        }
         signal_audit_log.record_open(sig_id, _audit_snapshot, _audit_future_prices)
 
         # 实时日志：打印后验预测
