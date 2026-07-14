@@ -71,6 +71,7 @@ from utils.signal_tracker import SignalTracker
 from utils.daily_risk_guard import DailyRiskGuard
 from utils.signal_audit_log import signal_audit_log
 from utils.smart_position_sizer import SmartPositionSizer, get_smart_sizer
+from utils.daily_panel import DailyPanel, get_daily_panel
 
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
@@ -108,6 +109,8 @@ _calibrator = ProbabilityCalibrator()
 _tracker = SignalTracker()
 _risk_guard = DailyRiskGuard()
 _feedback = FeedbackLoop()  # 全链路反馈闭环引擎
+_panel = get_daily_panel()  # 每日监控面板
+_panel_today_sent = [False]  # mutable flag
 
 def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.DataFrame | None',
                     max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
@@ -1593,6 +1596,18 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                             pnl_r=profit_r2,
                             direction=pos.get("direction", ""),
                         )
+                        # 每日监控面板更新
+                        try:
+                            get_daily_panel().on_trade_closed(
+                                regime=_open_regime,
+                                features=_open_features,
+                                score=_open_score,
+                                confidence=_open_conf,
+                                pnl_r=profit_r2,
+                                direction=pos.get("direction", ""),
+                            )
+                        except Exception as _panel_e:
+                            print(f"[DailyPanel] TP更新异常: {_panel_e}")
                         # 同时更新旧的 Weighter（兼容旧代码）
                         _weighter.update(features=_open_features, outcome_r=profit_r2)
                 except Exception as _new_tools_e:
@@ -1705,6 +1720,18 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
                 pnl_r=profit_r,
                 direction=pos.get("direction", ""),
             )
+            # 每日监控面板更新
+            try:
+                get_daily_panel().on_trade_closed(
+                    regime=_open_regime,
+                    features=_open_features or ["CHOCH"],
+                    score=_open_score,
+                    confidence=_open_conf,
+                    pnl_r=profit_r,
+                    direction=pos.get("direction", ""),
+                )
+            except Exception as _panel_e:
+                print(f"[DailyPanel] SL更新异常: {_panel_e}")
         _weighter.update(features=["CHOCH"], outcome_r=profit_r)
     except Exception as _sl_new_e:
         print(f"[NewTools] 止损更新异常: {_sl_new_e}")
@@ -1807,8 +1834,14 @@ async def main_loop():
                                 funding_rate=result.get("funding_rate"),
                             )
 
-                    # ---- 【第 2 步】Strategy 开单推送 ----
+                                        # ---- 【第 2 步】Strategy 开单推送 ----
                     check_and_open(result)
+
+            # ---- 【每日监控面板】跨日数据报告 ----
+            try:
+                _panel.try_send_report(safe_send, _panel_today_sent)
+            except Exception as _panel_report_e:
+                print(f"[DailyPanel] 报告推送异常: {_panel_report_e}")
 
             # ---- 【第 3 步】持仓追踪 ----
             try:
