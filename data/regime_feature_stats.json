@@ -1,0 +1,26 @@
+{
+  "TREND": {
+    "OB": {
+      "wins": 1,
+      "losses": 0,
+      "avg_r": 1.5,
+      "recent_wins": 1,
+      "recent_total": 1,
+      "recent_avg_r": 1.5,
+      "weight": 0.7152,
+      "last_update": 1783955347,
+      "total_trades": 1
+    },
+    "CHOCH": {
+      "wins": 1,
+      "losses": 0,
+      "avg_r": 1.5,
+      "recent_wins": 1,
+      "recent_total": 1,
+      "recent_avg_r": 1.5,
+      "weight": 0.7152,
+      "last_update": 1783955347,
+      "total_trades": 1
+    }
+  }
+}

@@ -120,10 +120,21 @@
     "min_edge": 5.0,
     "ev_threshold": 0.0
   },
-  "v565_gate": {
+    "v565_gate": {
     "enabled": true,
     "min_score": 55.0,
     "min_model_ev": -0.28,
     "hard_block_hours": [4, 6, 7, 23]
+  },
+  "micro_guard": {
+    "enabled": false,
+    "symbol": "BTCUSDT",
+    "zmq_addr": "tcp://127.0.0.1:5555",
+    "obi_long": 0.20,
+    "obi_short": -0.20,
+    "cvd_long": 5.0,
+    "cvd_short": -5.0,
+    "timeout_seconds": 60,
+    "notes": "启用时需同步启动 execution/micro/feeder.py 后台进程"
   }
 }

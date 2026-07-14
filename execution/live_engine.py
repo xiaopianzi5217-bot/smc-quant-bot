@@ -10,6 +10,12 @@ try:
 except Exception:
     dispatch_execution_event = None
 
+# ===== 微观执行卫士（可选导入，不影响无 ZMQ 环境的运行）=====
+try:
+    from execution.micro.guard import MicroExecutionGuard
+except ImportError:
+    MicroExecutionGuard = None  # type: ignore
+
 
 def _num(v: Any, default: float = 0.0) -> float:
     try:
@@ -28,6 +34,43 @@ class LiveExecutionEngine:
         self.portfolio = portfolio
         self.logger = logger
         self.notifier = notifier
+
+        # ===== 微观执行卫士（惰性初始化）=====
+        self.micro_guard = None  # type: ignore[assignment]
+        self._init_micro_guard()
+
+    def _init_micro_guard(self):
+        """根据配置初始化微观卫士"""
+        micro_cfg = self.cfg.get("micro_guard", {})
+        if not micro_cfg.get("enabled", False):
+            self.logger and self.logger.log("MICRO_GUARD", message="微观卫士未启用 (micro_guard.enabled=false)")
+            return
+        if MicroExecutionGuard is None:
+            self.logger and self.logger.log("MICRO_GUARD", message="微观卫士模块未安装 (execution.micro.guard 不可用)")
+            return
+        try:
+            # CCXT 格式 (BTC/USDT) → ZMQ 格式 (BTCUSDT)
+            raw_symbol = str(micro_cfg.get("symbol", "BTCUSDT"))
+            zmq_symbol = raw_symbol.replace("/", "").replace(":", "").upper()
+            self.micro_guard = MicroExecutionGuard(
+                symbol=zmq_symbol,
+                connect_addr=micro_cfg.get("zmq_addr", "tcp://127.0.0.1:5555"),
+                obi_long=float(micro_cfg.get("obi_long", 0.20)),
+                obi_short=float(micro_cfg.get("obi_short", -0.20)),
+                cvd_long=float(micro_cfg.get("cvd_long", 5.0)),
+                cvd_short=float(micro_cfg.get("cvd_short", -5.0)),
+            )
+            self.logger and self.logger.log(
+                "MICRO_GUARD",
+                message=f"微观卫士已启动: {zmq_symbol} @ {micro_cfg.get('zmq_addr')}",
+                raw={"thresholds": {
+                    "obi_long": micro_cfg.get("obi_long"),
+                    "obi_short": micro_cfg.get("obi_short"),
+                }},
+            )
+        except Exception as exc:
+            self.logger and self.logger.log("MICRO_GUARD", message=f"微观卫士初始化失败: {exc}")
+            self.micro_guard = None
 
     def _validate_risk_plan(self, risk_plan: Dict[str, Any]):
         required = ["entry", "sl", "tp1", "tp2", "tp3"]
@@ -114,6 +157,36 @@ class LiveExecutionEngine:
         if not sizing["ok"]:
             self.logger.log("SIZING_BLOCK", symbol=symbol, direction=direction, message=sizing["reason"], raw={"decision": decision, "sizing": sizing})
             return {"ok": False, "reason": sizing["reason"]}
+
+        # ===== 微观执行卫士：发单前的盘口验证 =====
+        micro_cfg = self.cfg.get("micro_guard", {})
+        if self.micro_guard is not None and micro_cfg.get("enabled", False):
+            micro_timeout = float(micro_cfg.get("timeout_seconds", 60))
+            quick = self.micro_guard.check_entry_immediate(direction)
+            if quick is True:
+                self.logger.log("MICRO_PASS", symbol=symbol, direction=direction,
+                                message="微观瞬时检查通过（OBI达标）")
+            elif quick is False:
+                self.logger.log("MICRO_BLOCK", symbol=symbol, direction=direction,
+                                message="微观瞬时检查拦截（OBI方向错误）",
+                                raw=self.micro_guard.latest_state)
+                return {"ok": False, "reason": "MICRO_BLOCK: OBI direction mismatch"}
+            elif quick is None and micro_timeout > 0 and not self.exchange.dry_run:
+                # 数据不新鲜 + 实盘模式：阻塞等待确认
+                is_approved = self.micro_guard.verify_entry(
+                    direction=direction,
+                    timeout_seconds=micro_timeout,
+                )
+                if not is_approved:
+                    self.logger.log("MICRO_BLOCK", symbol=symbol, direction=direction,
+                                    message=f"微观确认超时/失败 ({micro_timeout}s)",
+                                    raw=self.micro_guard.latest_state)
+                    return {"ok": False, "reason": f"MICRO_BLOCK: 微观确认超时 ({micro_timeout}s)"}
+            else:
+                # 干运行/模拟模式：数据不新鲜但放行（日志记录）
+                self.logger.log("MICRO_SKIP", symbol=symbol, direction=direction,
+                                message="模拟模式：微观数据不新鲜但放行（仅记录）")
+        # ===== 微观验证结束 =====
 
         try:
             raw_order = self.exchange.create_market_order(symbol, direction, sizing["size"])
