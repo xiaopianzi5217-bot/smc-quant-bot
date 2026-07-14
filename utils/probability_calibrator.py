@@ -1,84 +1,89 @@
-# utils/probability_calibrator.py
+# -*- coding: utf-8 -*-
+"""概率引擎（扁平化版）
+
+- 每 5 分一个桶，记录 wins/losses/neutral/total_r
+- update 不触发 I/O，外部定时保存
+
+用法：
+    engine = ProbabilityEngine()
+    engine.update(score=72.5, profit_r=1.2)
+    prob = engine.predict(score=68.0)
+"""
 import json
 import math
 import os
 from collections import defaultdict
 
 
-class ProbabilityCalibrator:
-    """概率校准器：将模型评分映射为真实胜率（P(win)）。
+class ProbabilityEngine:
+    """"""
 
-    使用分桶 + Beta 平滑：
-      - 样本 >= 30 时：Beta 经验贝叶斯平滑 (wins+8)/(total+15)
-      - 样本 < 30 时：Logistic fallback 1/(1+exp(-(score-58)/13))
-
-    用法：
-        calibrator = ProbabilityCalibrator()
-        # 每次交易结束后更新
-        calibrator.update(score=72.5, is_win=True)
-        # 查询校准概率
-        p = calibrator.get_prob(score=68.0)
-    """
-
-    def __init__(self, save_path: str = "data/calibrator_bins.json"):
-        self.save_path = save_path
-        self.bins = defaultdict(lambda: [0, 0])  # bin_key: [wins, total]
+    def __init__(self, path: str = "data/probability_table.json"):
+        self.path = path
+        self.table: dict = defaultdict(lambda: {"wins": 0, "losses": 0, "neutral": 0, "total_r": 0.0})
         self._load()
 
-    _NOISE_THRESHOLD = 0.2  # 仅 |pnl_r| > 0.2R 才算有效交易
+    # ------------------------------------------------------------------
+    # 持久化
+    # ------------------------------------------------------------------
+    def load(self):
+        self._load()
 
     def _load(self):
-        """从磁盘加载分桶数据，防止容器重启后丢失。"""
-        if os.path.exists(self.save_path):
+        if os.path.exists(self.path):
             try:
-                with open(self.save_path, "r") as f:
+                with open(self.path, "r") as f:
                     raw = json.load(f)
                     for k, v in raw.items():
-                        self.bins[int(k)] = v
+                        self.table[k] = v
             except Exception as exc:
-                print(f"[ProbabilityCalibrator] 加载失败: {exc}")
+                print(f"[ProbabilityEngine] 加载失败: {exc}")
 
-    def _save(self):
-        """持久化到磁盘。"""
+    def save(self):
         try:
-            os.makedirs(os.path.dirname(self.save_path), exist_ok=True)
-            with open(self.save_path, "w") as f:
-                json.dump(dict(self.bins), f, indent=2)
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "w") as f:
+                json.dump(dict(self.table), f, indent=2)
         except Exception as exc:
-            print(f"[ProbabilityCalibrator] 保存失败: {exc}")
+            print(f"[ProbabilityEngine] 保存失败: {exc}")
 
-    def update(self, score: float, pnl_r: float):
-        """记录一笔交易的评分与结果。
+    # ------------------------------------------------------------------
+    # 核心逻辑
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _bucket(score: float) -> str:
+        return str(int(score // 5) * 5)
 
-        噪音过滤：仅 |pnl_r| > 0.2R 才纳入校准，
-        微利/微亏（滑点、平推）不视为有效信号。
+    def update(self, score: float, profit_r: float):
+        """扁平化状态更新，不触发 I/O。"""
+        bucket = self._bucket(score)
+        data = self.table[bucket]
 
-        Args:
-            score: 评分（0~100）
-            pnl_r: 盈亏 R 倍数（带符号）
-        """
-        if abs(pnl_r) < self._NOISE_THRESHOLD:
-            return
-        bin_key = int(score // 5) * 5
-        self.bins[bin_key][1] += 1
-        if pnl_r > 0:
-            self.bins[bin_key][0] += 1
-        self._save()
+        if profit_r > 0.2:
+            data["wins"] += 1
+        elif profit_r < -0.2:
+            data["losses"] += 1
+        else:
+            data["neutral"] += 1
+
+        data["total_r"] = round(data.get("total_r", 0.0) + profit_r, 4)
+
+    def predict(self, score: float) -> float:
+        """给定评分，返回校准胜率 P(win)。"""
+        bucket = self._bucket(score)
+        data = self.table.get(bucket, {})
+
+        wins = data.get("wins", 0)
+        losses = data.get("losses", 0)
+        total = wins + losses
+
+        if total < 30:
+            # Fallback logistic：58 分对应 ~50%
+            return round(1 / (1 + math.exp(-(score - 58) / 13)), 4)
+
+        # Beta 平滑（先验贝叶斯）
+        return round((wins + 5) / (total + 10), 4)
 
     def get_prob(self, score: float) -> float:
-        """查询给定评分的校准概率 P(win)。
-
-        Args:
-            score: 评分（0~100）
-
-        Returns:
-            校准后的获胜概率 [0, 1]
-        """
-        bin_key = int(score // 5) * 5
-        if bin_key in self.bins:
-            wins, total = self.bins[bin_key]
-            if total >= 30:
-                # Beta 平滑：先验 α=8, β=7（假设平均胜率 ~53%）
-                return (wins + 8) / (total + 15)
-        # Fallback logistic：评分 58 分对应 ~50% 概率
-        return 1 / (1 + math.exp(-(score - 58) / 13))
+        """兼容旧接口。"""
+        return self.predict(score)
