@@ -259,7 +259,7 @@ class AdaptiveRejector:
 
 class FeedbackLoop:
     """Full-loop feedback engine: integrates CalibrationTable + RegimeFeatureStats + AdaptiveRejector"""
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", probability_engine=None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.calibration = CalibrationTable(
@@ -271,6 +271,8 @@ class FeedbackLoop:
         self.rejector = AdaptiveRejector(
             save_path=str(self.data_dir / "adaptive_reject.json")
         )
+        # 统一的概率引擎来源
+        self.probability_engine = probability_engine
 
     def on_trade_closed(self, regime: str, features: List[str],
                         score: float, confidence: float,
@@ -293,12 +295,29 @@ class FeedbackLoop:
         # 防止分数越界：上限 100
         weighted_score = min(weighted_score, 100.0)
 
+        # === 统一概率出口 ===
+        # 1) 计算加权分数
+        # 2) 从 ProbabilityEngine 获取校准概率（含 regime 微调）
+        # 3) 从 CalibrationTable 获取历史盈亏比
+        # 4) 计算动态 EV
+
+        if self.probability_engine is not None:
+            # 使用统一的 ProbabilityEngine（含 regime 微调）
+            confidence = self.probability_engine.predict(
+                score=weighted_score, regime=regime, features=features
+            )
+        else:
+            # 兜底：用 CalibrationTable 的 logistic 回退
+            calib = self.calibration.predict(weighted_score)
+            confidence = calib["prob"]
+
+        # 盈亏比从 CalibrationTable 获取（需要有样本才可靠）
         calib = self.calibration.predict(weighted_score)
-        confidence = calib["prob"]
         avg_win_r = calib.get("avg_win_r", 0.5) or 0.5
         avg_loss_r = calib.get("avg_loss_r", 0.5) or 0.5
         ev = confidence * avg_win_r - (1 - confidence) * avg_loss_r
 
+        # 样本不足时混合 base_ev
         if not calib["is_reliable"] and base_ev != 0:
             ev = base_ev * 0.6 + ev * 0.4
 
