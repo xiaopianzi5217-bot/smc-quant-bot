@@ -281,6 +281,12 @@ class FeedbackLoop:
         self.feature_stats.update(regime=regime, features=features, pnl_r=pnl_r)
         self.rejector.update(regime=regime, features=features,
                              confidence=confidence, pnl_r=pnl_r)
+        # 统一概率引擎数据回流
+        if self.probability_engine is not None:
+            try:
+                self.probability_engine.update(score=score, profit_r=pnl_r)
+            except Exception as exc:
+                print(f"[FeedbackLoop] probability_engine.update exception: {exc}")
 
     def evaluate_signal(self, regime: str, features: List[str],
                         score: float, raw_feature_scores: Dict[str, float],
