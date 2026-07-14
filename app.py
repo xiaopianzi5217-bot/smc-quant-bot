@@ -428,12 +428,13 @@ def build_local_snapshot_and_decision(symbol):
     })
     if passed and decision.get("approved"):
         # ===== 顺发：Observer 结构事件 =====
-        if observer_events:
-            try:
-                dispatch_observer_snapshot(snapshot, send_all=True)
-                print(f"[{symbol}] Observer 结构事件顺发完成 ({len(observer_events)} 个)")
-            except Exception as exc:
-                print(f"[{symbol}] Observer 顺发异常: {exc}")
+                # 【已注释 202607】Observer 详细报告推送（系统打分不走决策，起不到指导作用）
+        # if observer_events:
+        #     try:
+        #         dispatch_observer_snapshot(snapshot, send_all=True)
+        #         print(f"[{symbol}] Observer 结构事件顺发完成 ({len(observer_events)} 个)")
+        #     except Exception as exc:
+        #         print(f"[{symbol}] Observer 顺发异常: {exc}")
 
         # ===== 顺发：开单信号推送 (Telegram) =====
         _emoji = "📈" if direction == "Long" else "📉"

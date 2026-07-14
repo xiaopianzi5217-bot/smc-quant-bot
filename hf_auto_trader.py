@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版
@@ -65,7 +65,7 @@ from feature_store import feature_store
 
 # ---------- 【新增20260723】工具类导入 ----------
 from utils.adaptive_features import AdaptiveFeatureWeighter
-from utils.probability_calibrator import ProbabilityCalibrator
+from utils.probability_calibrator import ProbabilityEngine as ProbabilityCalibrator
 from utils.feedback_loop import FeedbackLoop  # 全链路闭环
 from utils.signal_tracker import SignalTracker
 from utils.daily_risk_guard import DailyRiskGuard
