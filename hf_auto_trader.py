@@ -338,17 +338,16 @@ async def scan_and_decide(symbol: str) -> dict | None:
     if df_macro is None or len(df_macro) < 50:
         df_macro = make_sample_ohlcv(start=102.0)
         
-    # ===== V56.5 唯一决策管线 =====
+        # ===== V56.5 唯一决策管线 =====
     # 使用 V56_5_Engine 的候选-评分-选择-执行链路
     # 注意：V565Config 默认 min_score=65.0，生产环境已足够
     # 但 scan_and_decide 的 DataFreme 只有 320 bars（15m），回测引擎需要更多数据
-        # 因此这里用宽松的 V56 Config
-        from final_forge.v56_5_stable_engine import V565Config
-        _loose_cfg = V565Config(
-            min_score=55.0,  # 放低分数门槛
-            allowed_hours=tuple(range(24)),  # ✅ 生产环境放开全部时间段，让评分做最终筛选
-            allowed_dir="both",  # ✅ V56.5 默认产出 Strong Short，放宽到允许 Long
-        )
+    # 因此这里用宽松的 V56 Config
+    # V565Config 已在模块顶部 import
+    _loose_cfg = V565Config(
+        min_score=55.0,  # 放低分数门槛
+        allowed_hours=tuple(range(24)),  # ✅ 生产环境放开全部时间段，让评分做最终筛选
+    )
 
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
