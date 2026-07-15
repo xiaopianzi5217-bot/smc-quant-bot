@@ -1012,7 +1012,7 @@ def check_and_open(result: dict | None) -> bool:
     # 当历史样本不足时 = model_ev
     ev = blended_ev
     score = result.get("score", 0.0)
-
+    
     # ===== 【V21 FeatureLearningEngine】权重调整分数 =====
     _fl_score = result.get("_feature_learning_score", 0.0)
     if _fl_score > 0 and _fl_score != score:
@@ -1353,10 +1353,7 @@ def check_and_open(result: dict | None) -> bool:
             position_manager.update(symbol, _pos_data)
             _fb_raw_scores = result.get("_feedback_raw_scores", {})
             if _tracker_signal_id and _fb_raw_scores:
-                _feature_learner.record_features(
-                    signal_id=_tracker_signal_id,
-                    features=_fb_raw_scores,
-                )
+                _feature_learner.record_features(signal_id=_tracker_signal_id, features=_fb_raw_scores)
     except Exception as _tracker_e:
         print(f"[SignalTracker] 记录开单失败: {_tracker_e}")
     
