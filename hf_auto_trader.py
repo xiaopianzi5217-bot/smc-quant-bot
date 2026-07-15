@@ -98,7 +98,7 @@ STOP_LOSS_COOLDOWN = 300
 _last_stop_loss_time = {}
 
 # 【修复20260704】去重与质量加强参数
-TREND_END_PULLBACK_ATR = 3.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
+TREND_END_PULLBACK_ATR = 2.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
 
 # ----- 信号后验验证参数 -----
 POSTHOC_FUTURE_BARS = 15  # 开单后追踪 15 根 K线（15m = 3.75 小时）
