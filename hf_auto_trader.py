@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版
@@ -71,6 +71,7 @@ from utils.signal_tracker import SignalTracker
 from utils.daily_risk_guard import DailyRiskGuard
 from utils.signal_audit_log import signal_audit_log
 from utils.smart_position_sizer import SmartPositionSizer, get_smart_sizer
+from analytics.feature_learning import FeatureLearningEngine, get_feature_learner
 from utils.daily_panel import DailyPanel, get_daily_panel
 
 # ---------- 全局参数 ----------
@@ -109,6 +110,7 @@ _calibrator = ProbabilityCalibrator()
 _tracker = SignalTracker()
 _risk_guard = DailyRiskGuard()
 _feedback = FeedbackLoop()  # 全链路反馈闭环引擎
+_feature_learner = get_feature_learner()  # V21: Feature Learning Engine
 _panel = get_daily_panel()  # 每日监控面板
 _panel_today_sent = [False]  # mutable flag
 
@@ -531,6 +533,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
           f"confidence={_fb_result['confidence']:.3f}, ev={_fb_result['ev']:.4f}, "
           f"reject={_fb_result['should_reject']} (threshold={_fb_result['reject_threshold']})")
 
+    # ===== 【V21 FeatureLearningEngine】特征权重调整 =====
+    _fl_weighted_score = get_feature_learner().get_weighted_score(_fb_raw_scores)
+    _fl_final_score = score * 0.7 + _fl_weighted_score * 0.3 if _fl_weighted_score > 0 else score
+    _fl_final_score = min(100.0, _fl_final_score)
+    if _fl_final_score != score:
+        print(f"[{symbol}] FeatureLearning: score={score:.1f} -> adjusted={_fl_final_score:.1f} "
+              f"(weights={get_feature_learner().get_all_weights()})")
+
     # 构建兼容返回格式
     return {
         "symbol": symbol,
@@ -599,6 +609,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "_feedback_raw_scores": _fb_raw_scores,  # 【闭环】原始特征分数
         "_feedback_result": _fb_result,  # 【闭环】全文决策统计
         "_feedback_ev": _fb_result["ev"],  # 【闭环】FeedbackLoop EV
+        "_feature_learning_score": _fl_final_score,  # 【V21】FeatureLearning 调整后分数
         "confidence": _fb_result["confidence"],  # 【闭环】置信度
         "grade_result": None,  # check_and_open 中填充
         "feature_penalty": 0.0,  # check_and_open 中填充
@@ -1001,7 +1012,13 @@ def check_and_open(result: dict | None) -> bool:
     # 当历史样本不足时 = model_ev
     ev = blended_ev
     score = result.get("score", 0.0)
-    
+
+    # ===== 【V21 FeatureLearningEngine】权重调整分数 =====
+    _fl_score = result.get("_feature_learning_score", 0.0)
+    if _fl_score > 0 and _fl_score != score:
+        print(f"[{symbol}] FeatureLearning: score={score:.1f} -> {_fl_score:.1f}")
+        score = _fl_score
+
     # ===== 【优化3 - Score Grade】分级过滤 =====
     _grade_result = get_score_grader().grade(score=score, ev=ev, regime=result.get("regime", "UNKNOWN"))
     result["grade_result"] = _grade_result
@@ -1334,6 +1351,12 @@ def check_and_open(result: dict | None) -> bool:
         if _pos_data:
             _pos_data["tracker_signal_id"] = _tracker_signal_id
             position_manager.update(symbol, _pos_data)
+            _fb_raw_scores = result.get("_feedback_raw_scores", {})
+            if _tracker_signal_id and _fb_raw_scores:
+                _feature_learner.record_features(
+                    signal_id=_tracker_signal_id,
+                    features=_fb_raw_scores,
+                )
     except Exception as _tracker_e:
         print(f"[SignalTracker] 记录开单失败: {_tracker_e}")
     
@@ -1596,6 +1619,12 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                             pnl_r=profit_r2,
                             direction=pos.get("direction", ""),
                         )
+                        # ===== 【V21 FeatureLearningEngine】Outcome 闭环更新 =====
+                        if _ts_id:
+                            _feature_learner.update(
+                                signal_id=_ts_id,
+                                pnl_r=profit_r2,
+                            )
                         # 每日监控面板更新
                         try:
                             get_daily_panel().on_trade_closed(
@@ -1720,6 +1749,12 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
                 pnl_r=profit_r,
                 direction=pos.get("direction", ""),
             )
+            # ===== 【V21 FeatureLearningEngine】Outcome 闭环更新（止损） =====
+            if _ts_id:
+                _feature_learner.update(
+                    signal_id=_ts_id,
+                    pnl_r=profit_r,
+                )
             # 每日监控面板更新
             try:
                 get_daily_panel().on_trade_closed(
