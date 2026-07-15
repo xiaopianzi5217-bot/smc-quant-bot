@@ -625,14 +625,14 @@ if __name__ == "__main__":
         import asyncio
         from execution.micro.feeder import MicroFeeder
 
-        # ===== 创建微观数据喂价器 =====
+        # ===== 创建微观数据喂价器（Bitget 版）=====
         _feeder = None
         try:
             _feeder = MicroFeeder("BTCUSDT")
-            print("[Feeder] MicroFeeder 已创建，微观订单流即将启动")
+            print("[Feeder] MicroFeeder (Bitget) 已创建，微观订单流即将启动")
+
         except Exception as feeder_err:
             print(f"[Feeder] MicroFeeder 创建失败: {feeder_err}")
-
         def _run_async_main():
             try:
                 loop = asyncio.new_event_loop()
@@ -658,7 +658,7 @@ if __name__ == "__main__":
         _hf_thread = threading.Thread(target=_run_async_main, daemon=True)
         _hf_thread.start()
         print("[HF] 自动信号扫描+追踪推送已启动")
-        print("[Feeder] 微观订单流协程已挂载至主循环")
+        print("[Feeder] Bitget 微观订单流协程已挂载至主循环")
     except Exception as e:
         print(f"[HF] 自动扫描启动失败: {e}")
         traceback.print_exc()
