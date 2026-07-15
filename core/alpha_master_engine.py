@@ -109,6 +109,15 @@ class V37MasterEngine:
         volume_ratio = safe_float(row.get("volume_ratio", 1.0), 1.0)
         atr_pct = atr / close if close > 0 else safe_float(exec_ctx.get("atr_pct", 0.0), 0.0)
 
+        # ===== V21: MarketCrisisDetector 多维危机检测叠加 =====
+        crisis_level = int(exec_ctx.get("crisis_level", 0))
+        if crisis_level >= 3:
+            return "CRISIS_RISK_OFF"
+        if crisis_level >= 2:
+            if atr_pct >= 0.020 or volume_ratio <= 0.40:
+                return "CRISIS_RISK_OFF"
+            return "TRANSITION"
+
         # Crisis has priority: liquidity drain or abnormal volatility.
         if atr_pct >= 0.030 or volume_ratio <= 0.35 or volume_ratio >= 4.0:
             return "CRISIS_RISK_OFF"
@@ -448,6 +457,15 @@ class V37MasterEngine:
             risk *= 0.75
         elif regime == "CRISIS_RISK_OFF":
             risk *= 0.25
+
+        # V21: MarketCrisisDetector 额外压缩（叠加在 regime 之上）
+        crisis_level = int(exec_ctx.get("crisis_level", 0))
+        if crisis_level >= 3:
+            risk *= 0.0  # 熔断
+        elif crisis_level >= 2:
+            risk *= 0.15  # 严重危机
+        elif crisis_level >= 1:
+            risk *= 0.50  # 预警
 
         if vol_state == "HIGH_VOL":
             risk *= 0.80
