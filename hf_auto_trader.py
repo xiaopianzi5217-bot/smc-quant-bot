@@ -42,6 +42,7 @@ from utils.time_utils import series_ms_to_bj
 # ---------- V56.5 主引擎（唯一生产决策管线） ----------
 from final_forge.v56_5_stable_engine import (
     V565Config,
+    V56_5_Engine,
     generate_v56_candidates,
     enrich_v565_candidates,
     select_v565_portfolio,
@@ -113,6 +114,20 @@ _feedback = FeedbackLoop()  # 全链路反馈闭环引擎
 _feature_learner = get_feature_learner()  # V21: Feature Learning Engine
 _panel = get_daily_panel()  # 每日监控面板
 _panel_today_sent = [False]  # mutable flag
+
+# ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
+_V56_ENGINE = V56_5_Engine(V565Config(
+    min_score=55.0,
+    allowed_hours=tuple(range(24)),
+))
+_bucket_ev_path = Path("data/v56_5_bucket_ev.json")
+if _bucket_ev_path.exists():
+    try:
+        _buckets = json.loads(_bucket_ev_path.read_text(encoding="utf-8"))
+        _V56_ENGINE.load_history_buckets(_buckets)
+        print(f"[V56_5_Engine] 加载回测 bucket_ev 成功 ({len(_buckets)} 个分桶), 来自 {_bucket_ev_path}")
+    except Exception as e:
+        print(f"[V56_5_Engine] 加载 bucket_ev 失败: {e}")
 
 def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.DataFrame | None',
                     max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
@@ -338,28 +353,27 @@ async def scan_and_decide(symbol: str) -> dict | None:
     if df_macro is None or len(df_macro) < 50:
         df_macro = make_sample_ohlcv(start=102.0)
         
-        # ===== V56.5 唯一决策管线 =====
-    # 使用 V56_5_Engine 的候选-评分-选择-执行链路
-    # 注意：V565Config 默认 min_score=65.0，生产环境已足够
-    # 但 scan_and_decide 的 DataFreme 只有 320 bars（15m），回测引擎需要更多数据
-    # 因此这里用宽松的 V56 Config
-    # V565Config 已在模块顶部 import
-    _loose_cfg = V565Config(
-        min_score=55.0,  # 放低分数门槛
-        allowed_hours=tuple(range(24)),  # ✅ 生产环境放开全部时间段，让评分做最终筛选
-    )
+                # ===== V56.5 唯一决策管线（使用预加载回测 bucket_ev 的 Engine）=====
+    # 全局 _V56_ENGINE 已预加载回测 bucket_ev（365天BTC 15m数据训练）
+    # 每次扫描生成候选 → enrich（含 bucket_ev 匹配）→ 选择 → 执行
 
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
         print(f"[{symbol}] V56 指标计算后数据不足")
         return None
     
-    broad = generate_v56_candidates(df_v56, None)
-    if broad is None or broad.empty:
-        print(f"[{symbol}] V56 无候选信号")
+    # Step 1: generate_candidates — 调用 load_ohlcv + add_v56_indicators + generate_v56_candidates + enrich（含bucket_ev）
+    candidates = _V56_ENGINE.generate_candidates(df_v56)
+    if candidates is None or candidates.empty:
+        print(f"[{symbol}] V56.5 引擎无候选信号")
         return None
     else:
-        print(f"[{symbol}] V56 候选信号数: {len(broad)}, score范围: {broad['score'].min():.1f}~{broad['score'].max():.1f}")
+        print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
+        # 检查是否有 bucket_ev 列
+        if "bucket_ev" in candidates.columns:
+            _has_bucket = (candidates["bucket_ev"] != candidates["model_ev"]).sum()
+            if _has_bucket > 0:
+                print(f"[{symbol}] bucket_ev 生效: {_has_bucket}/{len(candidates)} 个信号使用历史分桶 EV")
     
     # 注入 exec_ctx 的 SMC 结构信息（原 V37 的 build_exec_context）
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
@@ -368,36 +382,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
     exec_ctx = build_exec_context(df_exec)
     exec_ctx["data_source"] = "hf_auto"
     
-    enriched = enrich_v565_candidates(broad, _loose_cfg)
-    if enriched is not None and not enriched.empty:
-        print(f"[{symbol}] enrich后信号数: {len(enriched)}, score范围: {enriched['score'].min():.1f}~{enriched['score'].max():.1f}")
-    
-    # 直接交给 select_v565_portfolio（它内部已有 Quality Gate + Top-N 逻辑）
-    # 无需在外部重复筛选，避免双重拦截
-    selected = select_v565_portfolio(enriched, _loose_cfg)
-    
-    if selected is None or selected.empty:
-        print(f"[{symbol}] select_v565_portfolio 选择后无信号，使用宽松Top-N模式重试")
-        # 策略2：绕过 Tier 限制，允许所有通过 min_score 的信号进入
-        cand2 = enriched[
-            (pd.to_numeric(enriched["score"], errors="coerce") >= float(_loose_cfg.min_score))
-        ].copy()
-        if not cand2.empty:
-            # 直接取前3名
-            cand2 = cand2.sort_values("decision_score", ascending=False).head(3)
-            selected = cand2
-            print(f"[{symbol}] 宽松模式选中 {len(selected)} 条信号")
-        else:
-            print(f"[{symbol}] 宽松模式也无候选信号")
-            return None
-    
-    trades = execute_v565(df_v56, selected, _loose_cfg)
+    # Step 2: select_trades — 包含 Quality Gate + Top-N + 集群风险缩放 + 执行
+    trades = _V56_ENGINE.select_trades(candidates)
     
     if trades is None or trades.empty:
-        print(f"[{symbol}] 执行后无交易 (selected={len(selected) if selected is not None else 'None'}条信号)")
+        print(f"[{symbol}] V56.5 选择后无交易")
         return None
     else:
-        print(f"[{symbol}] 执行后产生 {len(trades)} 笔交易")
+        print(f"[{symbol}] V56.5 执行后产生 {len(trades)} 笔交易")
     
     # 取最高 score 的交易作为本次推送
     best = trades.sort_values("score", ascending=False).iloc[0]
