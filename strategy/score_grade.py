@@ -38,8 +38,8 @@ DEFAULT_GRADE_CONFIG: Dict[str, Dict[str, float]] = {
         "size_mult": 0.85,
     },
     "B": {
-        "min_score": 72,
-        "min_ev": 0.02,
+        "min_score": 65,
+        "min_ev": 0.01,
         "size_mult": 0.65,
     },
     "REJECT": {
