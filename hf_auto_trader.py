@@ -354,10 +354,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] V56 指标计算后数据不足")
         return None
     
-    broad = generate_v56_candidates(df_v56, None)
+        broad = generate_v56_candidates(df_v56, None)
     if broad is None or broad.empty:
         print(f"[{symbol}] V56 无候选信号")
         return None
+    else:
+        print(f"[{symbol}] V56 候选信号数: {len(broad)}, score范围: {broad['score'].min():.1f}~{broad['score'].max():.1f}")
     
     # 注入 exec_ctx 的 SMC 结构信息（原 V37 的 build_exec_context）
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
@@ -367,6 +369,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
     exec_ctx["data_source"] = "hf_auto"
     
     enriched = enrich_v565_candidates(broad, _loose_cfg)
+    if enriched is not None and not enriched.empty:
+        print(f"[{symbol}] enrich后信号数: {len(enriched)}, score范围: {enriched['score'].min():.1f}~{enriched['score'].max():.1f}")
     
     # 直接交给 select_v565_portfolio（它内部已有 Quality Gate + Top-N 逻辑）
     # 无需在外部重复筛选，避免双重拦截
@@ -390,8 +394,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
     trades = execute_v565(df_v56, selected, _loose_cfg)
     
     if trades is None or trades.empty:
-        print(f"[{symbol}] 执行后无交易")
+        print(f"[{symbol}] 执行后无交易 (selected={len(selected) if selected is not None else 'None'}条信号)")
         return None
+    else:
+        print(f"[{symbol}] 执行后产生 {len(trades)} 笔交易")
     
     # 取最高 score 的交易作为本次推送
     best = trades.sort_values("score", ascending=False).iloc[0]
@@ -990,11 +996,12 @@ def check_and_open(result: dict | None) -> bool:
 
     # ---- 止损冷却 ----
     if not _check_cooldown(symbol):
-        print(f"[{symbol}] cooling skip")
+        print(f"[{symbol}] GATE-2 cooling skip")
         return False
 
     approved = result.get("approved", False)
     if not approved or not direction:
+        print(f"[{symbol}] GATE-3 approved={approved} direction={direction} 拒绝")
         return False
     
     # ===== 提取优化模块字段 =====
@@ -1004,7 +1011,7 @@ def check_and_open(result: dict | None) -> bool:
     
     # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
     if htf_blocked:
-        print(f"[{symbol}] HTF Regime 拦截 {direction}, 不开单")
+        print(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}, 不开单")
         return False
     
     # ===== 【优化5 - Statistical EV】使用 blended_ev 替代原始 ev =====
@@ -1023,12 +1030,12 @@ def check_and_open(result: dict | None) -> bool:
     _grade_result = get_score_grader().grade(score=score, ev=ev, regime=result.get("regime", "UNKNOWN"))
     result["grade_result"] = _grade_result
     if not _grade_result["allow"]:
-        print(f"[{symbol}] ScoreGrade 拒绝: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']} (min_score={_grade_result['min_score_for_grade']}, min_ev={_grade_result['min_ev_for_grade']})")
+        print(f"[{symbol}] GATE-5 ScoreGrade 拒绝: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']} (min_score={_grade_result['min_score_for_grade']}, min_ev={_grade_result['min_ev_for_grade']})")
         return False
     else:
         print(f"[{symbol}] ScoreGrade 通过: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']}")
     
-        # ===== 【闭环】FeedbackLoop EV 决策替代固定阈值 =====
+    # ===== 【闭环】FeedbackLoop EV 决策替代固定阈值 =====
     _fb_res = result.get("_feedback_result", {})
     if _fb_res.get("should_reject", False):
         print(f"[{symbol}] FeedbackLoop 拒绝: ev={_fb_res.get('ev', 0):.4f}, "
