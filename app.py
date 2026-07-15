@@ -610,56 +610,69 @@ with gr.Blocks(title="SMC Quant System") as demo:
             
         reg_btn.click(mock_register_position, inputs=[track_sym, track_dir, track_entry, track_tp1, track_tp2, track_sl], outputs=[reg_out])
 
-if __name__ == "__main__":
-    start_background_monitor()
-    # 启动 HF 自动扫描线程（信号扫描+开单+追踪止损推送）
-    try:
-        import sys
-        for mod_name in list(sys.modules.keys()):
-            if "ccxt" in mod_name:
-                del sys.modules[mod_name]
-        import ccxt as _ccxt
-        _ccxt
+def _start_hf_auto_trader():
+    """在后台线程中延迟导入重型模块，不阻塞 Gradio 启动
 
+    HF Space 构建超时（30min）最主要原因是：
+      - `import ccxt` / `import hf_auto_trader` 在 __main__ 中同步执行
+      - `MicroFeeder("BTCUSDT")` 创建时可能触发网络连接
+    解决方案：全部移到 demo.launch() *之后* 的线程中运行。
+    """
+    import sys, traceback as _tb
+
+    # 清理 ccxt 旧模块（防止热加载冲突）
+    for mod_name in list(sys.modules.keys()):
+        if "ccxt" in mod_name:
+            del sys.modules[mod_name]
+
+    try:
+        import ccxt as _ccxt
+        _ccxt  # noqa: 只是验证导入成功
+    except Exception as exc:
+        print(f"[HF] ccxt 导入失败 (非致命): {exc}")
+
+    try:
         import hf_auto_trader
         import asyncio
         from execution.micro.feeder import MicroFeeder
 
-        # ===== 创建微观数据喂价器（Bitget 版）=====
         _feeder = None
         try:
             _feeder = MicroFeeder("BTCUSDT")
-            print("[Feeder] MicroFeeder (Bitget) 已创建，微观订单流即将启动")
-
+            print("[Feeder] MicroFeeder 已创建")
         except Exception as feeder_err:
             print(f"[Feeder] MicroFeeder 创建失败: {feeder_err}")
-        def _run_async_main():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
 
+        async def _run_async_main():
+            try:
                 if _feeder is not None:
-                    # gather 方式：feeder + main_loop 在同一协程组中运行
-                    # 避免 HF Spaces "not enough hardware capacity" 错误
-                    print("[Feeder] 以 gather 方式启动 feeder + main_loop")
-                    loop.run_until_complete(
-                        asyncio.gather(
-                            _feeder.run(),
-                            hf_auto_trader.main_loop(),
-                        )
+                    print("[Feeder] gather 启动 feeder + main_loop")
+                    await asyncio.gather(
+                        _feeder.run(),
+                        hf_auto_trader.main_loop(),
                     )
                 else:
-                    loop.run_until_complete(hf_auto_trader.main_loop())
+                    await hf_auto_trader.main_loop()
             except Exception as e:
-                import traceback
                 print(f"[hf_auto_trader] 主循环崩溃: {e}")
-                traceback.print_exc()
+                _tb.print_exc()
 
-        _hf_thread = threading.Thread(target=_run_async_main, daemon=True)
-        _hf_thread.start()
-        print("[HF] 自动信号扫描+追踪推送已启动")
-        print("[Feeder] Bitget 微观订单流协程已挂载至主循环")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_async_main())
     except Exception as e:
         print(f"[HF] 自动扫描启动失败: {e}")
-        traceback.print_exc()
+        _tb.print_exc()
+
+
+if __name__ == "__main__":
+    start_background_monitor()
+
+    # 启动交易引擎线程（在 demo.launch() 之前，因为 launch() 阻塞不会返回）
+    # 线程启动是微秒级的，不阻塞 HF Space 健康检查（端口 7860 由 gradio 监听）
+    _hf_thread = threading.Thread(target=_start_hf_auto_trader, daemon=True)
+    _hf_thread.start()
+    print("[HF] 自动信号扫描线程已启动（不阻塞 Gradio 启动）")
+
+    # Gradio 监听 7860 端口（HF Space 以此判断就绪）
     demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
