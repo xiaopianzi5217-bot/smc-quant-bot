@@ -1116,11 +1116,9 @@ def check_and_open(result: dict | None) -> bool:
         f"is_chop={_is_chop} dynamic_gap={_dynamic_gap} "
         f"long={long_score:.1f} short={short_score:.1f} gap={score_gap:.1f}")
 
-    gap_passed = False
-    if direction == "Long" and long_score - short_score >= _dynamic_gap:
-        gap_passed = True
-    elif direction == "Short" and short_score - long_score >= _dynamic_gap:
-        gap_passed = True
+        # ⚠️ 修复: V56.5 引擎决定方向，GapCheck 仅要求总分差 >= threshold
+    # 不要求特定方向的分数必须更高 (V56.5 的 direction 和 exec_ctx score 可能来自不同指标源)
+    gap_passed = abs(long_score - short_score) >= _dynamic_gap
 
     if not gap_passed:
         # 即使 gap 不满足，检查是否进入 probe 模式
