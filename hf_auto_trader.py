@@ -354,7 +354,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] V56 指标计算后数据不足")
         return None
     
-        broad = generate_v56_candidates(df_v56, None)
+    broad = generate_v56_candidates(df_v56, None)
     if broad is None or broad.empty:
         print(f"[{symbol}] V56 无候选信号")
         return None
