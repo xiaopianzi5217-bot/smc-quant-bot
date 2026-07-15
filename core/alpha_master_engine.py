@@ -458,13 +458,14 @@ class V37MasterEngine:
         elif regime == "CRISIS_RISK_OFF":
             risk *= 0.25
 
-        # V21: MarketCrisisDetector 额外压缩（叠加在 regime 之上）
-        crisis_level = int(exec_ctx.get("crisis_level", 0))
-        if crisis_level >= 3:
+                # V21: MarketCrisisDetector 额外压缩（叠加在 regime 之上）
+        # crisis_level 从 signal.entry_meta 中读取（由 hf_auto_trader 注入 exec_ctx）
+        _crisis_level = int(signal.get("entry_meta", {}).get("crisis_level", 0))
+        if _crisis_level >= 3:
             risk *= 0.0  # 熔断
-        elif crisis_level >= 2:
+        elif _crisis_level >= 2:
             risk *= 0.15  # 严重危机
-        elif crisis_level >= 1:
+        elif _crisis_level >= 1:
             risk *= 0.50  # 预警
 
         if vol_state == "HIGH_VOL":
@@ -636,7 +637,7 @@ class V37MasterEngine:
             "reason": reason,
             "regime": regime,
             "vol_state": vol_state,
-        }
+                }
 
         if allow:
             verdict["book"] = book
@@ -645,7 +646,8 @@ class V37MasterEngine:
             verdict["direction"] = notional_dir
 
             lines = []
-            lines.append(f"\u2501\u2501\u2501 [{signal_type}] {dir_emoji} {dir_cn} \u2501\u2501\u2501")
+            _signal_type = "V38_SIGNAL"
+            lines.append(f"\u2501\u2501\u2501 [{_signal_type}] {dir_emoji} {dir_cn} \u2501\u2501\u2501")
             lines.append(f"\U0001f4d0 [\u4ef7\u683c\u5931\u8861\u533a] {imbalance_str}")
             lines.append(f"\u65b9\u5411: {dir_emoji} {dir_cn} | {imbalance_str}")
             lines.append(f"\u2501\u2501\u2501 \u591a\u7a7a\u535a\u5f08 \u2501\u2501\u2501")
