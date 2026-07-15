@@ -1177,11 +1177,13 @@ def check_and_open(result: dict | None) -> bool:
         print(f"[{symbol}] RR={actual_rr:.2f} < 1.0, 降仓处理 (size*=0.5)")
         result["size"] = result.get("size", 0.05) * 0.5
         
-    # ===== V37 Final Gate（V56.5 管线的最终闸门）=====
+        # ===== V37 Final Gate（V56.5 管线的最终闸门）=====
     _v37_decision = {
         "approved": True,
         "direction": direction,
         "reason": "V56.5_QUALITY_PASSED",
+        "score": score,
+        "expected_value": ev,
     }
     _v37_ctx = {
         "long_score": result.get("long_score", 0),
