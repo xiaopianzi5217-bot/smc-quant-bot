@@ -91,7 +91,7 @@ MAX_CANDLES = 320
 # Strategy 推送阈值
 MIN_EV_FOR_PUSH = 0.01  # ⚠️ 20260706修复: 从0.15降到0.01，匹配实时model_ev实际分布（通常在-0.2~0.08）
 MIN_SCORE_FOR_PUSH = 35 
-MIN_SCORE_GAP = 4.0  # 20260706修复: 从6.0降到4.0，匹配V37 Gate gap要求
+MIN_SCORE_GAP = 3.0  # 20260715修复: 从4.0降到3.0，V56.5 Short信号在BULL趋势下long_score较高但仍可开单
 
 # ----- 止损冷却 -----
 STOP_LOSS_COOLDOWN = 300
@@ -1111,7 +1111,7 @@ def check_and_open(result: dict | None) -> bool:
     _regime_for_gap = str(result.get("regime", "UNKNOWN")).upper().strip()
     _adx_for_gap = float(result.get("adx", 0))  # 修复：从 exec_ctx → result 读取
     _is_chop = _regime_for_gap in ("CHOP", "RANGE") or _adx_for_gap < 25
-    _dynamic_gap = MIN_SCORE_GAP * (0.75 if _is_chop else 1.0)  # 震荡市 gap 从 4.0 → 3.0
+    _dynamic_gap = MIN_SCORE_GAP * (0.66 if _is_chop else 0.80)  # ⚠️ 降级: V56.5信号自证实方向，gap仅做噪音过滤
     print(f"[{symbol}] GapCheck: regime={_regime_for_gap} adx={_adx_for_gap:.1f} "
         f"is_chop={_is_chop} dynamic_gap={_dynamic_gap} "
         f"long={long_score:.1f} short={short_score:.1f} gap={score_gap:.1f}")
@@ -1121,14 +1121,13 @@ def check_and_open(result: dict | None) -> bool:
     gap_passed = abs(long_score - short_score) >= _dynamic_gap
 
     if not gap_passed:
-        # 即使 gap 不满足，检查是否进入 probe 模式
-        # probe 模式：EV>0.04 且有 Liquidity Sweep + FVG 组合时允许小仓位试单
+                # 即使 gap 不满足，检查是否进入 probe 模式
+        # probe 模式：EV>0.04 且有 FVG 时允许小仓位试单
         _can_probe = False
-        _has_sweep = bool(result.get("is_bsl_swept", False) or result.get("is_ssl_swept", False))
         _has_fvg = bool(result.get("bullish_fvg") or result.get("bearish_fvg"))
-        if ev > 0.04 and _has_sweep and _has_fvg:
+        if ev > 0.04 and _has_fvg:
             _can_probe = True
-            print(f"[{symbol}] PROBE 模式触发: ev={ev:.4f}>0.04, sweep={_has_sweep}, fvg={_has_fvg}")
+            print(f"[{symbol}] PROBE 模式触发: ev={ev:.4f}>0.04, fvg={_has_fvg}")
 
         if not _can_probe:
             print(f"[{symbol}] Gap 不满足且非 probe 模式, skip. "
@@ -1136,7 +1135,7 @@ def check_and_open(result: dict | None) -> bool:
             return False
         else:
             # probe 模式：绕过 gap 检查，但标记为小仓位
-            print(f"[{symbol}] PROBE 模式: gap={score_gap:.1f}<{_dynamic_gap} 但 EV+sweep+FVG 通过, 允许试单")
+            print(f"[{symbol}] PROBE 模式: gap={score_gap:.1f}<{_dynamic_gap} 但 EV+FVG 通过, 允许试单")
             result["is_probe"] = True
         
     sig_id = _signal_id(result)
@@ -1171,11 +1170,12 @@ def check_and_open(result: dict | None) -> bool:
             print(f"[{symbol}] 价格已从低点上涨 {rise_from_low:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Long")
             return False
 
-    # ===== 【修复20260704】RR 硬校验：如果最终 RR < 1.0 直接拒绝 =====
+        # ===== 【修复20260715】RR 软校验：RR < 1.0 仅降仓，不拒单 =====
+    # V56.5 estimated_rr 来自信号bar的原始估算，SL纠正后实际RR可能不同
     actual_rr = result.get("rr", 0) or 0
     if actual_rr < 1.0:
-        print(f"[{symbol}] RR={actual_rr:.2f} < 1.0 skip")
-        return False
+        print(f"[{symbol}] RR={actual_rr:.2f} < 1.0, 降仓处理 (size*=0.5)")
+        result["size"] = result.get("size", 0.05) * 0.5
         
     # ===== V37 Final Gate（V56.5 管线的最终闸门）=====
     _v37_decision = {
