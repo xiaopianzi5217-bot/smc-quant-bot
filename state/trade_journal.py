@@ -230,14 +230,14 @@ class TradeJournal:
     def summary_stats(self) -> dict:
         """返回全量交易统计摘要（用于 DailyPanel 或 Telegram 推送）。"""
         all_rows = self.load_all()
+        opens = [r for r in all_rows if r["status"] == "OPEN"]
         closes = [r for r in all_rows if r["status"] == "CLOSE"]
         total = len(closes)
         if total == 0:
-            opens = [r for r in all_rows if r["status"] == "OPEN"]
             return {
-                "total_trades": 0,
+                "total_trades": len(all_rows),   # ← 修复：总交易 = 所有行
                 "total_closed": 0,
-                "open_positions": len(opens),
+                "open_positions": len(opens),     # ← 修复：用 opens
                 "wins": 0, "losses": 0, "winrate": 0,
                 "total_r": 0.0, "avg_r": 0.0,
                 "pf": 0.0, "best_r": 0.0, "worst_r": 0.0,
@@ -335,10 +335,11 @@ class TradeJournal:
     def generate_report(self) -> str:
         """生成可读的性能报告文本（用于 Telegram 推送）。"""
         s = self.summary_stats()
+        _has_open = s['open_positions'] > 0
+        _open_note = " ⚠️ 全部持仓中，无平仓数据" if _has_open and s['total_closed'] == 0 else ""
         lines = [
             "📊 **TradeJournal 性能报告**",
-            f"总交易: {s['total_trades']} 笔",
-            f"已平仓: {s['total_closed']} 笔 | 持仓中: {s['open_positions']} 笔",
+            f"总交易: {s['total_trades']} 笔 (开仓 {s['open_positions']} 笔, 已平 {s['total_closed']} 笔)",
             f"胜: {s['wins']} 负: {s['losses']} | 胜率: {s['winrate']}%",
             f"总R: {s['total_r']:+.2f} | 平均R: {s['avg_r']:+.4f}",
             f"利润因子: {s['profit_factor']} | 最大回撤R: {s['max_drawdown_r']:+.2f}",
