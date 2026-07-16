@@ -223,6 +223,148 @@ class TradeJournal:
         with open(self.path, "r", encoding="utf-8") as f:
             return list(csv.DictReader(f))
 
+    # ════════════════════════════════════════════════════
+    # 【新增20260729】Performance Report — 自动摘要统计
+    # ════════════════════════════════════════════════════
+
+    def summary_stats(self) -> dict:
+        """返回全量交易统计摘要（用于 DailyPanel 或 Telegram 推送）。"""
+        all_rows = self.load_all()
+        closes = [r for r in all_rows if r["status"] == "CLOSE"]
+        total = len(closes)
+        if total == 0:
+            opens = [r for r in all_rows if r["status"] == "OPEN"]
+            return {
+                "total_trades": 0,
+                "total_closed": 0,
+                "open_positions": len(opens),
+                "wins": 0, "losses": 0, "winrate": 0,
+                "total_r": 0.0, "avg_r": 0.0,
+                "pf": 0.0, "best_r": 0.0, "worst_r": 0.0,
+                "exit_breakdown": {},
+                "regime_breakdown": {},
+                "daily_pnl": {},
+                "max_drawdown_r": 0.0,
+                "profit_factor": 0.0,
+            }
+
+        wins = 0
+        losses = 0
+        total_r = 0.0
+        best_r = -99.0
+        worst_r = 99.0
+        exit_bd: Dict[str, int] = {}
+        regime_bd: Dict[str, Dict] = {}
+        daily_pnl: Dict[str, float] = {}
+        equity_curve = [0.0]
+        max_dd = 0.0
+
+        for c in closes:
+            try:
+                pnl = float(c.get("pnl_r", 0) or 0)
+            except (ValueError, TypeError):
+                pnl = 0.0
+            if pnl > 0.2:
+                wins += 1
+            elif pnl < -0.2:
+                losses += 1
+            total_r += pnl
+            best_r = max(best_r, pnl)
+            worst_r = min(worst_r, pnl)
+
+            er = c.get("exit_reason", "?")
+            exit_bd[er] = exit_bd.get(er, 0) + 1
+
+            reg = c.get("regime", "?")
+            if reg not in regime_bd:
+                regime_bd[reg] = {"wins": 0, "losses": 0, "total": 0, "r": 0.0}
+            regime_bd[reg]["total"] += 1
+            regime_bd[reg]["r"] += pnl
+            if pnl > 0.2:
+                regime_bd[reg]["wins"] += 1
+            elif pnl < -0.2:
+                regime_bd[reg]["losses"] += 1
+
+            # 按天统计
+            try:
+                ct = c.get("close_time", "")
+                day = ct[:10] if len(ct) >= 10 else "?"
+                daily_pnl[day] = daily_pnl.get(day, 0.0) + pnl
+            except Exception:
+                pass
+
+            # 权益曲线 + 回撤
+            equity_curve.append(equity_curve[-1] + pnl)
+
+        for i in range(1, len(equity_curve)):
+            peak = max(equity_curve[:i])
+            dd = equity_curve[i] - peak
+            max_dd = min(max_dd, dd)
+
+        winrate = wins / max(wins + losses, 1) * 100
+        # 利润因子
+        gross_win = sum(
+            float(c.get("pnl_r", 0) or 0) for c in closes
+            if (float(c.get("pnl_r", 0) or 0)) > 0
+        )
+        gross_loss = abs(sum(
+            float(c.get("pnl_r", 0) or 0) for c in closes
+            if (float(c.get("pnl_r", 0) or 0)) < 0
+        ))
+        pf = round(gross_win / max(gross_loss, 0.0001), 2)
+        avg_r = round(total_r / max(total, 1), 4)
+
+        return {
+            "total_trades": len(all_rows),
+            "total_closed": total,
+            "open_positions": len([r for r in all_rows if r["status"] == "OPEN"]),
+            "wins": wins,
+            "losses": losses,
+            "winrate": round(winrate, 1),
+            "total_r": round(total_r, 2),
+            "avg_r": avg_r,
+            "best_r": round(best_r, 2),
+            "worst_r": round(worst_r, 2),
+            "profit_factor": pf,
+            "max_drawdown_r": round(max_dd, 2),
+            "exit_breakdown": exit_bd,
+            "regime_breakdown": regime_bd,
+            "daily_pnl": daily_pnl,
+        }
+
+    def generate_report(self) -> str:
+        """生成可读的性能报告文本（用于 Telegram 推送）。"""
+        s = self.summary_stats()
+        lines = [
+            "📊 **TradeJournal 性能报告**",
+            f"总交易: {s['total_trades']} 笔",
+            f"已平仓: {s['total_closed']} 笔 | 持仓中: {s['open_positions']} 笔",
+            f"胜: {s['wins']} 负: {s['losses']} | 胜率: {s['winrate']}%",
+            f"总R: {s['total_r']:+.2f} | 平均R: {s['avg_r']:+.4f}",
+            f"利润因子: {s['profit_factor']} | 最大回撤R: {s['max_drawdown_r']:+.2f}",
+            f"最佳R: {s['best_r']:+.2f} | 最差R: {s['worst_r']:+.2f}",
+            "",
+        ]
+        if s["exit_breakdown"]:
+            lines.append("**出场方式:**")
+            for er, cnt in sorted(s["exit_breakdown"].items(), key=lambda x: -x[1]):
+                lines.append(f"  {er}: {cnt}笔")
+            lines.append("")
+        if s["regime_breakdown"]:
+            lines.append("**行情分布:**")
+            for reg, rd in sorted(s["regime_breakdown"].items(), key=lambda x: -x[1]["r"]):
+                wr = rd["wins"] / max(rd["total"], 1) * 100
+                lines.append(f"  {reg}: {rd['total']}笔 WR={wr:.0f}% R={rd['r']:+.2f}")
+            lines.append("")
+        if s["daily_pnl"]:
+            lines.append("**每日盈亏(R):**")
+            for day, pnl in sorted(s["daily_pnl"].items()):
+                lines.append(f"  {day}: {pnl:+.2f}")
+        lines.append("")
+        lines.append("---")
+        lines.append(f"自动生成 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        return "\n".join(lines)
+
 
 # 全局单例
 journal = TradeJournal()

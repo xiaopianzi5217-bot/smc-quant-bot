@@ -44,12 +44,17 @@ class SmartPositionSizer:
 
     # ── 约束参数 ──
     MAX_POSITION = 0.15        # 最大仓位 15%
-    MIN_POSITION = 0.01        # 最小仓位 1%
+    MIN_POSITION = 0.005       # 最小仓位 0.5%（原 1%，允许 probe 更小）
     DEFAULT_BASE = 0.05        # 基础仓位 5%
 
     # Kelly 比例缩放（保守度）：实际使用 Kelly% * FRACTION
     # 1.0 = 全 Kelly（激进），0.25 = 1/4 Kelly（保守）
-    KELLY_FRACTION = 0.35      # 约 1/3 Kelly
+    KELLY_FRACTION = 0.25      # 约 1/4 Kelly（从 0.35 降低，更加保守）
+
+    # 【新增20260729】单笔最大风险（账户比例）
+    # 基于 ATR 自适应：当 ATR 比例较大时降低仓位
+    MAX_RISK_PER_TRADE = 0.01  # 单笔最大风险 1% 账户
+    TARGET_RISK_PER_TRADE = 0.005  # 目标风险 0.5% 账户
 
     # 连续亏损缩减参数
     CONS_LOSS_CUT = 0.80       # 每连续亏损一笔仓位乘以 0.8
@@ -97,6 +102,10 @@ class SmartPositionSizer:
         env_size_mult: float = 1.0,
         regime: str = "UNKNOWN",
         volatility: str = "normal",
+        atr_pct: float = 0.0,       # 【新增】ATR 百分比（当前 ATR / 价格）
+        account_balance: float = 1000.0,  # 【新增】账户余额
+        entry_price: float = 0.0,   # 【新增】入场价，用于计算风险金额
+        sl_price: float = 0.0,      # 【新增】止损价，用于计算风险比例
     ) -> dict:
         """计算最终仓位。
 
@@ -131,8 +140,39 @@ class SmartPositionSizer:
         # 4️⃣ 评分软缩减（与 score_grade 互补）
         score_mult = self._score_penalty(score)
 
+        # 5️⃣ 【新增20260729】ATR 自适应风险限制
+        #   当 ATR 百分比高于正常水平时，自动降低仓位
+        atr_mult = 1.0
+        if atr_pct > 0:
+            # 基准 ATR 比例 0.8% (BTC 15m 典型值)
+            _baseline_atr = 0.008
+            if atr_pct > _baseline_atr * 2:
+                atr_mult = max(0.3, _baseline_atr * 2 / atr_pct)
+            elif atr_pct > _baseline_atr * 1.5:
+                atr_mult = max(0.5, _baseline_atr * 1.5 / atr_pct)
+            elif atr_pct > _baseline_atr:
+                atr_mult = max(0.7, _baseline_atr / atr_pct)
+            # atr_pct <= 基线时 atr_mult = 1.0
+
+        # 6️⃣ 【新增20260729】单笔最大风险金额限制
+        risk_mult = 1.0
+        if entry_price > 0 and sl_price > 0 and account_balance > 0:
+            _risk_per_unit = abs(entry_price - sl_price) / entry_price  # 每元仓位的风险比例
+            if _risk_per_unit > 0:
+                # 根据目标风险反推仓位上限
+                _max_pos_for_risk = self.TARGET_RISK_PER_TRADE / _risk_per_unit
+                _abs_max_pos = self.MAX_RISK_PER_TRADE / _risk_per_unit
+                risk_mult = min(_max_pos_for_risk / max(base, 0.001), 1.0)
+                # 当风险比例很高时，强制缩减
+                if risk_mult < 0.3:
+                    # 风险过大，强烈降仓
+                    risk_mult = max(0.1, risk_mult)
+                    print(f"[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 过高, 强制缩减至 {risk_mult*100:.0f}%")
+                elif risk_mult < 0.6:
+                    print(f"[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 偏高, 缩减至 {risk_mult*100:.0f}%")
+
         # ── 最终计算 ──
-        raw_size = base * kelly_pct * grade_mult * env_mult * regime_mult * vol_mult * cons_loss_mult * score_mult
+        raw_size = base * kelly_pct * grade_mult * env_mult * regime_mult * vol_mult * cons_loss_mult * score_mult * atr_mult * risk_mult
         final_size = max(self.MIN_POSITION, min(self.MAX_POSITION, raw_size))
 
         # 保存状态
@@ -149,6 +189,8 @@ class SmartPositionSizer:
             "vol_mult": round(vol_mult, 4),
             "cons_loss_mult": round(cons_loss_mult, 4),
             "score_mult": round(score_mult, 4),
+            "atr_mult": round(atr_mult, 4),        # 【新增】ATR 自适应系数
+            "risk_mult": round(risk_mult, 4),      # 【新增】单笔风险限制系数
             "raw_size": round(raw_size, 4),
             "confidence": round(confidence, 4),
             "score": round(score, 2),

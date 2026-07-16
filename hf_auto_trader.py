@@ -115,6 +115,10 @@ _feature_learner = get_feature_learner()  # V21: Feature Learning Engine
 _panel = get_daily_panel()  # 每日监控面板
 _panel_today_sent = [False]  # mutable flag
 
+# ===== 【新增20260729】持仓恢复 + 强制日志标记 =====
+_RECOVERED_POSITIONS: bool = False  # 是否已执行重启恢复
+_FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open平仓日志
+
 # ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
 _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=55.0,
@@ -399,11 +403,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] 无有效方向")
         return None
     
-        # 用 exec_ctx 计算 entry quality（SMC 结构验证）
+            # 用 exec_ctx 计算 entry quality（SMC 结构验证）
     curr = df_exec.iloc[-1]
     entry_price = float(curr["close"])
     
-        # ===== V56.5 SL/TP 统一重算（不再依赖 enrich 阶段的 initial_sl 列） =====
+    # ===== V56.5 SL/TP 统一重算（不再依赖 enrich 阶段的 initial_sl 列） =====
     # V56.5《_execute_one_v565》使用 stop_dist 计算 SL/TP，逻辑正确。
     # 但 trades DataFrame 的 initial_sl 列可能来自 enrich 阶段的旧数据，
     # 导致 Long SL > entry 或 Short SL < entry 的错误。
@@ -420,12 +424,34 @@ async def scan_and_decide(symbol: str) -> dict | None:
         tp1 = entry_price - 1.00 * _stop_dist
         tp2 = entry_price - 1.80 * _stop_dist
         tp3 = entry_price - 2.80 * _stop_dist
-    rr = round(float(best.get("estimated_rr", 1.82)), 2)
+        rr = round(float(best.get("estimated_rr", 1.82)), 2)
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
     print(f"[{symbol}] V56.5 SL/TP 重算: direction={direction} entry={entry_price:.2f} "
           f"sl={sl:.2f} tp1={tp1:.2f} tp2={tp2:.2f} tp3={tp3:.2f} "
           f"stop_dist={_stop_dist:.2f} atr={_atr_val:.2f}")
+
+    # ===== 【新增20260729】Mud/低ADX Regime 强硬拦截 =====
+    _regime_raw = str(best.get("regime", "unknown")).strip().lower()
+    _adx_check = float(curr.get("ADX_14", exec_ctx.get("adx", 0)))
+    _strong_exception = bool(exec_ctx.get("strong_smc_exception", False))
+    # V9 classifier 对 mud 已标记 tradable=False（通过 squeeze / adx_weak），
+    # 但 select_v565_portfolio 可能绕过。这里自保：
+    if "mud" in _regime_raw or "chaos" in _regime_raw:
+        if _adx_check < 18:
+            # mud + 极低ADX：原则上不交易
+            if not _strong_exception:
+                print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 无强共振例外, 跳过")
+                return None
+            else:
+                # 有强共振例外 → 大幅降仓标记
+                print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 有强共振例外, 标记降仓")
+                result["_mud_cut"] = 0.3  # 仓位降至 30%
+        elif _adx_check < 25:
+            print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 25, 中等风险, 标记降仓")
+            result["_mud_cut"] = 0.5
+        else:
+            print(f"[{symbol}] Mud regime 但 ADX={_adx_check:.1f} >= 25, 允许交易")
 
     # ===== 【安全校验】重算后的 SL 方向合理性 =====
     if direction == "Long" and sl > entry_price:
@@ -1199,9 +1225,13 @@ def check_and_open(result: dict | None) -> bool:
     else:
                 print(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
 
-    # ===== 【SmartPositionSizer】智能仓位计算 =====
+        # ===== 【SmartPositionSizer】智能仓位计算 =====
     _calib = _fb_res.get("calibration", {})
     _sizer = get_smart_sizer()
+    # 【新增20260729】ATR 百分比 + 风险金额限制
+    _atr_pct = float(result.get("atr", 0)) / max(float(entry if entry > 0 else result.get("entry", 1)), 1e-8)
+    _entry_p = float(result.get("entry", 0))
+    _sl_p = float(result.get("sl", 0))
     _size_result = _sizer.calculate(
         score=score,
         confidence=result.get("confidence", 0.5),
@@ -1212,9 +1242,20 @@ def check_and_open(result: dict | None) -> bool:
         env_size_mult=float(_v37_size_mult),
         regime=str(result.get("regime", "UNKNOWN")),
         volatility=str(result.get("vol_state", "normal")),
+        atr_pct=_atr_pct,           # 【新增】ATR 自适应
+        account_balance=1000.0,     # 【新增】账户余额（默认1000 USDT）
+        entry_price=_entry_p,       # 【新增】入场价
+        sl_price=_sl_p,             # 【新增】止损价
     )
     result["size"] = _size_result["final_size"]
     result["_sizer"] = _size_result  # 调试用
+        # ===== 【新增20260729】Mud regime 额外降仓 =====
+    _mud_cut = result.get("_mud_cut", 1.0)
+    if _mud_cut < 1.0:
+        _size_result["final_size"] *= _mud_cut
+        _size_result["final_size"] = max(0.005, _size_result["final_size"])
+        print(f"[{symbol}] Mud regime: 仓位额外缩减至 {_mud_cut*100:.0f}% -> final_size={_size_result['final_size']:.4f}")
+
     print(f"[{symbol}] SmartSizer: final_size={_size_result['final_size']:.4f} "
           f"(Kelly={_size_result['kelly_pct']:.3f} grade={_size_result['grade_mult']:.2f} "
           f"env={_size_result['env_mult']:.2f} regime={_size_result['regime_mult']:.2f} "
@@ -1769,12 +1810,89 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
 # ============================================================
 # 自动交易主循环
 # ============================================================
+async def _recover_positions():
+    """【新增20260729】启动时从 TradeJournal 恢复持仓追踪。
+    
+    当系统重启后，position_manager 丢失持仓数据，
+    但 TradeJournal 仍有 OPEN 记录。需恢复追踪。
+    """
+    global _RECOVERED_POSITIONS
+    if _RECOVERED_POSITIONS:
+        return
+    _RECOVERED_POSITIONS = True
+
+    try:
+        open_positions = trade_journal.get_open_positions()
+        if not open_positions:
+            print("[恢复持仓] TradeJournal 无 OPEN 记录")
+            return
+        print(f"[恢复持仓] TradeJournal 发现 {len(open_positions)} 笔 OPEN 记录")
+        for op in open_positions:
+            symbol = op.get("symbol", "")
+            oid = op.get("order_id", "")
+            direction = op.get("direction", "")
+            if not symbol or not oid:
+                continue
+            # 如果 position_manager 已存在（正常重启后写了持久化），跳过
+            if position_manager.exists(symbol):
+                print(f"[恢复持仓] {symbol} 已在 position_manager 中，跳过")
+                continue
+            # 从 CSV 重建持仓信息
+            try:
+                entry = float(op.get("open_price", 0))
+                sl = float(op.get("sl", 0))
+                tp1 = float(op.get("tp1", 0))
+                tp2 = float(op.get("tp2", 0))
+                tp3 = float(op.get("tp3", 0))
+                score = float(op.get("score", 0))
+                regime = op.get("regime", "UNKNOWN")
+            except (ValueError, TypeError):
+                continue
+            if entry <= 0 or sl <= 0:
+                continue
+            # 重建 position
+            position_manager.update(symbol, {
+                "direction": direction,
+                "entry": entry,
+                "current_sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "stage": 0,
+                "sl_hit": False,
+                "last_sl_msg": "",
+                "order_id": oid,
+                "open_score": score,
+                "open_confidence": 0.5,
+                "open_regime": regime,
+                "open_features": ["RECOVERED"],
+            })
+            print(f"[恢复持仓] ✅ {symbol} {direction} @ {entry} order_id={oid}")
+    except Exception as e:
+        print(f"[恢复持仓] 异常: {e}")
+        traceback.print_exc()
+
+
 async def main_loop():
     """
     自动交易主循环：定期扫描信号并执行
     """
     print("[hf_auto_trader] 自动信号扫描主循环已启动...")
     await asyncio.sleep(5)  # 启动缓冲
+    
+    # ===== 【新增20260729】启动时恢复持仓 =====
+    await _recover_positions()
+    
+    # ===== 【新增20260729】强制输出历史性能报告 =====
+    if not _RECOVERED_POSITIONS:
+        pass  # 已在 _recover_positions 中执行
+    try:
+        _report_text = trade_journal.generate_report()
+        print(f"[性能报告]\n{_report_text}")
+        # 强制推送一次报告到 Telegram
+        safe_send(f"📊 【启动时性能报告】\n{_report_text}")
+    except Exception as _rep_e:
+        print(f"[性能报告] 生成失败: {_rep_e}")
 
     while True:
         try:
@@ -1863,6 +1981,43 @@ async def main_loop():
 
                                         # ---- 【第 2 步】Strategy 开单推送 ----
                     check_and_open(result)
+
+                    # ---- 【持仓强制平仓检查】TradeJournal OPEN 但 position_manager 无记录 ----
+            try:
+                _tj_opens = trade_journal.get_open_positions()
+                if _tj_opens and all_positions:
+                    for _tj_pos in _tj_opens:
+                        _sym = _tj_pos.get("symbol", "")
+                        _oid = _tj_pos.get("order_id", "")
+                        if _sym and _sym not in all_positions:
+                            # position_manager 已丢失记录，强制查价格
+                            _forced_price = _fetch_ticker_price(_sym)
+                            if _forced_price and _forced_price > 0:
+                                # 用 open_price 和 sl 判断盈亏
+                                try:
+                                    _e = float(_tj_pos.get("open_price", 0))
+                                    _s = float(_tj_pos.get("sl", 0))
+                                    _d = _tj_pos.get("direction", "")
+                                    _risk = abs(_e - _s) if _s != _e else 1
+                                    if _d == "Long":
+                                        _pnl = (_forced_price - _e) / _risk
+                                        _hit_sl = _forced_price <= _s
+                                    else:
+                                        _pnl = (_e - _forced_price) / _risk
+                                        _hit_sl = _forced_price >= _s
+                                    _reason = "SL" if _hit_sl else "FORCE_CLOSE"
+                                    trade_journal.close_trade(
+                                        order_id=_oid,
+                                        close_price=_forced_price,
+                                        pnl_r=_pnl,
+                                        exit_reason=_reason,
+                                        note="position_manager恢复丢失-强制平仓",
+                                    )
+                                    print(f"[强制平仓] {_sym} {_oid} {_reason} @ {_forced_price} R={_pnl:.2f}")
+                                except Exception as _fe:
+                                    print(f"[强制平仓] 异常: {_fe}")
+            except Exception as _force_e:
+                print(f"[强制平仓检查] 异常: {_force_e}")
 
             # ---- 【每日监控面板】跨日数据报告 ----
             try:

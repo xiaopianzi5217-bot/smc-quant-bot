@@ -1,9 +1,10 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """线程安全的全局持仓管理器，带文件持久化"""
 import threading
 import json
 import os
 import atexit
+import traceback
 
 POSITIONS_FILE = "state/managed_positions.json"
 
@@ -31,16 +32,23 @@ class PositionManager:
                 print(f"[PositionManager] 加载持久化文件失败: {exc}，使用空字典")
 
     def _save(self):
-        """写入文件持久化"""
+        """写入文件持久化（全面异常防护）"""
         if not self._dirty:
             return
         try:
             os.makedirs(os.path.dirname(self._persist_path) or ".", exist_ok=True)
-            with open(self._persist_path, "w", encoding="utf-8") as f:
-                json.dump(self._positions, f, ensure_ascii=False, indent=2, default=str)
+            # 先序列化到字符串再写文件，捕获所有序列化异常
+            serialized = json.dumps(
+                self._positions, ensure_ascii=False, indent=2, default=str
+            )
+            with open(self._persist_path + ".tmp", "w", encoding="utf-8") as f:
+                f.write(serialized)
+            # 原子替换
+            os.replace(self._persist_path + ".tmp", self._persist_path)
             self._dirty = False
-        except OSError as exc:
+        except Exception as exc:
             print(f"[PositionManager] 持久化写入失败: {exc}")
+            traceback.print_exc()
 
     def _save_at_exit(self):
         """程序退出时强制保存"""
