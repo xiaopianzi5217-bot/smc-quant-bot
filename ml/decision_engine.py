@@ -126,7 +126,10 @@ class MLDecisionEngine:
         Returns:
             True 训练成功
         """
-        df = self._feature_pipeline.build_training_set(min_samples=30)
+        # 首次训练（模型未训练时），包含回测数据
+        include_bt = not self._probability_engine.is_ready()
+        df = self._feature_pipeline.build_training_set(min_samples=30,
+                                                        include_backtest=include_bt)
         if df is None:
             logger.info("无新训练数据")
             return False

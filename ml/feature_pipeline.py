@@ -29,9 +29,15 @@ logger = logging.getLogger("FeaturePipeline")
 JOURNAL_PATH = Path("logs/trade_journal.csv")
 FEATURE_STORE_PATH = Path("data/feature_store.json")
 
+# 回测 CSV 路径（用于初始训练）
+BACKTEST_CSV_PATHS = [
+    Path("data/backtest_v56_5_stable.csv"),
+    Path("data/backtest_v56_5.csv"),
+]
+
 
 class FeaturePipeline:
-    """特征工程管线：从原始日志提取 ML 训练集。"""
+    """特征工程管线：从 TradeJournal + FeatureStore + 回测数据提取训练集。"""
 
     def __init__(self):
         self._cache: Optional[pd.DataFrame] = None
@@ -40,22 +46,33 @@ class FeaturePipeline:
     # 公共方法
     # ════════════════════════════════════════════════════════════
 
-    def build_training_set(self, min_samples: int = 50) -> Optional[pd.DataFrame]:
+    def build_training_set(self, min_samples: int = 50,
+                           include_backtest: bool = True) -> Optional[pd.DataFrame]:
         """构建完整训练集。
 
         流程：
           1. 从 TradeJournal 加载已平仓交易
           2. 从 FeatureStore 补充 features
-          3. 构建特征 + label 矩阵
-          4. 返回 DataFrame 或 None（样本不足）
+          3. 从回测 CSV 加载历史数据（首次训练时补充样本）
+          4. 构建特征 + label 矩阵
+          5. 返回 DataFrame 或 None（样本不足）
 
         Args:
             min_samples: 最少样本数，不足则返回 None
+            include_backtest: 是否包含回测数据（首次训练用）
 
         Returns:
             DataFrame 或 None
         """
         closes = self._load_closed_trades()
+        logger.info(f"TradeJournal 已平仓: {len(closes)} 笔")
+
+        # 如果实时数据不足且允许使用回测数据，从回测 CSV 加载
+        if len(closes) < min_samples and include_backtest:
+            backtest_rows = self._load_backtest_csv()
+            logger.info(f"回测 CSV 加载: {len(backtest_rows)} 笔")
+            closes = closes + backtest_rows
+
         if len(closes) < min_samples:
             logger.info(f"训练样本不足: {len(closes)} < {min_samples}")
             return None
@@ -66,7 +83,10 @@ class FeaturePipeline:
         df = self._create_labels(df)
 
         logger.info(f"训练集构建完成: {len(df)} 样本, {len(df.columns)} 列")
+
+        # 缓存特征列名供实时推理使用
         self._cache = df
+
         return df
 
     def get_live_features(self, exec_ctx: dict, curr_row: dict,
@@ -105,6 +125,7 @@ class FeaturePipeline:
             "volume_ratio", "atr_pct",
             "regime_trend", "regime_chop", "regime_transition",
             "sqzmom_state",
+            "trend_strength", "vol_z",
             "vwap_distance", "adx", "rsi",
             "entry_hour", "weekday",
         ]
@@ -112,6 +133,72 @@ class FeaturePipeline:
     # ════════════════════════════════════════════════════════════
     # 内部方法 - 数据加载
     # ════════════════════════════════════════════════════════════
+
+    def _load_backtest_csv(self) -> List[Dict[str, Any]]:
+        """从回测 CSV 加载历史交易作为训练数据。
+
+        回测 CSV 的列结构（以 v56_5_stable 为例）：
+          idx, datetime, date, setup_type, direction, score, rank_score,
+          reasons, rsi, trend_strength, vol_z, body_pct, hour, dow,
+          tier, regime, ..., pnl_r
+
+        映射到 FeaturePipeline 格式：
+          pnl_r      → pnl_r
+          score      → score
+          regime     → regime
+          direction  → direction
+          rsi        → rsi
+          hour       → entry_hour
+          dow        → weekday
+          datetime   → open_time
+        """
+        for csv_path in BACKTEST_CSV_PATHS:
+            if csv_path.exists():
+                try:
+                    rows = []
+                    with open(csv_path, "r", encoding="utf-8") as f:
+                        for row in csv.DictReader(f):
+                            pnl = self._safe_float(row.get("pnl_r", 0))
+                            if pnl == 0:
+                                continue  # 去掉盈亏为 0 的样本
+                            mapped = {
+                                "order_id": f"backtest_{row.get('idx', '?')}_{csv_path.stem}",
+                                "symbol": "BTC/USDT",
+                                "direction": row.get("direction", ""),
+                                "pnl_r": pnl,
+                                "exit_reason": "BT_CLOSE",
+                                "open_time": row.get("datetime", ""),
+                                "close_time": "",
+                                "open_price": self._safe_float(row.get("entry_price", 0)),
+                                "close_price": 0,
+                                "volume": 0,
+                                "score": self._safe_float(row.get("score", 0)),
+                                "regime": row.get("regime", ""),
+                                # 从回测 CSV 的列直接映射
+                                "adx": self._safe_float(row.get("adx", 0)),
+                                "atr": 0,
+                                "rsi": self._safe_float(row.get("rsi", 50)),
+                                "volume_ratio": 1.0,
+                                "div_count": 0,
+                                "signal_age": 0,
+                                "mfe": self._safe_float(row.get("max_mfe_r", 0)),
+                                "mae": self._safe_float(row.get("max_mae_r", 0)),
+                                "entry_price_level": "",
+                                # 回测特有字段（用于特征工程）
+                                "setup_type": row.get("setup_type", ""),
+                                "trend_strength": self._safe_float(row.get("trend_strength", 0)),
+                                "vol_z": self._safe_float(row.get("vol_z", 0)),
+                                "body_pct": self._safe_float(row.get("body_pct", 0)),
+                                "tier": row.get("tier", ""),
+                            }
+                            rows.append(mapped)
+                    if rows:
+                        logger.info(f"回测数据加载: {csv_path} → {len(rows)} 笔")
+                        return rows
+                except Exception as e:
+                    logger.warning(f"回测 CSV 加载失败 {csv_path}: {e}")
+
+        return []
 
     def _load_closed_trades(self) -> List[Dict[str, Any]]:
         """从 TradeJournal 加载已平仓交易。"""
@@ -198,16 +285,38 @@ class FeaturePipeline:
             0.0,
         )
 
-        # 2. smc_quality — 从 entry_price_level 提取
-        #    bsl=xxx_ssl=xxx → 有 BSL/SSL 数据表示结构质量好
-        df["smc_quality"] = df["entry_price_level"].apply(
-            lambda x: 1.0 if x and ("bsl" in str(x) or "ssl" in str(x)) else 0.5
-        )
+        # 2. smc_quality — 从 entry_price_level 或 setup_type 提取
+        #    回测数据有 setup_type 列
+        if "setup_type" in df.columns:
+            # 回测数据：setup_type=LIQUIDITY_SWEEP/CHOCH=高质量
+            _setup_score = {
+                "LIQUIDITY_SWEEP": 1.0,
+                "CHOCH": 1.0,
+                "BOS": 0.8,
+                "SQUEEZE_RELEASE": 0.8,
+                "FVG_TOUCH": 0.7,
+                "WEAK_BOS": 0.5,
+                "SQZMOM": 0.6,
+            }
+            df["smc_quality"] = df["setup_type"].apply(
+                lambda x: _setup_score.get(str(x).upper().strip(), 0.5)
+            )
+        else:
+            # 实时数据：从 entry_price_level 推断
+            df["smc_quality"] = df["entry_price_level"].apply(
+                lambda x: 1.0 if x and ("bsl" in str(x) or "ssl" in str(x)) else 0.5
+            )
 
-        # 3. fvg_strength / ob_strength — 从 FeatureStore 的额外字段推断
-        #    暂用 div_count 作为结构信号强度的代理
-        df["fvg_strength"] = np.clip(df["div_count"] * 0.3, 0, 1)
-        df["ob_strength"] = np.clip(df["div_count"] * 0.2, 0, 1)
+        # 3. fvg_strength / ob_strength
+        #    回测数据有 tier 列（tier=1=强信号）
+        if "tier" in df.columns:
+            _tier = pd.to_numeric(df["tier"], errors="coerce").fillna(0)
+            df["fvg_strength"] = np.clip(_tier * 0.3, 0, 1)
+            df["ob_strength"] = np.clip(_tier * 0.25, 0, 1)
+        else:
+            # 实时数据从 div_count 推断
+            df["fvg_strength"] = np.clip(df["div_count"] * 0.3, 0, 1)
+            df["ob_strength"] = np.clip(df["div_count"] * 0.2, 0, 1)
 
         # 4. regime 独热编码
         for reg in ["TREND", "CHOP", "TRANSITION", "MUD", "CRISIS_RISK_OFF"]:
@@ -218,25 +327,45 @@ class FeaturePipeline:
         # 5. sqzmom_state — 从 signal_age 近似（>0 表示有信号）
         df["sqzmom_state"] = (df["signal_age"] > 0).astype(float)
 
-        # 6. vwap_distance — 从 entry_price_level 提取
-        #    没有 VWAP 数据时用 0
+        # 6. trend_strength / vol_z — 回测数据特有
+        if "trend_strength" in df.columns:
+            df["trend_strength"] = df["trend_strength"].fillna(0.0)
+        else:
+            df["trend_strength"] = 0.0
+        if "vol_z" in df.columns:
+            df["vol_z"] = df["vol_z"].fillna(0.0)
+        else:
+            df["vol_z"] = 0.0
+
+        # 7. vwap_distance — 无 VWAP 数据时用 0
         df["vwap_distance"] = 0.0
 
-        # 7. entry_hour — 从 open_time 提取
-        df["entry_hour"] = pd.to_numeric(
-            df["open_time"].str[11:13], errors="coerce"
-        ).fillna(12).astype(int)
+        # 7. entry_hour
+        if "hour" in df.columns:
+            # 回测数据已有 hour 列
+            df["entry_hour"] = pd.to_numeric(df["hour"], errors="coerce").fillna(12).astype(int)
+        else:
+            # 实时数据从 open_time 提取
+            df["entry_hour"] = pd.to_numeric(
+                df["open_time"].str[11:13], errors="coerce"
+            ).fillna(12).astype(int)
 
         # 8. weekday
-        df["weekday"] = pd.to_numeric(
-            pd.to_datetime(df["open_time"], errors="coerce").dt.weekday,
-            errors="coerce",
-        ).fillna(0).astype(int)
+        if "dow" in df.columns:
+            # 回测数据已有 dow 列
+            df["weekday"] = pd.to_numeric(df["dow"], errors="coerce").fillna(0).astype(int)
+        else:
+            # 实时数据从 open_time 计算
+            df["weekday"] = pd.to_numeric(
+                pd.to_datetime(df["open_time"], errors="coerce").dt.weekday,
+                errors="coerce",
+            ).fillna(0).astype(int)
 
         # 9. 填充缺失值
         fill_cols = [
             "smc_quality", "fvg_strength", "ob_strength",
             "volume_ratio", "atr_pct",
+            "trend_strength", "vol_z",
             "vwap_distance", "adx", "rsi",
         ]
         for col in fill_cols:
@@ -293,6 +422,8 @@ class FeaturePipeline:
                 or bool(exec_ctx.get("sqzmom_white_reversal_long", False))
                 or bool(exec_ctx.get("sqzmom_white_reversal_short", False))
             ),
+            "trend_strength": float(exec_ctx.get("trend_strength", 0)),
+            "vol_z": float(curr.get("vol_z", 0)),
         }
 
         # regime 独热编码
