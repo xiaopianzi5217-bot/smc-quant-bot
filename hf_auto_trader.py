@@ -1954,6 +1954,7 @@ async def main_loop():
     """
     自动交易主循环：定期扫描信号并执行
     """
+    global _ML_RETRAIN_COUNTER  # 【修复】声明全局变量，避免 += 1 时 UnboundLocalError
     print("[hf_auto_trader] 自动信号扫描主循环已启动...")
     await asyncio.sleep(5)  # 启动缓冲
     
@@ -2059,7 +2060,8 @@ async def main_loop():
                                         # ---- 【第 2 步】Strategy 开单推送 ----
                     check_and_open(result)
 
-                    # ---- 【持仓强制平仓检查】TradeJournal OPEN 但 position_manager 无记录 ----
+                                        # ---- 【持仓强制平仓检查】TradeJournal OPEN 但 position_manager 无记录 ----
+            all_positions = position_manager.get()  # 【修复】提前获取持仓，避免后面引用时未定义
             try:
                 _tj_opens = trade_journal.get_open_positions()
                 if _tj_opens and all_positions:
