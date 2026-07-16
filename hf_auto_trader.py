@@ -115,6 +115,14 @@ _feature_learner = get_feature_learner()  # V21: Feature Learning Engine
 _panel = get_daily_panel()  # 每日监控面板
 _panel_today_sent = [False]  # mutable flag
 
+# ===== 【新增20260729】ML Decision Engine (LightGBM 概率引擎) =====
+# 现有人工权重继续运行，ML 并行收集数据
+# 当训练数据足够后自动切入
+from ml.decision_engine import get_ml_decision, MLDecisionEngine
+_ML_DECISION = get_ml_decision()
+_ML_FIRST_EVAL = True  # 标记是否首次评估（用于日志）
+_ML_RETRAIN_COUNTER = 0  # 重训计数器
+
 # ===== 【新增20260729】持仓恢复 + 强制日志标记 =====
 _RECOVERED_POSITIONS: bool = False  # 是否已执行重启恢复
 _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open平仓日志
@@ -535,6 +543,26 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
     if _blended_ev != ev:
         print(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
+
+        # ===== 【V60 ML Decision Engine】LightGBM 概率评估（并行） =====
+    _ml_score, _ml_ev, _ml_conf, _ml_active = _ML_DECISION.evaluate(
+        exec_ctx=exec_ctx,
+        curr_row=curr,
+        regime=_regime_name,
+        features_dict=_features,
+        direction=direction,
+    )
+    if _ml_active:
+        # ML 主管线评估
+        _ml_prob = _ml_score / 100.0
+        print(f"[{symbol}] ML引擎: P(win)={_ml_prob:.3f} EV={_ml_ev:.4f} "
+              f"conf={_ml_conf:.3f} score={_ml_score:.1f}")
+        # 如果 ML 概率 < 0.45，标记低置信度
+        if _ml_prob < 0.45:
+            print(f"[{symbol}] ML引擎 低概率: {_ml_prob:.3f} < 0.45, 标记降仓")
+            _mud_cut_override = min(_mud_cut_override, 0.5)
+    else:
+        print(f"[{symbol}] ML引擎: 降级模式(人工权重) score={_ml_score:.1f}")
 
     # ===== 【闭环】FeedbackLoop 信号评估 =====
     _fb_features, _fb_raw_scores = _feedback.get_signal_features(
@@ -2073,6 +2101,17 @@ async def main_loop():
                 _panel.try_send_report(safe_send, _panel_today_sent)
             except Exception as _panel_report_e:
                 print(f"[DailyPanel] 报告推送异常: {_panel_report_e}")
+
+            # ---- 【ML 后台重训】每 10 轮执行一次 ----
+            _ML_RETRAIN_COUNTER += 1
+            if _ML_RETRAIN_COUNTER >= 10:
+                _ML_RETRAIN_COUNTER = 0
+                try:
+                    _retrained = _ML_DECISION.retrain_if_needed()
+                    if _retrained:
+                        print("[ML引擎] ✅ 后台重训完成，已切换到 ML 主管线")
+                except Exception as _ml_retrain_e:
+                    print(f"[ML引擎] 重训异常: {_ml_retrain_e}")
 
             # ---- 【第 3 步】持仓追踪 ----
             try:
