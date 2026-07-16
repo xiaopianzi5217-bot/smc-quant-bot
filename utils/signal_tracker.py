@@ -27,7 +27,7 @@ class SignalTracker:
         tracker.update_outcome(signal_id, final_r=1.5, bars_5_r=0.8, bars_10_r=1.2)
     """
 
-    def __init__(self, log_file="signal_outcomes.jsonl"):
+    def __init__(self, log_file="logs/signal_outcomes.jsonl"):
         self.log_file = log_file
 
     def record_signal(self, signal: dict) -> str:

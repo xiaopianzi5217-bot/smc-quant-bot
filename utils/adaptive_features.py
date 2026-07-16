@@ -22,7 +22,7 @@ class AdaptiveFeatureWeighter:
         weighted = weighter.get_weighted_score({"OB": 10, "SQZMOM": 8})
     """
 
-    def __init__(self, window=200, save_path="feature_stats.json"):
+    def __init__(self, window=200, save_path="data/feature_stats.json"):
         self.window = window
         self.save_path = save_path
         self.feature_stats = self._load_stats()

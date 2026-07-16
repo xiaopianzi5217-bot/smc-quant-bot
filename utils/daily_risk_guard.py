@@ -20,7 +20,7 @@ class DailyRiskGuard:
             guard.on_trade_closed(r=1.5, equity_change=0.01)
     """
 
-    def __init__(self, save_path="daily_risk_state.json"):
+    def __init__(self, save_path="data/daily_risk_state.json"):
         self.save_path = save_path
         self._load_or_reset()
 

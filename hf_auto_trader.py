@@ -108,7 +108,7 @@ _POSTHOC_CLOSE_BUFFER: dict = {}  # signal_id -> {future_prices, entry, sl, dire
 # ---------- 工具实例（全局单例） ----------
 _weighter = AdaptiveFeatureWeighter()
 _calibrator = ProbabilityCalibrator()
-_tracker = SignalTracker()
+_tracker = SignalTracker("logs/signal_outcomes.jsonl")
 _risk_guard = DailyRiskGuard()
 _feedback = FeedbackLoop()  # 全链路反馈闭环引擎
 _feature_learner = get_feature_learner()  # V21: Feature Learning Engine
