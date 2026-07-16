@@ -1,0 +1,17 @@
+{
+    "smc_score": 1.0,
+    "ob_quality": 1.0,
+    "fvg_quality": 1.0,
+    "sqzmom_state": 1.0,
+    "volume_ratio": 1.0,
+    "atr_pct": 1.0,
+    "vwap_distance": 1.0,
+    "regime": 1.0,
+    "liquidity_sweep": 1.0,
+    "cho_ch": 1.0,
+    "divergence": 1.0,
+    "momentum": 1.0,
+    "structure_break": 1.0,
+    "ema_alignment": 1.0,
+    "squeeze_release": 1.0
+}

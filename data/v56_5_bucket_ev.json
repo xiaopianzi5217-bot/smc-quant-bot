@@ -1,0 +1,44 @@
+{
+  "mixed_HIGH": {
+    "trades": 124,
+    "win_rate": 0.6129,
+    "pf": 1.5278,
+    "avg_r": 0.2171,
+    "bucket_ev": 0.6584
+  },
+  "mixed_MID": {
+    "trades": 2,
+    "win_rate": 1.0,
+    "pf": 999.0,
+    "avg_r": 1.015,
+    "bucket_ev": 1.75
+  },
+  "range_HIGH": {
+    "trades": 91,
+    "win_rate": 0.6374,
+    "pf": 1.4474,
+    "avg_r": 0.1731,
+    "bucket_ev": 0.7274
+  },
+  "range_MID": {
+    "trades": 2,
+    "win_rate": 0.5,
+    "pf": 0.2617,
+    "avg_r": -0.395,
+    "bucket_ev": 0.34
+  },
+  "trend_HIGH": {
+    "trades": 163,
+    "win_rate": 0.6196,
+    "pf": 1.3124,
+    "avg_r": 0.1265,
+    "bucket_ev": 0.6774
+  },
+  "trend_MID": {
+    "trades": 1,
+    "win_rate": 1.0,
+    "pf": 999.0,
+    "avg_r": 1.75,
+    "bucket_ev": 1.75
+  }
+}
