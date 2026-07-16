@@ -72,8 +72,12 @@ class MicroExecutionGuard:
         Returns:
             True  → 微观环境支持
             False → 微观环境不支持
-            None  → 数据不足（超过 5 秒未更新）
+            None  → 数据不足（超过 5 秒未更新/脏数据/未初始化）
         """
+        # ---- 新增：检查脏数据标志 ----
+        if self._state.get("is_stale", True):
+            return None
+
         obi = self._state.get("obi", 0.0)
         ts = self._state.get("ts", 0.0)
 

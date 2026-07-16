@@ -32,9 +32,14 @@ except ImportError:
 
 BITGET_WS_URL = "wss://ws.bitget.com/v2/ws/public"
 DEFAULT_SYMBOL = "BTCUSDT"
-RECONNECT_DELAY = 5.0
-RECONNECT_MAX = 30.0
+RECONNECT_DELAY_BASE = 5.0      # 基础重连等待（秒）
+RECONNECT_MAX = 60.0            # 最大重连等待
+RECONNECT_MAX_ATTEMPTS = 20     # 最大重连次数后放弃
+HEARTBEAT_INTERVAL = 15.0       # 心跳检查间隔（秒）
+HEARTBEAT_TIMEOUT = 25.0        # 超过此时间无 Pong 则主动断开
 INST_TYPE = "USDT-FUTURES"
+BOOKS_TOPIC = "books"
+TRADE_TOPIC = "trade"
 
 
 class MicroFeeder:
@@ -44,50 +49,172 @@ class MicroFeeder:
             "obi": 0.0, "cvd": 0.0, "ts": 0.0, "price": 0.0,
             "bids": 0.0, "asks": 0.0, "tick_count": 0,
             "symbol": self.symbol,
+            "is_stale": False,      # 数据是否已过时（断连后标记）
+            "error_code": "",       # 最后一次错误码
         }
         self._cvd_current: float = 0.0
         self._last_price: float = 0.0
         self._tick_count: int = 0
         self._has_initial_depth: bool = False
 
+        # ---- 重连控制 ----
+        self._retry_count: int = 0
+
+        # ---- 心跳控制 ----
+        self._last_pong_ts: float = time.time()
+        self._heartbeat_task = None
+
         if websockets is None:
             raise ImportError("websockets is required. Run: pip install websockets>=11.0.3")
 
     async def run(self):
-        print(f"[MicroFeeder] 正在连接 Bitget WS: {self.symbol}")
-        retry = 1
-        while True:
+        print(f"[MicroFeeder] 启动: {self.symbol}")
+        while self._retry_count < RECONNECT_MAX_ATTEMPTS:
             try:
                 async with websockets.connect(
-                    BITGET_WS_URL, ping_interval=15, close_timeout=3
+                    BITGET_WS_URL,
+                    ping_interval=HEARTBEAT_INTERVAL,
+                    ping_timeout=HEARTBEAT_TIMEOUT,
+                    close_timeout=3,
+                    max_size=2**20,   # 1 MB 消息上限
                 ) as ws:
                     print(f"[MicroFeeder] Bitget WS 已连接: {self.symbol}")
-                    retry = 1  # 重置重试计数
+                    self._retry_count = 0
+                    self.state["is_stale"] = True
+                    self.state["error_code"] = ""
+
+                    # ---- 发送订阅 ----
                     subscribe_msg = {
                         "op": "subscribe",
                         "args": [
-                            {"instType": INST_TYPE, "channel": "books", "instId": self.symbol},
-                            {"instType": INST_TYPE, "channel": "trade", "instId": self.symbol},
+                            {"instType": INST_TYPE, "channel": BOOKS_TOPIC, "instId": self.symbol},
+                            {"instType": INST_TYPE, "channel": TRADE_TOPIC, "instId": self.symbol},
                         ],
                     }
                     await ws.send(json.dumps(subscribe_msg))
                     print("[MicroFeeder] 已发送订阅: books + trade")
+
+                    # ---- 启动独立心跳监控 ----
+                    if self._heartbeat_task is None or self._heartbeat_task.done():
+                        self._last_pong_ts = time.time()
+                        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+                    # ---- 消息循环 ----
                     async for raw_message in ws:
                         self._process_message(json.loads(raw_message))
 
             except asyncio.CancelledError:
                 print("[MicroFeeder] 协程已取消")
+                self._cancel_heartbeat()
                 return
-            except Exception:
-                wait = min(RECONNECT_DELAY * retry, RECONNECT_MAX)
-                print(f"[MicroFeeder] WS 断开，{wait:.0f}s 后重连 (第{retry}次)...")
-                retry += 1
+
+            except websockets.exceptions.ConnectionClosed as e:
+                self._retry_count += 1
+                wait = self._backoff_wait()
+                print(f"[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), "
+                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                self.state["error_code"] = f"CLOSE_{e.code}"
+                self._mark_stale()
                 await asyncio.sleep(wait)
 
+            except (OSError, TimeoutError, asyncio.TimeoutError) as e:
+                self._retry_count += 1
+                wait = self._backoff_wait()
+                print(f"[MicroFeeder] 网络异常 ({type(e).__name__}), "
+                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                self.state["error_code"] = f"NET_{type(e).__name__}"
+                self._mark_stale()
+                await asyncio.sleep(wait)
+
+            except websockets.exceptions.InvalidStatus as e:
+                # Bitget 返回 HTTP 错误 —— 致命，不重试
+                print(f"[MicroFeeder] 致命 HTTP 错误: {e.response.status_code}")
+                self.state["error_code"] = f"HTTP_{e.response.status_code}"
+                await self._alert_fatal(f"Bitget WS 返回 HTTP {e.response.status_code}")
+                return
+
+            except Exception as e:
+                self._retry_count += 1
+                wait = self._backoff_wait()
+                err_name = type(e).__name__
+                print(f"[MicroFeeder] 未知异常 ({err_name}): {e}, "
+                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                self.state["error_code"] = f"UNKNOWN_{err_name}"
+                self._mark_stale()
+                await asyncio.sleep(wait)
+
+        # 超过最大重连次数
+        print(f"[MicroFeeder] 已达到最大重连次数 ({RECONNECT_MAX_ATTEMPTS})，放弃")
+        self.state["error_code"] = "MAX_RETRY_EXCEEDED"
+        self._cancel_heartbeat()
+
+        # ============================================================
+    #  心跳独立监控
+    # ============================================================
+    async def _heartbeat_loop(self):
+        """独立心跳监控：websockets 库自带 ping/pong 机制，
+        但 Bitget 服务端可能在长时间无数据时主动踢人。
+        本监控检测：如果超过 HEARTBEAT_TIMEOUT 没收到任何数据（含 pong），
+        且不在重连中，则触发 fatal 告警。
+        """
+        _last_data_ts = time.time()
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                now = time.time()
+                # 如果超过 HEARTBEAT_TIMEOUT 没有收到任何数据
+                if now - self.state["ts"] > HEARTBEAT_TIMEOUT and self.state["ts"] > 0:
+                    print(f"[MicroFeeder] 数据静默超时 ({now - self.state['ts']:.0f}s > {HEARTBEAT_TIMEOUT}s)")
+                    self.state["error_code"] = "DATA_SILENT_TIMEOUT"
+        except asyncio.CancelledError:
+            pass
+
+    def _cancel_heartbeat(self):
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+
+    # ============================================================
+    #  标记 + 告警
+    # ============================================================
+    def _mark_stale(self):
+        """标记数据过时，暂停所有开单决策"""
+        self.state["is_stale"] = True
+        self._has_initial_depth = False
+
+    async def _alert_fatal(self, msg: str):
+        """致命错误时发 Telegram 告警并终止"""
+        print(f"[MicroFeeder] 致命错误: {msg}")
+        self.state["is_stale"] = True
+        self.state["error_code"] = "FATAL"
+        try:
+            from notifier.telegram import send_telegram
+            await asyncio.to_thread(send_telegram, f"⚠️ [MicroFeeder] {msg}\n{self.symbol} 数据源终止")
+        except Exception:
+            pass
+
+    # ============================================================
+    #  指数退避计算
+    # ============================================================
+    def _backoff_wait(self) -> float:
+        """指数退避：5s, 10s, 20s, 40s, 60s..."""
+        return min(RECONNECT_MAX, RECONNECT_DELAY_BASE * (2 ** (self._retry_count - 1)))
+
+    # ============================================================
+    #  数据快照 + 脏数据检测
+    # ============================================================
     def get_snapshot(self) -> Dict[str, Any]:
         return dict(self.state)
 
+    @property
+    def is_data_ready(self) -> bool:
+        """数据是否可用（非脏且有过初始深度快照）"""
+        return not self.state.get("is_stale", True) and self._has_initial_depth
+
+    # ============================================================
+    #  消息处理
+    # ============================================================
     def _process_message(self, data: Dict[str, Any]):
+        # ---- 事件类消息 ----
         if "event" in data:
             event = data.get("event", "")
             if event == "subscribe":
@@ -97,6 +224,13 @@ class MicroFeeder:
                 code = data.get("code", "")
                 msg_text = data.get("msg", "")
                 print(f"[MicroFeeder] 订阅错误: code={code} msg={msg_text}")
+                self.state["error_code"] = f"SUB_{code}"
+                # code=40001（签名错误）或 code=429（限流）—— 致命
+                if code in ("40001", "429"):
+                    asyncio.create_task(self._alert_fatal(f"订阅错误 code={code}: {msg_text}"))
+            elif event == "pong":
+                # Bitget 返回的是 event: pong
+                self._last_pong_ts = time.time()
             return
 
         arg = data.get("arg", {})
@@ -105,11 +239,19 @@ class MicroFeeder:
         if not raw_data:
             return
 
-        if channel == "books":
+        # ---- 收到数据说明连接正常，解除脏标记 ----
+        if self.state["is_stale"]:
+            self.state["is_stale"] = False
+            print(f"[MicroFeeder] 数据流恢复")
+
+        if channel == BOOKS_TOPIC:
             self._handle_depth(raw_data)
-        elif channel == "trade":
+        elif channel == TRADE_TOPIC:
             self._handle_trade(raw_data)
 
+    # ============================================================
+    #  深度 & 成交处理
+    # ============================================================
     def _handle_depth(self, data_list: list):
         for item in data_list:
             raw_bids = item.get("bids", [])
@@ -121,6 +263,7 @@ class MicroFeeder:
             total = bids_total + asks_total
             self.state["obi"] = round((bids_total - asks_total) / total, 4) if total > 0 else 0.0
             self.state["ts"] = time.time()
+
             if not self._has_initial_depth:
                 self._has_initial_depth = True
                 print(f"[MicroFeeder] 深度初始快照已接收: OBI={self.state['obi']:.4f}")
