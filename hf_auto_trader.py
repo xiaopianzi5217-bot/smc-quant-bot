@@ -403,7 +403,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] 无有效方向")
         return None
     
-            # 用 exec_ctx 计算 entry quality（SMC 结构验证）
+                # 用 exec_ctx 计算 entry quality（SMC 结构验证）
     curr = df_exec.iloc[-1]
     entry_price = float(curr["close"])
     
@@ -424,17 +424,18 @@ async def scan_and_decide(symbol: str) -> dict | None:
         tp1 = entry_price - 1.00 * _stop_dist
         tp2 = entry_price - 1.80 * _stop_dist
         tp3 = entry_price - 2.80 * _stop_dist
-        rr = round(float(best.get("estimated_rr", 1.82)), 2)
+    rr = round(float(best.get("estimated_rr", 1.82)), 2)
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
     print(f"[{symbol}] V56.5 SL/TP 重算: direction={direction} entry={entry_price:.2f} "
           f"sl={sl:.2f} tp1={tp1:.2f} tp2={tp2:.2f} tp3={tp3:.2f} "
           f"stop_dist={_stop_dist:.2f} atr={_atr_val:.2f}")
 
-    # ===== 【新增20260729】Mud/低ADX Regime 强硬拦截 =====
+        # ===== 【新增20260729】Mud/低ADX Regime 强硬拦截 =====
     _regime_raw = str(best.get("regime", "unknown")).strip().lower()
     _adx_check = float(curr.get("ADX_14", exec_ctx.get("adx", 0)))
     _strong_exception = bool(exec_ctx.get("strong_smc_exception", False))
+    _mud_cut_override = 1.0
     # V9 classifier 对 mud 已标记 tradable=False（通过 squeeze / adx_weak），
     # 但 select_v565_portfolio 可能绕过。这里自保：
     if "mud" in _regime_raw or "chaos" in _regime_raw:
@@ -446,10 +447,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
             else:
                 # 有强共振例外 → 大幅降仓标记
                 print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 有强共振例外, 标记降仓")
-                result["_mud_cut"] = 0.3  # 仓位降至 30%
+                _mud_cut_override = 0.3  # 仓位降至 30%
         elif _adx_check < 25:
             print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 25, 中等风险, 标记降仓")
-            result["_mud_cut"] = 0.5
+            _mud_cut_override = 0.5
         else:
             print(f"[{symbol}] Mud regime 但 ADX={_adx_check:.1f} >= 25, 允许交易")
 
@@ -561,8 +562,9 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] FeatureLearning: score={score:.1f} -> adjusted={_fl_final_score:.1f} "
               f"(weights={get_feature_learner().get_all_weights()})")
 
-    # 构建兼容返回格式
+        # 构建兼容返回格式
     return {
+        "_mud_cut": _mud_cut_override,  # mud regime 降仓系数
         "symbol": symbol,
         "direction": direction,
         "expected_value": round(ev, 4),
