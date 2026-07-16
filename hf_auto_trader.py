@@ -403,40 +403,36 @@ async def scan_and_decide(symbol: str) -> dict | None:
     curr = df_exec.iloc[-1]
     entry_price = float(curr["close"])
     
-    # 从 best row 读取 TP/SL
-    # V56.5 执行引擎的列名是 "initial_sl" 而不是 "sl"
-    sl = float(best.get("initial_sl", best.get("sl", 0)))
-    tp1 = float(best.get("tp1", 0))
-    tp2 = float(best.get("tp2", 0))
-    tp3 = float(best.get("tp3", 0))
-    rr = float(best.get("estimated_rr", 0))
+        # ===== V56.5 SL/TP 统一重算（不再依赖 enrich 阶段的 initial_sl 列） =====
+    # V56.5《_execute_one_v565》使用 stop_dist 计算 SL/TP，逻辑正确。
+    # 但 trades DataFrame 的 initial_sl 列可能来自 enrich 阶段的旧数据，
+    # 导致 Long SL > entry 或 Short SL < entry 的错误。
+    # 修复：直接重复 V56.5 公式算出 SL/TP，与交易引擎一致。
+    _atr_val = max(float(curr.get("ATRr_14", exec_ctx.get("atr", 0))), entry_price * 0.0025)
+    _stop_dist = max(0.80 * _atr_val, entry_price * 0.0025)
+    if direction == "Long":
+        sl = entry_price - _stop_dist
+        tp1 = entry_price + 1.00 * _stop_dist
+        tp2 = entry_price + 1.80 * _stop_dist
+        tp3 = entry_price + 2.80 * _stop_dist
+    else:  # Short
+        sl = entry_price + _stop_dist
+        tp1 = entry_price - 1.00 * _stop_dist
+        tp2 = entry_price - 1.80 * _stop_dist
+        tp3 = entry_price - 2.80 * _stop_dist
+    rr = round(float(best.get("estimated_rr", 1.82)), 2)
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
-    
-    # ===== 【修复20260714】Short SL 方向纠正 =====
-    # V56.5 执行引擎的 _execute_one_v565 计算 initial_sl 正确，但 select_v565_portfolio
-    # 返回的候选信号行可能包含自前任意的 initial_sl 值（来自 enrich 阶段）。
-    # 当 Short 的 sl < entry 时，说明 SL 方向反了，需要纠正。
-    if direction == "Short" and sl < entry_price:
-        # 用 V56.5 计算方式重新计算 SL
-        _atr_val = max(float(curr.get("ATRr_14", exec_ctx.get("atr", 0))), entry_price * 0.0025)
-        _stop_dist = max(0.80 * _atr_val, entry_price * 0.0025)
-        _correct_sl = entry_price + _stop_dist
-        print(f"[{symbol}] 纠正 Short SL: {sl:.2f} -> {_correct_sl:.2f} (entry={entry_price:.2f}, stop_dist={_stop_dist:.2f})")
-        sl = _correct_sl
-        # 同步纠正 tp1/tp2/tp3（Short TP 应在 entry 下方）
-        if tp1 > entry_price or tp1 == 0:
-            tp1 = entry_price - 1.00 * _stop_dist
-            tp2 = entry_price - 1.80 * _stop_dist
-            tp3 = entry_price - 2.80 * _stop_dist
-            print(f"[{symbol}] 纠正 Short TP: tp1={tp1:.2f}, tp2={tp2:.2f}, tp3={tp3:.2f}")
-    
-    # ===== 【修复20260715】SL方向校验：Long的SL不能>入场，Short的SL不能<入场 =====
+    print(f"[{symbol}] V56.5 SL/TP 重算: direction={direction} entry={entry_price:.2f} "
+          f"sl={sl:.2f} tp1={tp1:.2f} tp2={tp2:.2f} tp3={tp3:.2f} "
+          f"stop_dist={_stop_dist:.2f} atr={_atr_val:.2f}")
+
+    # ===== 【安全校验】重算后的 SL 方向合理性 =====
     if direction == "Long" and sl > entry_price:
-        print(f"[{symbol}] SL方向异常: Long SL({sl:.2f}) > 入场({entry_price:.2f}), 方向可能反了, 跳过")
+        print(f"[{symbol}] SL方向异常(重算后): Long SL({sl:.2f}) > 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
         return None
     if direction == "Short" and sl < entry_price:
-        print(f"[{symbol}] SL方向异常: Short SL({sl:.2f}) < 入场({entry_price:.2f}), 方向可能反了, 跳过")
+        print(f"[{symbol}] SL方向异常(重算后): Short SL({sl:.2f}) < 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
         return None
     
         # ===== 【修复20260715】K线颜色 + ADX方向一致性检查 =====
