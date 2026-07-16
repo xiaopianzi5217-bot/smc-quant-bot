@@ -1829,8 +1829,20 @@ async def _recover_positions():
             print("[恢复持仓] TradeJournal 无 OPEN 记录")
             return
         print(f"[恢复持仓] TradeJournal 发现 {len(open_positions)} 笔 OPEN 记录")
+        
+        # 【修复】position_manager 每 symbol 只支持一笔持仓
+        # 同一 symbol 多笔 OPEN 只取最新（open_time 最大）的那笔
+        _latest_per_symbol: dict[str, dict] = {}
         for op in open_positions:
-            symbol = op.get("symbol", "")
+            sym = op.get("symbol", "")
+            if not sym:
+                continue
+            t = op.get("open_time", "")
+            if sym not in _latest_per_symbol or t > _latest_per_symbol[sym].get("open_time", ""):
+                _latest_per_symbol[sym] = op
+        
+        restored_count = 0
+        for symbol, op in sorted(_latest_per_symbol.items()):
             oid = op.get("order_id", "")
             direction = op.get("direction", "")
             if not symbol or not oid:
@@ -1851,7 +1863,36 @@ async def _recover_positions():
             except (ValueError, TypeError):
                 continue
             if entry <= 0 or sl <= 0:
+                print(f"[恢复持仓] {symbol} 数据无效 entry={entry} sl={sl} 跳过")
                 continue
+            # 立即检查价格：如果价格已远超 SL，直接平仓
+            _live_price = _fetch_ticker_price(symbol)
+            _price_ok = True
+            if _live_price and _live_price > 0:
+                if direction == "Long" and _live_price <= sl:
+                    _price_ok = False
+                    _sl_hit = True
+                    _reason = "SL"
+                elif direction == "Short" and _live_price >= sl:
+                    _price_ok = False
+                    _sl_hit = True
+                    _reason = "SL"
+                else:
+                    _sl_hit = False
+                    _reason = ""
+                if _sl_hit:
+                    _risk_dist = abs(entry - sl) if sl != entry else 1
+                    _pnl_r = (_live_price - entry) / _risk_dist if direction == "Long" else (entry - _live_price) / _risk_dist
+                    trade_journal.close_trade(
+                        order_id=oid,
+                        close_price=_live_price,
+                        pnl_r=_pnl_r,
+                        exit_reason=_reason,
+                        note="恢复持仓-重启时已超SL",
+                    )
+                    print(f"[恢复持仓] {symbol} {direction} @ {entry} 重启时已超SL, 直接平仓 R={_pnl_r:.2f}")
+                    restored_count += 1
+                    continue
             # 重建 position
             position_manager.update(symbol, {
                 "direction": direction,
@@ -1870,6 +1911,12 @@ async def _recover_positions():
                 "open_features": ["RECOVERED"],
             })
             print(f"[恢复持仓] ✅ {symbol} {direction} @ {entry} order_id={oid}")
+            restored_count += 1
+        
+        if restored_count > 0:
+            print(f"[恢复持仓] 总计恢复/处理 {restored_count} 笔")
+            # 推送启动通知到 Telegram
+            safe_send(f"🔄 【启动恢复】已处理 {restored_count}/{len(_latest_per_symbol)} 笔持仓")
     except Exception as e:
         print(f"[恢复持仓] 异常: {e}")
         traceback.print_exc()
