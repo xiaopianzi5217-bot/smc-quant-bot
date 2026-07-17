@@ -340,15 +340,16 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
         traceback.print_exc()
         return traceback.format_exc()
 
-def _fetch_ticker_price(symbol: str) -> float | None:
-    import requests
+async def _fetch_ticker_price(symbol: str) -> float | None:
+    import httpx
     for attempt in range(3):
         try:
             sym_raw = normalize_swap_symbol(symbol)
             sym = sym_raw.split("/")[0] + sym_raw.split("/")[1].split(":")[0]
             url = "https://api.bitget.com/api/v2/mix/market/candles"
             params = {"symbol": sym, "productType": "umcbl", "granularity": "1m", "limit": 1}
-            resp = requests.get(url, params=params, timeout=15)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, params=params)
             if resp.status_code != 200:
                 continue
             data = resp.json()
@@ -359,8 +360,7 @@ def _fetch_ticker_price(symbol: str) -> float | None:
                 return float(bars[0][4])
         except Exception:
             if attempt < 2:
-                import time
-                time.sleep(1)
+                await asyncio.sleep(1)
                 continue
             return None
 
@@ -404,13 +404,15 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320) -> 
     import time as _time
     for attempt in range(3):
         try:
-            result = _do_fetch(verify_ssl=True)
+            # 🟢 修复：利用 to_thread 彻底释放异步主线程
+            result = await asyncio.to_thread(_do_fetch, True)
             if result is not None:
                 return result
         except Exception:
             pass
         try:
-            result = _do_fetch(verify_ssl=False)
+            # 🟢 修复：同样使用异步线程化处理 fallback
+            result = await asyncio.to_thread(_do_fetch, False)
             if result is not None:
                 return result
         except Exception:
@@ -1997,7 +1999,7 @@ async def _recover_positions():
                 print(f"[恢复持仓] {symbol} 数据无效 entry={entry} sl={sl} 跳过")
                 continue
             # 立即检查价格：如果价格已远超 SL，直接平仓
-            _live_price = _fetch_ticker_price(symbol)
+            _live_price = await _fetch_ticker_price(symbol)
             _price_ok = True
             if _live_price and _live_price > 0:
                 if direction == "Long" and _live_price <= sl:
@@ -2174,7 +2176,7 @@ async def main_loop():
                         _oid = _tj_pos.get("order_id", "")
                         if _sym and _sym not in tracked_symbols:
                             # position_manager 已丢失记录，强制查价格
-                            _forced_price = _fetch_ticker_price(_sym)
+                            _forced_price = await _fetch_ticker_price(_sym)
                             if _forced_price and _forced_price > 0:
                                 # 用 open_price 和 sl 判断盈亏
                                 try:
@@ -2213,7 +2215,7 @@ async def main_loop():
             if _ML_RETRAIN_COUNTER >= 10:
                 _ML_RETRAIN_COUNTER = 0
                 try:
-                    _retrained = _ML_DECISION.retrain_if_needed()
+                    _retrained = await asyncio.to_thread(_ML_DECISION.retrain_if_needed)
                     if _retrained:
                         print("[ML引擎] ✅ 后台重训完成，已切换到 ML 主管线")
                 except Exception as _ml_retrain_e:
@@ -2225,7 +2227,7 @@ async def main_loop():
                 if all_positions:
                     for sym, pos in list(all_positions.items()):
                         try:
-                            curr_price = _fetch_ticker_price(sym)
+                            curr_price = await _fetch_ticker_price(sym)
                             if curr_price is None or curr_price <= 0:
                                 print(f"[{sym}] 无法获取实时价格，跳过追踪")
                                 continue
