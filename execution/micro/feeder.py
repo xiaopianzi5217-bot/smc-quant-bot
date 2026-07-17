@@ -204,7 +204,7 @@ class MicroFeeder:
             while True:
                 await asyncio.sleep(PING_INTERVAL)
                 try:
-                    await ws.send(json.dumps({"op": "ping"}))
+                    await ws.send("ping")
                 except Exception:
                     pass
         except asyncio.CancelledError:
