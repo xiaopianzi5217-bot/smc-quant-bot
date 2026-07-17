@@ -141,7 +141,7 @@ if _bucket_ev_path.exists():
     except Exception as e:
         print(f"[V56_5_Engine] 加载 bucket_ev 失败: {e}")
 
-def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.DataFrame | None',
+def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: float, future_df: 'pd.DataFrame | None',
                     max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
     """用持仓期间的 K线数据计算最大顺向R / 最大逆向R / 最终R。
 
@@ -171,33 +171,68 @@ def _compute_future_r(entry: float, sl: float, direction: str, future_df: 'pd.Da
     exit_reason = "TIME_OUT"
 
     limit = min(max_bars + 1, len(future_df))
+    current_sl = sl
+    stage = 0
+    atr = 0.0
+    if "ATRr_14" in future_df.columns:
+        atr = float(future_df["ATRr_14"].iloc[0] or 0)
+    elif "atr" in future_df.columns:
+        atr = float(future_df["atr"].iloc[0] or 0)
+    elif "ATR" in future_df.columns:
+        atr = float(future_df["ATR"].iloc[0] or 0)
+
     for j in range(1, limit):  # j=0 是信号K线，从 j=1 开始是未来K线
         b = future_df.iloc[j]
         high = float(b["high"])
         low = float(b["low"])
+        close = float(b["close"])
+
+        if atr == 0.0:
+            if "ATRr_14" in b.index:
+                atr = float(b["ATRr_14"] or 0)
+            elif "atr" in b.index:
+                atr = float(b["atr"] or 0)
+            elif "ATR" in b.index:
+                atr = float(b["ATR"] or 0)
 
         if direction == "Long":
-            # 当前bar内的顺向R（高点到入场）
             this_forward = (high - entry) / risk
-            # 当前bar内的逆向R（低点到入场）
             this_adverse = (entry - low) / risk
-            max_forward = max(max_forward, this_forward)
-            max_adverse = max(max_adverse, this_adverse)
-            if low <= sl:
-                exit_reason = "SL"
-                final_r = -1.0
-                break
         else:  # Short
             this_forward = (entry - low) / risk
             this_adverse = (high - entry) / risk
-            max_forward = max(max_forward, this_forward)
-            max_adverse = max(max_adverse, this_adverse)
-            if high >= sl:
+
+        max_forward = max(max_forward, this_forward)
+        max_adverse = max(max_adverse, this_adverse)
+
+        action_plan = check_partial_close_and_trail(
+            direction=direction,
+            current_price=close,
+            entry_price=entry,
+            current_sl=current_sl,
+            tp1=tp1,
+            tp2=tp2,
+            atr=atr,
+            stage=stage,
+        )
+        if action_plan["action"] == "PARTIAL_CLOSE":
+            current_sl = action_plan["new_sl"]
+            stage = action_plan["new_stage"]
+        elif action_plan["action"] == "TRAIL_ONLY":
+            current_sl = action_plan["new_sl"]
+
+        if direction == "Long":
+            if low <= current_sl:
+                exit_reason = "SL"
+                final_r = -1.0
+                break
+        else:
+            if high >= current_sl:
                 exit_reason = "SL"
                 final_r = -1.0
                 break
 
-        final_r = (float(future_df.iloc[j]["close"]) - entry) / risk if direction == "Long" else (entry - float(future_df.iloc[j]["close"])) / risk
+        final_r = (close - entry) / risk if direction == "Long" else (entry - close) / risk
 
     if exit_reason == "TIME_OUT":
         final_r = (float(future_df.iloc[limit - 1]["close"]) - entry) / risk if direction == "Long" else (entry - float(future_df.iloc[limit - 1]["close"])) / risk
@@ -1543,6 +1578,7 @@ def check_and_open(result: dict | None) -> bool:
                     # 计算后验 R
                     _mf, _ma, _fr, _er = _compute_future_r(
                         entry=entry, sl=sl, direction=direction,
+                        tp1=tp1, tp2=tp2,
                         future_df=_audit_future_df, max_bars=POSTHOC_FUTURE_BARS,
                     )
                 else:

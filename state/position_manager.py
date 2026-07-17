@@ -5,6 +5,7 @@ import json
 import os
 import atexit
 import traceback
+import copy
 
 POSITIONS_FILE = "state/managed_positions.json"
 
@@ -69,8 +70,9 @@ class PositionManager:
     def get(self, symbol: str = None):
         with self._lock:
             if symbol:
-                return self._positions.get(symbol)
-            return dict(self._positions)
+                pos = self._positions.get(symbol)
+                return copy.deepcopy(pos) if pos is not None else None
+            return {k: copy.deepcopy(v) for k, v in self._positions.items()}
 
     def remove(self, symbol: str):
         with self._lock:
