@@ -974,34 +974,45 @@ _load_processed_signals()
 def _signal_id(result: dict) -> str:
     """构建高精度信号指纹，确保每次扫描的每个信号都是唯一可追踪的。
 
+    【修复20260730】移除了 entry_price 和 scan_slot，避免同一 K线信号
+    因价格微小变化/扫描槽变化被当成不同信号。
+
     指纹包含：
     - symbol / direction（基础标识）
     - setup_type（模式类型：LIQUIDITY_SWEEP / WEAK_BOS / FVG_TOUCH 等）
     - idx（K线bar索引，唯一标识触发行情位置）
-    - entry_price（入场价，四舍五入到小数点后1位）
-    - score + ev（量化特征）
-    - scan_slot（扫描槽位 = 当前时间 / SCAN_INTERVAL，300秒粒度）
+    - score + ev（量化特征，取整到 bucket）
+    - regime（市场状态，区分同 setup 在不同环境下的信号）
 
-    这样同一个15-min K线内，不同 setup_type 的信号不会互相覆盖；
-    同一个方向但不同 idx（不同bar）的信号也被区分；
-    避免统计学习把重复信号当作独立样本。
+    这样同一个15-min K线内，同一 setup_type 的不同扫描结果
+    会被正确识别为重复信号。
     """
     symbol = result["symbol"]
     direction = result["direction"] or "NONE"
     setup_type = result.get("decision", {}).get("signal", {}).get("setup_type", result.get("reason", "UNKNOWN"))
-    idx = result.get("decision", {}).get("signal", {}).get("idx", result.get("entry", 0))
-    entry_price = round(float(result.get("entry", 0.0)), 1)
-    score_ev_bucket = f"s{int(result.get('score', 0) / 10)}_ev{result.get('expected_value', 0.0):+.4f}"
-    # feedback 字段
-    _fb_ev = result.get("_feedback_ev", result.get("expected_value", 0.0))
-    score_ev_bucket += f"_fb{_fb_ev:+.4f}"
-    period = SCAN_INTERVAL  # 300s，与扫描间隔匹配
-    scan_slot = int(time.time()) // period
-    return f"{symbol}_{direction}_{setup_type}_idx{idx}_p{entry_price}_{score_ev_bucket}_{scan_slot}"
+    idx = result.get("decision", {}).get("signal", {}).get("idx", -1)
+    score_bucket = int(result.get("score", 0) / 10) if result.get("score") else -1
+    _ev = result.get("expected_value", 0.0)
+    ev_bucket = f"{_ev:+.3f}"[:6]
+    regime = str(result.get("regime", "UNKNOWN"))[:4]
+    return f"{symbol}_{direction}_{setup_type}_idx{idx}_s{score_bucket}_ev{ev_bucket}_{regime}"
 
 def _is_signal_processed(signal_id: str) -> bool:
+    """信号去重：检查是否已处理过。
+
+    【修复20260730】增加 slot 二次检查：同一 signal_id 在 1 个 SCAN_INTERVAL(300秒)
+    内出现多次时，只处理第一次。超过 1 个 slot 后允许重新处理。
+    这解决了 BTC 同一 V56.5 Short 信号每轮扫描都出现的去重失效问题。
+    """
     if signal_id in _PROCESSED_SIGNALS:
-        return True
+        last_ts = _PROCESSED_SIGNALS[signal_id]
+        # 如果距离上次处理超过 1 个 slot（SCAN_INTERVAL），允许重新处理
+        if time.time() - last_ts <= SCAN_INTERVAL:
+            return True
+        # 超过 slot 间隔则清除旧记录，允许重新处理
+        print(f"[_is_signal_processed] {signal_id} 距上次 {time.time()-last_ts:.0f}s > {SCAN_INTERVAL}s slot, 重新允许")
+        del _PROCESSED_SIGNALS[signal_id]
+    
     _PROCESSED_SIGNALS[signal_id] = time.time()
     # 持久化到磁盘，防止进程重启后丢失
     _persist_signal_fingerprint(signal_id)

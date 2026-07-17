@@ -32,11 +32,17 @@ except ImportError:
 
 BITGET_WS_URL = "wss://ws.bitget.com/v2/ws/public"
 DEFAULT_SYMBOL = "BTCUSDT"
-RECONNECT_DELAY_BASE = 5.0      # 基础重连等待（秒）
+RECONNECT_DELAY_BASE = 10.0     # 【修复】基础重连等待从5→10秒，给Bitget更多恢复时间
 RECONNECT_MAX = 60.0            # 最大重连等待
-RECONNECT_MAX_ATTEMPTS = 20     # 最大重连次数后放弃
+RECONNECT_MAX_ATTEMPTS = 50     # 【修复】从20→50，应对间歇性断连
 HEARTBEAT_INTERVAL = 15.0       # 心跳检查间隔（秒）
 HEARTBEAT_TIMEOUT = 25.0        # 超过此时间无 Pong 则主动断开
+# 【新增】主动向 Bitget 发送 ping 保活
+PING_INTERVAL = 15.0            # 每15秒发一次 ping
+# 【新增】连续断连惩罚（120秒窗口内断连≥3次，额外等待20秒）
+CONSECUTIVE_WINDOW = 120
+CONSECUTIVE_THRESHOLD = 3
+CONSECUTIVE_PENALTY = 20.0
 INST_TYPE = "USDT-FUTURES"
 BOOKS_TOPIC = "books"
 TRADE_TOPIC = "trade"
@@ -58,6 +64,7 @@ class MicroFeeder:
         self._has_initial_depth: bool = False
 
         # ---- 重连控制 ----
+        self._consecutive_disconnect_log: list = []  # 【新增】记录断连时间戳，用于连续断连惩罚
         self._retry_count: int = 0
 
         # ---- 心跳控制 ----
@@ -99,9 +106,19 @@ class MicroFeeder:
                         self._last_pong_ts = time.time()
                         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
+                    # ---- 【新增】主动 Ping 保活任务 ----
+                    _ping_task = asyncio.create_task(self._send_ping_loop(ws))
+
                     # ---- 消息循环 ----
-                    async for raw_message in ws:
-                        self._process_message(json.loads(raw_message))
+                    try:
+                        async for raw_message in ws:
+                            self._process_message(json.loads(raw_message))
+                    finally:
+                        _ping_task.cancel()
+                        try:
+                            await _ping_task
+                        except asyncio.CancelledError:
+                            pass
 
             except asyncio.CancelledError:
                 print("[MicroFeeder] 协程已取消")
@@ -111,6 +128,8 @@ class MicroFeeder:
             except websockets.exceptions.ConnectionClosed as e:
                 self._retry_count += 1
                 wait = self._backoff_wait()
+                # 【新增】连续断连惩罚
+                wait = self._apply_consecutive_penalty(wait)
                 print(f"[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), "
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"CLOSE_{e.code}"
@@ -120,6 +139,7 @@ class MicroFeeder:
             except (OSError, TimeoutError, asyncio.TimeoutError) as e:
                 self._retry_count += 1
                 wait = self._backoff_wait()
+                wait = self._apply_consecutive_penalty(wait)
                 print(f"[MicroFeeder] 网络异常 ({type(e).__name__}), "
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"NET_{type(e).__name__}"
@@ -136,6 +156,7 @@ class MicroFeeder:
             except Exception as e:
                 self._retry_count += 1
                 wait = self._backoff_wait()
+                wait = self._apply_consecutive_penalty(wait)
                 err_name = type(e).__name__
                 print(f"[MicroFeeder] 未知异常 ({err_name}): {e}, "
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
@@ -173,8 +194,43 @@ class MicroFeeder:
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
 
+
+    # ============================================================
+    #  【新增】主动 Ping 保活
+    # ============================================================
+    async def _send_ping_loop(self, ws):
+        """每 PING_INTERVAL 秒向 Bitget 发送 ping，防止服务端因空闲断开连接。"""
+        try:
+            while True:
+                await asyncio.sleep(PING_INTERVAL)
+                try:
+                    await ws.send(json.dumps({"op": "ping"}))
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    # ============================================================
+    #  【新增】连续断连惩罚
+    # ============================================================
+    def _apply_consecutive_penalty(self, base_wait: float) -> float:
+        """检查 CONSECUTIVE_WINDOW 秒窗口内断连次数，超过阈值则增加额外等待。"""
+        now = time.time()
+        self._consecutive_disconnect_log.append(now)
+        # 移除窗口外的记录
+        self._consecutive_disconnect_log = [
+            t for t in self._consecutive_disconnect_log
+            if now - t <= CONSECUTIVE_WINDOW
+        ]
+        if len(self._consecutive_disconnect_log) >= CONSECUTIVE_THRESHOLD:
+            extra = CONSECUTIVE_PENALTY
+            print(f"[MicroFeeder] 连续断连 {len(self._consecutive_disconnect_log)}次/{(CONSECUTIVE_WINDOW/60):.0f}分钟，额外等待{extra:.0f}s")
+            return base_wait + extra
+        return base_wait
+
     # ============================================================
     #  标记 + 告警
+    # ============================================================
     # ============================================================
     def _mark_stale(self):
         """标记数据过时，暂停所有开单决策"""

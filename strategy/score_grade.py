@@ -38,7 +38,7 @@ DEFAULT_GRADE_CONFIG: Dict[str, Dict[str, float]] = {
         "size_mult": 0.85,
     },
     "B": {
-        "min_score": 65,
+        "min_score": 64,   # 【修复】从65降到64，ETH FeatureLearning 82.7→64.1 的临界问题
         "min_ev": 0.01,
         "size_mult": 0.65,
     },
@@ -124,3 +124,4 @@ _score_grader = ScoreGrader()
 
 def get_score_grader() -> ScoreGrader:
     return _score_grader
+
