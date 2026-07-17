@@ -524,9 +524,10 @@ def background_monitor_worker():
                 if is_real_trading_ready(): safe_send_telegram(f"🚨 [系统警告] 数据超时掉线: {stales}，可能API受限或网络中断！")
             
             # 2. 追踪止损检测
-            if not MANAGED_POSITIONS: continue
+            _all_positions_for_trail = position_manager.get()
+            if not _all_positions_for_trail: continue
                 
-            for sym, pos in list(MANAGED_POSITIONS.items()):
+            for sym, pos in list(_all_positions_for_trail.items()):
                 curr_price = _get_price(sym)
                 if curr_price is None:
                     continue

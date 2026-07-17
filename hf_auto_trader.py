@@ -1723,6 +1723,22 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         _trigger_stop_loss(symbol, pos, current_price)
     elif direction == "Short" and current_price >= pos["current_sl"]:
         _trigger_stop_loss(symbol, pos, current_price)
+    
+    # ===== 【修复20260817】追踪止损/分批止盈后回写 position_manager =====
+    if action != "HOLD":
+        try:
+            from state.position_manager import position_manager
+            _pm_pos = position_manager.get(symbol)
+            if _pm_pos and (
+                _pm_pos.get("current_sl") != pos.get("current_sl") or
+                _pm_pos.get("stage") != pos.get("stage")
+            ):
+                _pm_pos["current_sl"] = pos.get("current_sl")
+                _pm_pos["stage"] = pos.get("stage")
+                _pm_pos["last_sl_msg"] = pos.get("last_sl_msg", "")
+                position_manager.update(symbol, _pm_pos)
+        except Exception:
+            pass
 
 
 def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
