@@ -223,13 +223,21 @@ def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: 
 
         if direction == "Long":
             if low <= current_sl:
-                exit_reason = "SL"
-                final_r = -1.0
+                if stage > 0 and current_sl > entry:
+                    exit_reason = "TRAIL_SL"
+                    final_r = (current_sl - entry) / risk
+                else:
+                    exit_reason = "SL"
+                    final_r = -1.0
                 break
         else:
             if high >= current_sl:
-                exit_reason = "SL"
-                final_r = -1.0
+                if stage > 0 and current_sl < entry:
+                    exit_reason = "TRAIL_SL"
+                    final_r = (entry - current_sl) / risk
+                else:
+                    exit_reason = "SL"
+                    final_r = -1.0
                 break
 
         final_r = (close - entry) / risk if direction == "Long" else (entry - close) / risk
