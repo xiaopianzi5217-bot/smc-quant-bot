@@ -548,10 +548,20 @@ def background_monitor_worker():
                     safe_send_telegram(msg)
                     pos['current_sl'] = action_plan['new_sl']
                     pos['stage'] = action_plan['new_stage']
-                    
+                    # ===== [修复20260817] 回写 position_manager =====
+                    try:
+                        position_manager.update(sym, dict(pos))
+                    except Exception as _pm_e:
+                        print(f"[Monitor] position_manager 回写失败: {_pm_e}")
+
                 elif action_plan['action'] == 'TRAIL_ONLY' and abs(pos['current_sl'] - action_plan['new_sl']) > curr_price * 0.001:
                     pos['current_sl'] = action_plan['new_sl']
                     safe_send_telegram(f"🛡️ [{sym}] 追踪止损已推移至 {action_plan['new_sl']}")
+                    # ===== [修复20260817] 回写 position_manager =====
+                    try:
+                        position_manager.update(sym, dict(pos))
+                    except Exception as _pm_e:
+                        print(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
         except Exception as e:
             print(f"后台线程异常: {e}")
@@ -676,4 +686,4 @@ if __name__ == "__main__":
     print("[HF] 自动信号扫描线程已启动（不阻塞 Gradio 启动）")
 
     # Gradio 监听 7860 端口（HF Space 以此判断就绪）
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=True)
+    demo.launch(server_name="0.0.0.0", server_port=7860)
