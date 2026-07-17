@@ -112,7 +112,14 @@ class MicroFeeder:
                     # ---- 消息循环 ----
                     try:
                         async for raw_message in ws:
-                            self._process_message(json.loads(raw_message))
+                            # 处理 JSON 消息和纯字符串（如 "pong"）
+                            # Bitget v2 可能会返回纯字符串 "pong"
+                            try:
+                                parsed = json.loads(raw_message)
+                            except json.JSONDecodeError:
+                                # 纯字符串响应（如 "pong"）
+                                parsed = raw_message
+                            self._process_message(parsed)
                     finally:
                         _ping_task.cancel()
                         try:
@@ -198,8 +205,17 @@ class MicroFeeder:
     # ============================================================
     #  【新增】主动 Ping 保活
     # ============================================================
+    
+
+    # ============================================================
+    #  【新增】主动 Ping 保活（Bitget v2 协议：直接发字符串 "ping"）
+    # ============================================================
     async def _send_ping_loop(self, ws):
-        """每 PING_INTERVAL 秒向 Bitget 发送 ping，防止服务端因空闲断开连接。"""
+        """每 PING_INTERVAL 秒向 Bitget 发送 ping，防止服务端因空闲断开连接。
+        
+        Bitget v2 WebSocket 协议：ping 是纯字符串 "ping"，不是 JSON 对象。
+        收到服务端回应 "pong" 字符串或 event:pong 事件。
+        """
         try:
             while True:
                 await asyncio.sleep(PING_INTERVAL)
@@ -210,9 +226,7 @@ class MicroFeeder:
         except asyncio.CancelledError:
             pass
 
-    # ============================================================
-    #  【新增】连续断连惩罚
-    # ============================================================
+
     def _apply_consecutive_penalty(self, base_wait: float) -> float:
         """检查 CONSECUTIVE_WINDOW 秒窗口内断连次数，超过阈值则增加额外等待。"""
         now = time.time()
@@ -269,7 +283,13 @@ class MicroFeeder:
     # ============================================================
     #  消息处理
     # ============================================================
-    def _process_message(self, data: Dict[str, Any]):
+    def _process_message(self, data):
+        # ---- 处理纯字符串（如 Bitget 回复 "pong"）----
+        if isinstance(data, str):
+            if data == "pong":
+                self._last_pong_ts = time.time()
+            return
+
         # ---- 事件类消息 ----
         if "event" in data:
             event = data.get("event", "")
