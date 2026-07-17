@@ -1387,7 +1387,7 @@ def check_and_open(result: dict | None) -> bool:
         f"多头: {lp_s:.1f}分  空头: {sp_s:.1f}分  分差: {sg:.1f}分",
     ])
     safe_send(msg)
-    
+    print(f"[{symbol}] Strategy open before update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
     position_manager.update(symbol, {
         "direction": direction,
         "entry": entry,
@@ -1403,6 +1403,7 @@ def check_and_open(result: dict | None) -> bool:
         "open_regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
         "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
     })
+    print(f"[{symbol}] Strategy open after update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
     print(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
 
     # ===== 【新增20260723】SignalTracker 记录开单 =====

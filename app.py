@@ -497,7 +497,8 @@ def execution_layer_status(symbol):
 # ----------------- 后台监控守护线程 -----------------
 def background_monitor_worker():
     import requests
-    print("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损)...")
+    import time
+    print("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损 5s轮询)...")
     
     def _get_price(sym):
         try:
@@ -514,18 +515,24 @@ def background_monitor_worker():
             pass
         return None
     
+    loop_count = 0
     while True:
-        time.sleep(60) # 每分钟循环一次
+        time.sleep(5)  # 【修复1】将 60 秒改为 5 秒，确保不会错过插针行情
+        loop_count += 1
         try:
-            # 1. 灾难自愈检测
-            if not health_monitor.is_healthy():
-                stales = health_monitor.check_stale_symbols()
-                # 精准控制：只有实盘环境才发送心跳报错，扁平化代码防缩进出错
-                if is_real_trading_ready(): safe_send_telegram(f"🚨 [系统警告] 数据超时掉线: {stales}，可能API受限或网络中断！")
+            # 1. 灾难自愈检测 (没必要每5秒查一次，每12次即60秒查一次即可)
+            if loop_count % 12 == 0:
+                if not health_monitor.is_healthy():
+                    stales = health_monitor.check_stale_symbols()
+                    if is_real_trading_ready():
+                        safe_send_telegram(f"🚨 [系统警告] 数据超时掉线: {stales}")
             
             # 2. 追踪止损检测
             _all_positions_for_trail = position_manager.get()
-            if not _all_positions_for_trail: continue
+            if loop_count % 12 == 0 and not _all_positions_for_trail:
+                print("[Monitor DEBUG] 当前 position_manager 为空，没有活跃订单。")
+            if not _all_positions_for_trail:
+                continue
                 
             for sym, pos in list(_all_positions_for_trail.items()):
                 curr_price = _get_price(sym)
@@ -677,6 +684,15 @@ def _start_hf_auto_trader():
 
 
 if __name__ == "__main__":
+    import asyncio
+    import sys
+
+    # 压制在 Hugging Face Spaces 中 Gradio 停止事件循环时产生的无效文件描述符报错
+    if sys.platform != "win32":
+        asyncio.get_event_loop_policy().get_event_loop().set_exception_handler(
+            lambda loop, context: None if "Invalid file descriptor" in str(context.get("message", "")) else loop.default_exception_handler(context)
+        )
+
     start_background_monitor()
 
     # 启动交易引擎线程（在 demo.launch() 之前，因为 launch() 阻塞不会返回）
@@ -685,5 +701,4 @@ if __name__ == "__main__":
     _hf_thread.start()
     print("[HF] 自动信号扫描线程已启动（不阻塞 Gradio 启动）")
 
-    # Gradio 监听 7860 端口（HF Space 以此判断就绪）
     demo.launch(server_name="0.0.0.0", server_port=7860)
