@@ -74,6 +74,8 @@ from utils.signal_audit_log import signal_audit_log
 from utils.smart_position_sizer import SmartPositionSizer, get_smart_sizer
 from analytics.feature_learning import FeatureLearningEngine, get_feature_learner
 from utils.daily_panel import DailyPanel, get_daily_panel
+from utils.event_bus import emit
+import utils.v6_event_hooks
 
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
@@ -1479,6 +1481,10 @@ def check_and_open(result: dict | None) -> bool:
         "open_regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
         "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
     })
+
+    # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
+    emit("record_open_snapshot", result, kelly_size=result.get("size", 0.05))
+
     print(f"[{symbol}] Strategy open after update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
     print(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
 
@@ -1745,7 +1751,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                 except Exception as _tp_audit_e:
                     print(f"[SignalAuditLog] TP后验更新失败: {_tp_audit_e}")
 
-                                # ===== 【闭环】FeedbackLoop 全链路更新 =====
+                # ===== 【闭环】FeedbackLoop 全链路更新 =====
                 try:
                     _ts_id = pos.get("tracker_signal_id", "")
                     if _ts_id:
@@ -1789,6 +1795,16 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                             )
                         except Exception as _panel_e:
                             print(f"[DailyPanel] TP更新异常: {_panel_e}")
+                        # 🟢 钩子 3：分批止盈移动止损时，同步更新快照表中的真实 R 结局
+                        if pos.get("signal_id"):
+                            emit(
+                                "record_close_outcome",
+                                signal_id=pos["signal_id"],
+                                pnl_r=profit_r2,
+                                exit_reason=stage_label,
+                                max_fwd=pos.get("mfe", 0.0),
+                                max_adv=pos.get("mae", 0.0),
+                            )
                         # 同时更新旧的 Weighter（兼容旧代码）
                         _weighter.update(features=_open_features, outcome_r=profit_r2)
                 except Exception as _new_tools_e:
@@ -1917,6 +1933,16 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
                 pnl_r=profit_r,
                 direction=pos.get("direction", ""),
             )
+            # 🟢 钩子 4：遭遇触屏止损时，锁定硬标签结局
+            if pos.get("signal_id"):
+                emit(
+                    "record_close_outcome",
+                    signal_id=pos["signal_id"],
+                    pnl_r=profit_r,
+                    exit_reason="SL",
+                    max_fwd=pos.get("mfe", 0.0),
+                    max_adv=pos.get("mae", 0.0),
+                )
             # ===== 【V21 FeatureLearningEngine】Outcome 闭环更新（止损） =====
             if _ts_id:
                 _feature_learner.update(
@@ -2063,6 +2089,9 @@ async def main_loop():
     print("[hf_auto_trader] 自动信号扫描主循环已启动...")
     await asyncio.sleep(5)  # 启动缓冲
     
+    # 🟢 钩子 1：初始化/自愈拉取云端 V6 数据库
+    emit("v6_database_init")
+
     # ===== 【新增20260729】启动时恢复持仓 =====
     await _recover_positions()
     
