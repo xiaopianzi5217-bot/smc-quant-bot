@@ -292,17 +292,46 @@ _OBSERVER_TYPE_NAMES = {
     "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
 }
 _OBSERVER_DIR_EMOJI = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
+SAFE_SEND_COOLDOWN = 600
 
-def safe_send(msg: str) -> str:
+
+def safe_send(msg: str, priority: str = "AUTO") -> str:
     global _LAST_SAFE_SEND_TIME
     now = time.time()
-    if now - _LAST_SAFE_SEND_TIME < 600:  # 【修复20260716】全局限流从60秒改为600秒，避免推送太频繁
-        print(f"[safe_send] 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < 600s")
-        return "RATELIMITED_GLOBAL"
-    
-    _LAST_SAFE_SEND_TIME = now
+
+    def _auto_priority(message: str) -> str:
+        if not message:
+            return "OBSERVER"
+        msg_upper = message.upper()
+        high_priority_markers = [
+            "强制平仓",
+            "恢复",
+            "启动恢复",
+            "开单",
+            "平仓",
+            "SL",
+            "TP",
+            "止损",
+            "追踪止损",
+        ]
+        if any(marker.upper() in msg_upper for marker in high_priority_markers):
+            return "TRADE"
+        return "OBSERVER"
+
+    priority = str(priority or "AUTO").upper()
+    if priority == "AUTO":
+        priority = _auto_priority(msg)
+
+    if priority == "TRADE" or priority == "SYSTEM":
+        print(f"[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
+    else:
+        if now - _LAST_SAFE_SEND_TIME < SAFE_SEND_COOLDOWN:
+            print(f"[safe_send] 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < {SAFE_SEND_COOLDOWN}s")
+            return "RATELIMITED_GLOBAL"
+        _LAST_SAFE_SEND_TIME = now
+
     try:
-        print(f"[safe_send] 开始推送，消息长度: {len(msg)} 字符")
+        print(f"[safe_send] 开始推送，消息长度: {len(msg)} 字符 priority={priority}")
         result = send_telegram(msg)
         print(f"[safe_send] 推送完成: {result[:100] if result else 'None'}")
         return result
@@ -422,13 +451,22 @@ async def scan_and_decide(symbol: str) -> dict | None:
     if candidates is None or candidates.empty:
         print(f"[{symbol}] V56.5 引擎无候选信号")
         return None
-    else:
-        print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
-        # 检查是否有 bucket_ev 列
-        if "bucket_ev" in candidates.columns:
-            _has_bucket = (candidates["bucket_ev"] != candidates["model_ev"]).sum()
-            if _has_bucket > 0:
-                print(f"[{symbol}] bucket_ev 生效: {_has_bucket}/{len(candidates)} 个信号使用历史分桶 EV")
+
+    if "idx" in candidates.columns:
+        last_idx = int(df_v56.index.max())
+        recent_threshold = max(0, last_idx - 1)
+        candidates = candidates[candidates["idx"] >= recent_threshold].copy()
+        print(f"[{symbol}] 限制候选信号到最新2根K线: idx>={recent_threshold}, 剩余{len(candidates)}条")
+        if candidates.empty:
+            print(f"[{symbol}] 仅历史信号存在，跳过本轮扫描")
+            return None
+
+    print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
+    # 检查是否有 bucket_ev 列
+    if "bucket_ev" in candidates.columns:
+        _has_bucket = (candidates["bucket_ev"] != candidates["model_ev"]).sum()
+        if _has_bucket > 0:
+            print(f"[{symbol}] bucket_ev 生效: {_has_bucket}/{len(candidates)} 个信号使用历史分桶 EV")
     
     # 注入 exec_ctx 的 SMC 结构信息（原 V37 的 build_exec_context）
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
@@ -968,7 +1006,7 @@ def _push_observer_event(
         if ssl_level > 0:
             msg += f"  SSL: {ssl_level:.1f}"
 
-    safe_send(msg)
+    safe_send(msg, priority="OBSERVER")
     print(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
 # Strategy 信号推送与去重
 # ============================================================
@@ -1043,24 +1081,17 @@ def _signal_id(result: dict) -> str:
 def _is_signal_processed(signal_id: str) -> bool:
     """信号去重：检查是否已处理过。
 
-    【修复20260730】增加 slot 二次检查：同一 signal_id 在 1 个 SCAN_INTERVAL(300秒)
-    内出现多次时，只处理第一次。超过 1 个 slot 后允许重新处理。
-    这解决了 BTC 同一 V56.5 Short 信号每轮扫描都出现的去重失效问题。
+    修复时机：同一 signal_id 只允许触发一次，避免历史 K 线“诈尸”复活。
+    通过 signal_id 永久阻止同一根 K 线上的同一个 Setup 再次开单。
     """
     if signal_id in _PROCESSED_SIGNALS:
-        last_ts = _PROCESSED_SIGNALS[signal_id]
-        # 如果距离上次处理超过 1 个 slot（SCAN_INTERVAL），允许重新处理
-        if time.time() - last_ts <= SCAN_INTERVAL:
-            return True
-        # 超过 slot 间隔则清除旧记录，允许重新处理
-        print(f"[_is_signal_processed] {signal_id} 距上次 {time.time()-last_ts:.0f}s > {SCAN_INTERVAL}s slot, 重新允许")
-        del _PROCESSED_SIGNALS[signal_id]
-    
+        return True
+
     _PROCESSED_SIGNALS[signal_id] = time.time()
     # 持久化到磁盘，防止进程重启后丢失
     _persist_signal_fingerprint(signal_id)
-    # 清理过期的信号ID（超过24小时）
-    stale_cutoff = time.time() - 86400
+    # 清理旧记录，保留最近 7 天信号指纹，避免无限增长
+    stale_cutoff = time.time() - 86400 * 7
     stale = [k for k, v in _PROCESSED_SIGNALS.items() if v < stale_cutoff]
     for k in stale:
         del _PROCESSED_SIGNALS[k]
@@ -1207,7 +1238,7 @@ def check_and_open(result: dict | None) -> bool:
     # ===== 【修复20260726】动态 Gap 阈值 =====
     # 在震荡市（ADX<25或CHOP/RANGE）降低 gap 要求
     _regime_for_gap = str(result.get("regime", "UNKNOWN")).upper().strip()
-    _adx_for_gap = float(result.get("adx", 0))  # 修复：从 exec_ctx → result 读取
+    _adx_for_gap = float(result.get("adx", 0) or result.get("exec_ctx", {}).get("adx", 0))
     _is_chop = _regime_for_gap in ("CHOP", "RANGE") or _adx_for_gap < 25
     _dynamic_gap = MIN_SCORE_GAP * (0.66 if _is_chop else 0.80)  # ⚠️ 降级: V56.5信号自证实方向，gap仅做噪音过滤
     print(f"[{symbol}] GapCheck: regime={_regime_for_gap} adx={_adx_for_gap:.1f} "
@@ -1429,7 +1460,7 @@ def check_and_open(result: dict | None) -> bool:
         f"原因: {reason}",
         f"多头: {lp_s:.1f}分  空头: {sp_s:.1f}分  分差: {sg:.1f}分",
     ])
-    safe_send(msg)
+    safe_send(msg, priority="TRADE")
     print(f"[{symbol}] Strategy open before update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
     position_manager.update(symbol, {
         "direction": direction,
@@ -1653,7 +1684,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         msg_key = f"{stage_label}_{new_stage}"
         
         if pos.get("last_sl_msg") != msg_key:
-            safe_send(msg)
+            safe_send(msg, priority="TRADE")
             pos["last_sl_msg"] = msg_key
             try:
                 # 【修复20260705】profit_r2 改为 R 倍数（价格差 / 风险），而非价格百分比
@@ -1802,7 +1833,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
         f"盈亏: {pnl_pct:+.2f}%"
     )
     print(f"[{symbol}] ❌ 止损触发 ({pnl_pct:+.2f}%)")
-    safe_send(msg)
+    safe_send(msg, priority="TRADE")
 
     try:
         # 修复：用 R 倍数替代百分比（SL 距离 = 1R）
@@ -2016,7 +2047,7 @@ async def _recover_positions():
         if restored_count > 0:
             print(f"[恢复持仓] 总计恢复/处理 {restored_count} 笔")
             # 推送启动通知到 Telegram
-            safe_send(f"🔄 【启动恢复】已处理 {restored_count}/{len(_latest_per_symbol)} 笔持仓")
+            safe_send(f"🔄 【启动恢复】已处理 {restored_count}/{len(_latest_per_symbol)} 笔持仓", priority="SYSTEM")
     except Exception as e:
         print(f"[恢复持仓] 异常: {e}")
         traceback.print_exc()
@@ -2040,7 +2071,7 @@ async def main_loop():
         _report_text = trade_journal.generate_report()
         print(f"[性能报告]\n{_report_text}")
         # 强制推送一次报告到 Telegram
-        safe_send(f"📊 【启动时性能报告】\n{_report_text}")
+        safe_send(f"📊 【启动时性能报告】\n{_report_text}", priority="SYSTEM")
     except Exception as _rep_e:
         print(f"[性能报告] 生成失败: {_rep_e}")
 
@@ -2088,7 +2119,7 @@ async def main_loop():
                                 f"方向: {_dir_text} | {ev.get('desc', '')}\n"
                                 f"⏱️ 状态已持续30分钟，等待变化"
                             )
-                            safe_send(_summary_msg)
+                            safe_send(_summary_msg, priority="OBSERVER")
                             print(f"[{symbol}] Observer 汇总推送(轻量): {ev['type']}")
                         else:
                             _push_observer_event(
@@ -2136,11 +2167,12 @@ async def main_loop():
             all_positions = position_manager.get()  # 【修复】提前获取持仓，避免后面引用时未定义
             try:
                 _tj_opens = trade_journal.get_open_positions()
-                if _tj_opens and all_positions:
+                if _tj_opens:
+                    tracked_symbols = set(all_positions.keys()) if all_positions else set()
                     for _tj_pos in _tj_opens:
                         _sym = _tj_pos.get("symbol", "")
                         _oid = _tj_pos.get("order_id", "")
-                        if _sym and _sym not in all_positions:
+                        if _sym and _sym not in tracked_symbols:
                             # position_manager 已丢失记录，强制查价格
                             _forced_price = _fetch_ticker_price(_sym)
                             if _forced_price and _forced_price > 0:
