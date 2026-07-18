@@ -260,7 +260,7 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
         size_penalty_list: List[float] = []
 
         for _, row in cand.iterrows():
-            passed, reason, meta = v565_quality_gate(row.to_dict())
+            passed, reason, meta = v565_quality_gate(row.to_dict(), config={"min_score": cfg.min_score})
             gate_passed_list.append(passed)
             gate_reason_list.append(reason)
             size_penalty_list.append(float(meta.get("size_penalty", 1.0)))

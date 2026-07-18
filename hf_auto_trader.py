@@ -19,7 +19,6 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pandas as pd
-import aiohttp
 
 # ---------- 基础指标与策略模块 ----------
 from indicators.basic import add_all_indicators, calculate_advanced_sqzmom
@@ -1140,20 +1139,6 @@ async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
         print(f"[async_record_snapshot_and_push] 异步记录异常: {exc}")
 
 
-async def _bg_weixin_push(msg: str):
-    """Asynchronous wei xin push using aiohttp."""
-    url = "你的微信推送API地址"
-    payload = {"text": msg}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                result = await response.json()
-                print(f"[DEBUG] 微信推送: {result}")
-    except Exception as exc:
-        print(f"[_bg_weixin_push] 微信推送失败: {exc}")
-
-
 def evaluate_signal_v6_routing(result: dict) -> dict:
     """
     【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
@@ -1203,12 +1188,11 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
-    result["size"] = trade_size
+        result["size"] = trade_size
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
     print(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
-    _weixin_msg = f"V6 分级开仓通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}"
-    async_background_task(_bg_weixin_push, _weixin_msg)
+    safe_send(f"🟢 开单通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}", priority="TRADE")
     return True
 
 
