@@ -57,7 +57,7 @@ def _get_hf_config():
                             break
             except Exception:
                 pass
-        repo_id = os.environ.get("HF_DATASET_REPO", "Aisvbo/svb-bot-v6-snapshots")
+    repo_id = os.environ.get("HF_DATASET_REPO", "Aisvbo/svb-bot-v6-snapshots")
     token = os.environ.get("HF_TOKEN", "").strip()                    
     return repo_id, token
 
