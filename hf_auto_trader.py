@@ -1162,25 +1162,31 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     score = result["v6_final_score"]
 
     if route == "ABSOLUTE_DROP":
-        print(f"🗑️ [V6_DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
+        print(f"[V6 分级路由 - DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
         return False
 
     if route == "RESEARCH_SILENT":
         research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
-        print(f"🔬 [V6 科研收割] 捕获 {level} 信号 ({score}分) | 实盘静默不发单 -> 强行拍摄特征快照打入云端铁盒！")
+        print(f"[V6 分级路由 - 科研观察] {symbol} {level} 信号 ({score}分) | 实盘静默, 拍摄特征快照入云端铁盒")
         async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
         return False
 
-    trade_size = result["base_size"]
+        trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
     result["size"] = trade_size
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
-    print(f"🔥 [V6 实盘激活] 捕获优质 {level} 信号 ({score}分) | 触发交易所真实下单，分配仓位: {trade_size}")
-    async_background_task(_bg_weixin_push(f"📊 V6 分级开仓通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}"))
+    print(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
+    # 【修复】_bg_weixin_push 是同步函数，用 run_in_executor 放入线程池
+    _weixin_msg = f"V6 分级开仓通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}"
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _bg_weixin_push, _weixin_msg)
+    except RuntimeError:
+        threading.Thread(target=_bg_weixin_push, args=(_weixin_msg,), daemon=True).start()
     return True
 
 
@@ -1258,24 +1264,10 @@ def check_and_open(result: dict | None) -> bool:
         print(f"[{symbol}] FeatureLearning: score={score:.1f} -> {_fl_score:.1f}")
         score = _fl_score
 
-    # ===== 【优化3 - Score Grade】分级过滤 =====
-    _grade_result = get_score_grader().grade(score=score, ev=ev, regime=result.get("regime", "UNKNOWN"))
-    result["grade_result"] = _grade_result
-    if not _grade_result["allow"]:
-        print(f"[{symbol}] GATE-5 ScoreGrade 拒绝: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']} (min_score={_grade_result['min_score_for_grade']}, min_ev={_grade_result['min_ev_for_grade']})")
-        return False
-    else:
-        print(f"[{symbol}] ScoreGrade 通过: score={score:.1f} ev={ev:.4f} grade={_grade_result['grade']}")
-    
-    # ===== 【闭环】FeedbackLoop EV 决策替代固定阈值 =====
-    _fb_res = result.get("_feedback_result", {})
-    if _fb_res.get("should_reject", False):
-        print(f"[{symbol}] FeedbackLoop 拒绝: ev={_fb_res.get('ev', 0):.4f}, "
-              f"confidence={_fb_res.get('confidence', 0):.3f} < "
-              f"threshold={_fb_res.get('reject_threshold', 0.30)}")
-        return False
-    
-    # ===== 【优化4 - Feature Penalty】特征重叠惩罚 =====
+        # ===== 【V6 四级分级路由】替代老式 ScoreGrade =====
+    # 将 score 灌入 v6_final_score 后由 check_and_open_v6_with_routing 接管
+    result["v6_final_score"] = score
+    # 先跑 FeaturePenalty 让分数更精确再路由
     _overlap_penalty = calculate_feature_overlap(features)
     result["feature_penalty"] = _overlap_penalty
     _adjusted_score = apply_feature_penalty(score, features)
@@ -1285,6 +1277,14 @@ def check_and_open(result: dict | None) -> bool:
     result["v6_final_score"] = score
 
     if not check_and_open_v6_with_routing(result):
+        return False
+
+    # ===== 【闭环】FeedbackLoop EV 决策替代固定阈值 =====
+    _fb_res = result.get("_feedback_result", {})
+    if _fb_res.get("should_reject", False):
+        print(f"[{symbol}] FeedbackLoop 拒绝: ev={_fb_res.get('ev', 0):.4f}, "
+              f"confidence={_fb_res.get('confidence', 0):.3f} < "
+              f"threshold={_fb_res.get('reject_threshold', 0.30)}")
         return False
 
     # ===== 【优化1 - Statistical EV Gate】动态EV阈值 =====
@@ -1451,13 +1451,16 @@ def check_and_open(result: dict | None) -> bool:
     _atr_pct = float(result.get("atr", 0)) / max(float(entry if entry > 0 else result.get("entry", 1)), 1e-8)
     _entry_p = float(result.get("entry", 0))
     _sl_p = float(result.get("sl", 0))
+        # 从 V6 路由获取仓位倍率（替代已移除的 ScoreGrader）
+    _v6_route = result.get("action_route", "")
+    _v6_grade_size_mult = 0.5 if _v6_route == "LIVE_HALF_TRADE" else 1.0
     _size_result = _sizer.calculate(
         score=score,
         confidence=result.get("confidence", 0.5),
         avg_win_r=_calib.get("avg_win_r", 0.50),
         avg_loss_r=_calib.get("avg_loss_r", 0.50),
         base_leverage=0.05,
-        grade_size_mult=_grade_result.get("size_mult", 1.0),
+        grade_size_mult=_v6_grade_size_mult,
         env_size_mult=float(_v37_size_mult),
         regime=str(result.get("regime", "UNKNOWN")),
         volatility=str(result.get("vol_state", "normal")),
