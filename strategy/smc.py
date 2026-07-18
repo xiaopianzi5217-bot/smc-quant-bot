@@ -5,6 +5,25 @@ from config import PIVOT_PARAMS, STRATEGY_PARAMS
 import pandas as pd
 import numpy as np
 
+
+def _get_historical_smc_rate(symbol, timeframe, structure_type, current_regime):
+    """Fetch historical win rate for the same SMC structure from the V6 tracker."""
+    if not symbol or not timeframe or not structure_type:
+        return 0.48
+    try:
+        import v6_data_engine
+        return v6_data_engine.get_historical_smc_success_rate(symbol, timeframe, structure_type, current_regime)
+    except Exception:
+        return 0.48
+
+
+def _mapped_structure_score(win_rate, base_score, scale, cap):
+    """Map a historical win rate to a bounded quality score bonus."""
+    score = (win_rate - 0.48) * scale + base_score
+    lower = base_score * 0.4
+    return max(lower, min(cap, score))
+
+
 def _calc_vp(df, lookback=100):
     if df is None or len(df) < 10: return 0.0, 0.0, 0.0
     window = df.tail(lookback)
@@ -143,7 +162,9 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
                    bullish_ob, bearish_ob, bullish_fvg, bearish_fvg,
                    kline_long_ok, kline_short_ok, has_bot_div, has_top_div,
                    sqzmom_white_reversal_long, sqzmom_white_reversal_short,
-                   volume_ratio, adx_val):
+                   volume_ratio, adx_val,
+                   bullish_ob_rate=0.48, bearish_ob_rate=0.48,
+                   bullish_fvg_rate=0.48, bearish_fvg_rate=0.48):
     """
     质量分：用于提高 PF 的软过滤字段。
         不直接砍掉信号，而是把高胜率特征写进 exec_ctx，给 decision/scoring/risk 层使用。
@@ -154,9 +175,11 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
         if is_ssl_swept:
             score += 14; reasons.append("SSL sweep")
         if bullish_ob is not None:
-            score += 10; reasons.append("bullish OB")
+            ob_score = _mapped_structure_score(bullish_ob_rate, 10.0, 35.0, 20.0)
+            score += ob_score; reasons.append(f"bullish OB({ob_score:.1f})")
         if bullish_fvg is not None:
-            score += 7; reasons.append("bullish FVG")
+            fvg_score = _mapped_structure_score(bullish_fvg_rate, 7.0, 25.0, 14.0)
+            score += fvg_score; reasons.append(f"bullish FVG({fvg_score:.1f})")
         if chan_pos <= 0.40:
             score += 8; reasons.append("discount/channel low")
         if kline_long_ok:
@@ -181,9 +204,11 @@ def _score_quality(direction, *, close_val, atr_val, chan_pos, is_ssl_swept, is_
         if is_bsl_swept:
             score += 14; reasons.append("BSL sweep")
         if bearish_ob is not None:
-            score += 10; reasons.append("bearish OB")
+            ob_score = _mapped_structure_score(bearish_ob_rate, 10.0, 35.0, 20.0)
+            score += ob_score; reasons.append(f"bearish OB({ob_score:.1f})")
         if bearish_fvg is not None:
-            score += 7; reasons.append("bearish FVG")
+            fvg_score = _mapped_structure_score(bearish_fvg_rate, 7.0, 25.0, 14.0)
+            score += fvg_score; reasons.append(f"bearish FVG({fvg_score:.1f})")
         if chan_pos >= 0.60:
             score += 8; reasons.append("premium/channel high")
         if kline_short_ok:
@@ -434,7 +459,7 @@ def _check_div(mom_idx_list, df, is_top=True):
     rsi_diff = abs(float(rsi_s.iloc[idx]) - float(rsi_s.iloc[idx1])) if (has_div and rsi_s is not None) else 0.0
     return has_div, just_div, (has_div and cond_vol), rsi_diff
 
-def build_exec_context(df):
+def build_exec_context(df, symbol=None, timeframe="15m"):
     target_idx = len(df) - 1; curr = df.iloc[-1]; prev = df.iloc[-2]
     regime_info = detect_market_regime(df)
     poc, vah, val = _calc_vp(df, 100)
@@ -478,6 +503,12 @@ def build_exec_context(df):
     avg_volume_20 = float(df['volume'].rolling(20).mean().iloc[-1]) if 'volume' in df.columns else 0.0
     volume_ratio = (float(curr.get('volume', 0.0) or 0.0) / avg_volume_20) if avg_volume_20 > 0 else 0.0
 
+    regime_key = regime_info.get('regime', 'unknown')
+    bullish_ob_rate = _get_historical_smc_rate(symbol, timeframe, 'bullish_ob', regime_key)
+    bearish_ob_rate = _get_historical_smc_rate(symbol, timeframe, 'bearish_ob', regime_key)
+    bullish_fvg_rate = _get_historical_smc_rate(symbol, timeframe, 'bullish_fvg', regime_key)
+    bearish_fvg_rate = _get_historical_smc_rate(symbol, timeframe, 'bearish_fvg', regime_key)
+
     long_quality, long_quality_reasons = _score_quality(
         "Long", close_val=close_val, atr_val=atr_val, chan_pos=chan_pos,
         is_ssl_swept=is_ssl_swept, is_bsl_swept=is_bsl_swept,
@@ -488,6 +519,8 @@ def build_exec_context(df):
         sqzmom_white_reversal_long=sqzmom_white_reversal_long,
         sqzmom_white_reversal_short=sqzmom_white_reversal_short,
         volume_ratio=volume_ratio, adx_val=adx_val,
+        bullish_ob_rate=bullish_ob_rate, bearish_ob_rate=bearish_ob_rate,
+        bullish_fvg_rate=bullish_fvg_rate, bearish_fvg_rate=bearish_fvg_rate,
     )
     short_quality, short_quality_reasons = _score_quality(
         "Short", close_val=close_val, atr_val=atr_val, chan_pos=chan_pos,
@@ -499,6 +532,8 @@ def build_exec_context(df):
         sqzmom_white_reversal_long=sqzmom_white_reversal_long,
         sqzmom_white_reversal_short=sqzmom_white_reversal_short,
         volume_ratio=volume_ratio, adx_val=adx_val,
+        bullish_ob_rate=bullish_ob_rate, bearish_ob_rate=bearish_ob_rate,
+        bullish_fvg_rate=bullish_fvg_rate, bearish_fvg_rate=bearish_fvg_rate,
     )
 
     bullish_ob_mid = _range_mid(bullish_ob)

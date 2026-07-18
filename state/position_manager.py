@@ -6,17 +6,24 @@ import os
 import atexit
 import traceback
 import copy
+import time
 
 POSITIONS_FILE = "state/managed_positions.json"
+PROCESSED_SIGNALS_FILE = "state/processed_signals.json"
+PROCESSED_SIGNAL_TTL_SEC = 86400 * 7
 
 
 class PositionManager:
     def __init__(self):
         self._positions = {}
+        self._processed_signals = {}
         self._lock = threading.Lock()
         self._persist_path = POSITIONS_FILE
+        self._processed_signals_path = PROCESSED_SIGNALS_FILE
         self._dirty = False
+        self._processed_dirty = False
         self._load()
+        self._load_processed_signals()
         atexit.register(self._save_at_exit)
 
     # ── 持久化 ──────────────────────────────────────────────
@@ -55,9 +62,54 @@ class PositionManager:
         """程序退出时强制保存"""
         if self._dirty:
             self._save()
+        if self._processed_dirty:
+            self._save_processed_signals()
 
     def _mark_dirty(self):
         self._dirty = True
+
+    def _load_processed_signals(self):
+        """从文件加载已处理信号指纹。"""
+        if os.path.exists(self._processed_signals_path):
+            try:
+                with open(self._processed_signals_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    now = time.time()
+                    cutoff = now - PROCESSED_SIGNAL_TTL_SEC
+                    self._processed_signals = {
+                        k: float(v)
+                        for k, v in data.items()
+                        if isinstance(k, str) and isinstance(v, (int, float)) and float(v) >= cutoff
+                    }
+            except (json.JSONDecodeError, OSError, ValueError) as exc:
+                print(f"[PositionManager] 加载已处理信号失败: {exc}，使用空记录")
+
+    def _save_processed_signals(self):
+        """写入已处理信号指纹持久化文件。"""
+        if not self._processed_dirty:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._processed_signals_path) or ".", exist_ok=True)
+            serialized = json.dumps(
+                self._processed_signals, ensure_ascii=False, indent=2, default=str
+            )
+            with open(self._processed_signals_path + ".tmp", "w", encoding="utf-8") as f:
+                f.write(serialized)
+            os.replace(self._processed_signals_path + ".tmp", self._processed_signals_path)
+            self._processed_dirty = False
+        except Exception as exc:
+            print(f"[PositionManager] 已处理信号持久化写入失败: {exc}")
+            traceback.print_exc()
+
+    def _mark_processed_dirty(self):
+        self._processed_dirty = True
+
+    def _cleanup_processed_signals(self):
+        cutoff = time.time() - PROCESSED_SIGNAL_TTL_SEC
+        stale = [k for k, v in self._processed_signals.items() if v < cutoff]
+        for k in stale:
+            self._processed_signals.pop(k, None)
 
     # ── 核心接口 ────────────────────────────────────────────
 
@@ -83,6 +135,17 @@ class PositionManager:
     def exists(self, symbol: str) -> bool:
         with self._lock:
             return symbol in self._positions
+
+    def is_signal_already_processed(self, signal_id: str) -> bool:
+        with self._lock:
+            return signal_id in self._processed_signals
+
+    def mark_signal_processed(self, signal_id: str) -> None:
+        with self._lock:
+            self._processed_signals[signal_id] = time.time()
+            self._cleanup_processed_signals()
+            self._mark_processed_dirty()
+        self._save_processed_signals()
 
     def all_symbols(self) -> list:
         with self._lock:

@@ -17,6 +17,11 @@ _ROOT = Path(__file__).parent.absolute()
 IS_HF_SPACE = "SPACE_ID" in os.environ
 DB_PATH = _ROOT / "data" / "v6_research.db"
 
+def _get_db_path():
+    """Return a normalized pathlib.Path for the configured database path."""
+    return Path(DB_PATH) if not isinstance(DB_PATH, Path) else DB_PATH
+
+
 def _get_hf_config():
     """安全读取后台锁定的隐私密钥，已为你无缝对齐 Aisvbo 专属仓库配置"""
     repo_id = os.environ.get("HF_DATASET_REPO", "Aisvbo/svb-bot-v6-snapshots")
@@ -31,16 +36,17 @@ def pull_database_from_hub():
         return
     try:
         from huggingface_hub import hf_hub_download
-        print(f"[V6 DataEngine] ⏳ 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[V6 DataEngine] 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
+        db_path = _get_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         downloaded = hf_hub_download(
             repo_id=repo_id,
             filename="v6_research.db",
             repo_type="dataset",
             token=token
         )
-        shutil.copy(downloaded, str(DB_PATH))
-        print("[V6 DataEngine] 🎉 历史交易快照库同步恢复成功！")
+        shutil.copy(downloaded, str(db_path))
+        print("[V6 DataEngine] 历史交易快照库同步恢复成功！")
     except Exception as e:
         print(f"[V6 DataEngine] ℹ️ 云端暂无历史备份，将初始化全新本地库。提示: {e}")
 
@@ -56,28 +62,87 @@ def push_database_to_hub():
             api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True)
         except:
             pass
+        db_path = _get_db_path()
         api.upload_file(
-            path_or_fileobj=str(DB_PATH),
+            path_or_fileobj=str(db_path),
             path_in_repo="v6_research.db",
             repo_id=repo_id,
             repo_type="dataset",
             commit_message=f"🔄 Aisvbo 数据流实时增量备份 - {int(time.time())}"
         )
-        print(f"[V6 DataEngine] ☁️ 云端备份完成！数据已安全锁入私有 Dataset.")
+        print(f"[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
     except Exception as e:
-        print(f"[V6 DataEngine] ❌ 实时同步至 Hugging Face Hub 失败: {e}")
+        print(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 
 # ============================================================
 # PART 1: SQLite 高维交易快照持久化
 # ============================================================
 
+def _ensure_column(cursor, table: str, column: str, definition: str):
+    cursor.execute(f"PRAGMA table_info({table})")
+    existing = [row[1] for row in cursor.fetchall()]
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def expand_v6_table_for_smc():
+    """在 V6 引擎中初始化 SMC 结构生死账本表。"""
+    conn = sqlite3.connect(str(_get_db_path()))
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS smc_structure_tracker (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            symbol TEXT,
+            timeframe TEXT,
+            structure_type TEXT,
+            direction TEXT,
+            price_level REAL,
+            is_mitigated INTEGER DEFAULT 0,
+            outcome INTEGER DEFAULT NULL,
+            regime TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_historical_smc_success_rate(symbol, timeframe, structure_type, current_regime):
+    """查询过去 1000 个相似 SMC 结构的真实统计学胜率。"""
+    try:
+        conn = sqlite3.connect(str(_get_db_path()))
+        cursor = conn.cursor()
+        query = """
+            SELECT outcome FROM smc_structure_tracker
+            WHERE symbol = ? AND timeframe = ? AND structure_type = ? AND regime = ? AND outcome IS NOT NULL
+            ORDER BY timestamp DESC LIMIT 1000
+        """
+        cursor.execute(query, (symbol, timeframe, structure_type, current_regime))
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception:
+        return 0.48
+
+    if not rows or len(rows) < 30:
+        return 0.48
+
+    outcomes = [r[0] for r in rows if r[0] is not None]
+    if not outcomes:
+        return 0.48
+
+    success_count = sum(1 for o in outcomes if o == 1)
+    actual_probability = success_count / len(outcomes)
+    return actual_probability
+
+
 def init_v6_database():
     """初始化数据库流程"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if IS_HF_SPACE and not DB_PATH.exists():
+    db_path = _get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if IS_HF_SPACE and not db_path.exists():
         pull_database_from_hub()
         
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS trade_snapshots (
@@ -102,20 +167,31 @@ def init_v6_database():
             initial_tp1 REAL,
             estimated_rr REAL,
             kelly_size REAL,
+            sqz_released INTEGER DEFAULT 0,
+            sqz_duration INTEGER DEFAULT 0,
+            sqz_strength REAL DEFAULT 0.0,
+            sqz_vol_ratio REAL DEFAULT 1.0,
+            sqz_volume_confirmed INTEGER DEFAULT 0,
             exit_reason TEXT DEFAULT 'OPEN',
             pnl_r REAL DEFAULT NULL,
             max_forward_r REAL DEFAULT 0.0,
             max_adverse_r REAL DEFAULT 0.0
         )
     """)
+    _ensure_column(cursor, "trade_snapshots", "sqz_released", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "trade_snapshots", "sqz_duration", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "trade_snapshots", "sqz_strength", "REAL DEFAULT 0.0")
+    _ensure_column(cursor, "trade_snapshots", "sqz_vol_ratio", "REAL DEFAULT 1.0")
+    _ensure_column(cursor, "trade_snapshots", "sqz_volume_confirmed", "INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
+    expand_v6_table_for_smc()
     print(f"[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
 
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     """拍摄高维环境特征快照"""
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
         
         signal_id = result.get("signal_id") or f"{result['symbol']}_{int(time.time())}"
@@ -125,16 +201,27 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         
         def _get_val(d, *keys, default=0.0):
             for k in keys:
-                if k in d: return float(d[k] or default)
-            return default
+                if k in d:
+                    val = d[k]
+                    if val is None:
+                        return float(default)
+                    if isinstance(val, bool):
+                        return float(1.0 if val else 0.0)
+                    try:
+                        return float(val)
+                    except Exception:
+                        return float(default)
+            return float(default)
 
+        sqz_data = result.get("sqz_data", {}) or {}
         cursor.execute("""
             INSERT OR REPLACE INTO trade_snapshots (
                 signal_id, timestamp, symbol, direction,
                 regime, vol_state, adx_14, atr_14, rsi_50, feature_hash, raw_features_json,
                 p_win_raw, p_win_calibrated, model_ev, blended_ev, confidence,
-                entry_price, initial_sl, initial_tp1, estimated_rr, kelly_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_price, initial_sl, initial_tp1, estimated_rr, kelly_size,
+                sqz_released, sqz_duration, sqz_strength, sqz_vol_ratio, sqz_volume_confirmed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             signal_id, int(time.time()), result["symbol"], result["direction"],
             str(result.get("regime", "UNKNOWN")).upper(), str(result.get("vol_state", "NORMAL")).upper(),
@@ -142,23 +229,28 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
             feat_hash, json.dumps(features, ensure_ascii=False),
             float(result.get("p_win_raw", 0.5)), float(result.get("confidence", 0.5)),
             float(result.get("expected_value", 0.0)), float(result.get("blended_ev", 0.0)), float(result.get("confidence", 0.5)),
-            float(result["entry"]), float(result["sl"]), float(result["tp1"]), float(result.get("rr", 1.0)), float(kelly_size)
+            float(result["entry"]), float(result["sl"]), float(result["tp1"]), float(result.get("rr", 1.0)), float(kelly_size),
+            1.0 if bool(sqz_data.get("released", False)) else 0.0,
+            int(sqz_data.get("duration", 0)),
+            float(sqz_data.get("strength", 0.0)),
+            float(sqz_data.get("vol_ratio", 1.0)),
+            1.0 if bool(sqz_data.get("volume_confirmed", False)) else 0.0,
         ))
         conn.commit()
         conn.close()
-        print(f"[V6 DataEngine] 📥 开单高维快照已锁定 -> {signal_id}")
+        print(f"[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
         
         if IS_HF_SPACE:
             push_database_to_hub()
     except Exception as e:
-        print(f"[V6 DataEngine] ❌ 记录开单快照失败: {e}")
+        print(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0):
     """横向拼接真实结局标签"""
     if not signal_id:
         return
     try:
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE trade_snapshots 
@@ -167,16 +259,12 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
         """, (exit_reason, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
         conn.commit()
         conn.close()
-        print(f"[V6 DataEngine] 🎯 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
+        print(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
         
         if IS_HF_SPACE:
             push_database_to_hub()
     except Exception as e:
-        print(f"[V6 DataEngine] ❌ 拼接平仓标签失败: {e}")
-
-# ============================================================
-# PART 2: Feature Importance 自动复盘
-# ============================================================
+        print(f"[V6 DataEngine] 拼接平仓标签失败: {e}")
 
 class DynamicFeatureOptimizer:
     def __init__(self, min_samples: int = 50, window_size: int = 1000):
@@ -185,10 +273,10 @@ class DynamicFeatureOptimizer:
         self.feature_weights = {"OB": 20.0, "SQZMOM": 15.0, "CHOCH": 25.0, "FVG": 10.0, "DIVERGENCE": 12.0}
 
     def update_feature_importance_from_db(self):
-        if not DB_PATH.exists():
+        if not _get_db_path().exists():
             return self.feature_weights
         try:
-            conn = sqlite3.connect(str(DB_PATH))
+            conn = sqlite3.connect(str(_get_db_path()))
             query = "SELECT raw_features_json, pnl_r FROM trade_snapshots WHERE pnl_r IS NOT NULL ORDER BY timestamp DESC LIMIT ?"
             df = pd.read_sql_query(query, conn, params=(self.window_size,))
             conn.close()
@@ -228,7 +316,7 @@ class DynamicFeatureOptimizer:
             print(f"[V6 FeatureOptimizer] 🔄 特征权重动态重算成功: {self.feature_weights}")
             return self.feature_weights
         except Exception as e:
-            print(f"❌ 自动更新特征权重异常: {e}")
+            print(f"自动更新特征权重异常: {e}")
             return self.feature_weights
 
 get_v6_optimizer = DynamicFeatureOptimizer()

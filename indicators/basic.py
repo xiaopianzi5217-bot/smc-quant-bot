@@ -60,6 +60,71 @@ def _linreg(series, length=20):
         return a * (len(y)-1) + b
     return series.rolling(length).apply(calc, raw=False)
 
+
+def calculate_advanced_sqzmom(df: pd.DataFrame, length: int = 20, mult_bb: float = 2.0, mult_kc: float = 1.5) -> dict:
+    """
+    【V6指标核心升级】精细化 Squeeze Momentum 测速雷达
+    返回最新一根 K 线的 SQZMOM 深度多维特征字典
+    """
+    if df is None or len(df) < length + 5:
+        return {
+            "released": False,
+            "duration": 0,
+            "strength": 0.0,
+            "vol_ratio": 1.0,
+            "volume_confirmed": False,
+        }
+
+    close = df['close'].astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    volume = df['volume'].astype(float) if 'volume' in df.columns else pd.Series([0.0] * len(df), index=df.index)
+
+    ma = close.rolling(window=length, min_periods=length).mean()
+    std = close.rolling(window=length, min_periods=length).std()
+    upper_bb = ma + mult_bb * std
+    lower_bb = ma - mult_bb * std
+
+    tr = _true_range(high, low, close)
+    atr = tr.rolling(window=length, min_periods=length).mean()
+    kc_basis = _ema(close, length)
+    upper_kc = kc_basis + mult_kc * atr
+    lower_kc = kc_basis - mult_kc * atr
+
+    is_squeezing = (upper_bb < upper_kc) & (lower_bb > lower_kc)
+
+    duration = 0
+    idx = len(df) - 1
+    if idx >= 0 and not bool(is_squeezing.iloc[idx]):
+        idx -= 1
+    while idx >= 0 and bool(is_squeezing.iloc[idx]):
+        duration += 1
+        idx -= 1
+
+    hist = (close - kc_basis).fillna(0.0)
+    current_hist = float(hist.iloc[-1]) if len(hist) >= 1 else 0.0
+    prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
+
+    was_squeezing = bool(is_squeezing.iloc[-2]) if len(is_squeezing) >= 2 else False
+    is_squeezing_now = bool(is_squeezing.iloc[-1]) if len(is_squeezing) >= 1 else False
+    released = was_squeezing and not is_squeezing_now
+    strength = abs(current_hist - prev_hist)
+
+    avg_vol = volume.rolling(window=20, min_periods=5).mean().iloc[-1] if len(volume) >= 20 else volume.mean()
+    avg_vol = float(avg_vol) if not pd.isna(avg_vol) and avg_vol > 0 else 1.0
+    current_vol = float(volume.iloc[-1]) if len(volume) >= 1 else 0.0
+    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+    volume_confirmed = vol_ratio >= 1.3
+
+    return {
+        "released": bool(released),
+        "duration": int(duration),
+        "strength": round(float(strength), 4),
+        "vol_ratio": round(float(vol_ratio), 2),
+        "volume_confirmed": bool(volume_confirmed),
+    }
+
+
 def _local_pivot_low(s: pd.Series, left: int = 2, right: int = 1) -> pd.Series:
     out = pd.Series(False, index=s.index)
     for k in range(left, len(s) - right):

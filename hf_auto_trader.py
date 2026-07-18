@@ -21,7 +21,7 @@ if str(_root) not in sys.path:
 import pandas as pd
 
 # ---------- 基础指标与策略模块 ----------
-from indicators.basic import add_all_indicators
+from indicators.basic import add_all_indicators, calculate_advanced_sqzmom
 from strategy.smc import build_macro_context, build_exec_context
 from strategy.risk import calculate_dynamic_tp_sl, check_partial_close_and_trail
 from notifier.observer.funding import fetch_funding_rate_safe, normalize_swap_symbol
@@ -458,11 +458,28 @@ async def scan_and_decide(symbol: str) -> dict | None:
 
     if "idx" in candidates.columns:
         last_idx = int(df_v56.index.max())
-        recent_threshold = max(0, last_idx - 1)
+        LOOKBACK_CANDLES = 5
+        recent_threshold = max(0, last_idx - LOOKBACK_CANDLES)
         candidates = candidates[candidates["idx"] >= recent_threshold].copy()
-        print(f"[{symbol}] 限制候选信号到最新2根K线: idx>={recent_threshold}, 剩余{len(candidates)}条")
+        print(f"[{symbol}] 🔍 正在扫描候选信号... 限制窗口拓宽至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
         if candidates.empty:
             print(f"[{symbol}] 仅历史信号存在，跳过本轮扫描")
+            return None
+
+        # 🔒 信号排重：防止同一个 signal 在拓宽窗口内的第3/第4根K线重复开仓
+        seen_signal_ids = set()
+        deduped_rows = []
+        for _, signal in candidates.iterrows():
+            sig_id = _candidate_signal_id(signal)
+            if sig_id in seen_signal_ids or position_manager.is_signal_already_processed(sig_id):
+                print(f"[{symbol}] 信号 {sig_id} 之前已执行过，跳过排重。")
+                continue
+            seen_signal_ids.add(sig_id)
+            deduped_rows.append(signal)
+
+        candidates = pd.DataFrame(deduped_rows, columns=candidates.columns) if deduped_rows else pd.DataFrame(columns=candidates.columns)
+        if candidates.empty:
+            print(f"[{symbol}] 排重后无有效候选信号，跳过本轮扫描")
             return None
 
     print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
@@ -476,7 +493,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
     df_macro = add_all_indicators(df_macro, STRATEGY_PARAMS["wvf_std_mult"])
     macro_ctx = build_macro_context(df_macro)
-    exec_ctx = build_exec_context(df_exec)
+    exec_ctx = build_exec_context(df_exec, symbol=symbol, timeframe="15m")
     exec_ctx["data_source"] = "hf_auto"
     
     # Step 2: select_trades — 包含 Quality Gate + Top-N + 集群风险缩放 + 执行
@@ -605,6 +622,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         # ===== 【特征收集 - 用于优化4/5】构建特征字典 =====
     # 【修复20260726】注入 regime 信息，让 feature_penalty 能做 regime-aware 惩罚
     _regime_name = str(_htf_state.get("regime", "UNKNOWN")).upper().strip()
+    sqz_data = calculate_advanced_sqzmom(df_exec)
     _features = {
         "ema_trend": _htf_state.get("trend_strength", 0) > 0.4,
         "adx": float(exec_ctx.get("adx", 0)) > 25,
@@ -620,6 +638,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "price_acceleration": False,
         "volume_surge": float(curr.get("volume_ratio", 1)) > 2.0 if hasattr(curr, 'get') else False,
         "ema_alignment": _htf_state.get("regime") in ("BULL", "BEAR"),
+        # ===== SQZMOM 高维特征 =====
+        "sqz_released": sqz_data["released"],
+        "sqz_duration": sqz_data["duration"],
+        "sqz_strength": sqz_data["strength"],
+        "sqz_vol_ratio": sqz_data["vol_ratio"],
+        "sqz_volume_confirmed": sqz_data["volume_confirmed"],
         # 【新增20260726】注入 regime 字段，供 feature_penalty 动态调整惩罚系数
         "regime": _regime_name,
     }
@@ -722,6 +746,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "atr": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))),
         "macd_hist": float(curr.get("MACDh_12_26_9", 0)),
         "volume_ratio": float(curr.get("volume_ratio", 1)),
+        "sqz_data": sqz_data,
         "candle_color": str(exec_ctx.get("curr_color", "")),
         "color_changed": bool(exec_ctx.get("color_changed", False)),
         "squeeze": str(exec_ctx.get("squeeze", "")),
@@ -1014,47 +1039,6 @@ def _push_observer_event(
     print(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
 # Strategy 信号推送与去重
 # ============================================================
-_PROCESSED_SIGNALS: dict = {}
-_SIGNAL_DIARY_PATH = Path("logs/signal_fingerprint_diary.jsonl")
-
-def _load_processed_signals() -> None:
-    """从磁盘加载已处理信号，确保进程重启后去重仍然生效。"""
-    global _PROCESSED_SIGNALS
-    try:
-        p = _SIGNAL_DIARY_PATH
-        if p.exists() and p.stat().st_size > 0:
-            now = time.time()
-            loaded = 0
-            for line in p.read_text(encoding="utf-8").strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    sig_id = entry.get("signal_id", "")
-                    ts = entry.get("ts", 0)
-                    if sig_id and now - ts < 86400:
-                        _PROCESSED_SIGNALS[sig_id] = ts
-                        loaded += 1
-                except Exception:
-                    continue
-            if loaded > 0:
-                print(f"[_load_processed_signals] 从磁盘加载了 {loaded} 个已处理信号指纹")
-    except Exception as e:
-        print(f"[_load_processed_signals] 加载失败: {e}")
-
-def _persist_signal_fingerprint(signal_id: str) -> None:
-    """将信号指纹持久化到磁盘JSONL文件。"""
-    try:
-        _SIGNAL_DIARY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        entry = {"signal_id": signal_id, "ts": time.time()}
-        with open(_SIGNAL_DIARY_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[_persist_signal_fingerprint] 持久化失败: {e}")
-
-# 模块加载时自动恢复已处理信号
-_load_processed_signals()
 
 def _signal_id(result: dict) -> str:
     """构建高精度信号指纹，确保每次扫描的每个信号都是唯一可追踪的。
@@ -1082,24 +1066,123 @@ def _signal_id(result: dict) -> str:
     regime = str(result.get("regime", "UNKNOWN"))[:4]
     return f"{symbol}_{direction}_{setup_type}_idx{idx}_s{score_bucket}_ev{ev_bucket}_{regime}"
 
+
+def _candidate_signal_id(signal_row) -> str:
+    """Build a signal fingerprint from a candidate row without persisting it."""
+    if hasattr(signal_row, "to_dict"):
+        signal_row = signal_row.to_dict()
+
+    symbol = str(signal_row.get("symbol", "UNKNOWN"))
+    direction = str(signal_row.get("direction", "NONE") or "NONE")
+    setup_type = str(signal_row.get("setup_type", signal_row.get("reason", "UNKNOWN")))
+    idx = int(signal_row.get("idx", -1)) if signal_row.get("idx", None) is not None else -1
+    score_bucket = int(float(signal_row.get("score", 0.0)) / 10) if signal_row.get("score", None) is not None else -1
+    _ev = float(signal_row.get("model_ev", signal_row.get("expected_value", 0.0)) or 0.0)
+    ev_bucket = f"{_ev:+.3f}"[:6]
+    regime = str(signal_row.get("regime", "UNKNOWN"))[:4]
+    return f"{symbol}_{direction}_{setup_type}_idx{idx}_s{score_bucket}_ev{ev_bucket}_{regime}"
+
+
+def _is_signal_already_processed(signal_id: str) -> bool:
+    """Check whether a signal fingerprint has already been seen without marking it."""
+    return position_manager.is_signal_already_processed(signal_id)
+
+
 def _is_signal_processed(signal_id: str) -> bool:
     """信号去重：检查是否已处理过。
 
     修复时机：同一 signal_id 只允许触发一次，避免历史 K 线“诈尸”复活。
     通过 signal_id 永久阻止同一根 K 线上的同一个 Setup 再次开单。
     """
-    if signal_id in _PROCESSED_SIGNALS:
+    if position_manager.is_signal_already_processed(signal_id):
         return True
 
-    _PROCESSED_SIGNALS[signal_id] = time.time()
-    # 持久化到磁盘，防止进程重启后丢失
-    _persist_signal_fingerprint(signal_id)
-    # 清理旧记录，保留最近 7 天信号指纹，避免无限增长
-    stale_cutoff = time.time() - 86400 * 7
-    stale = [k for k, v in _PROCESSED_SIGNALS.items() if v < stale_cutoff]
-    for k in stale:
-        del _PROCESSED_SIGNALS[k]
+    position_manager.mark_signal_processed(signal_id)
     return False
+
+
+def async_background_task(coro):
+    """Schedule an async coroutine to run in the background."""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(coro)
+    except RuntimeError:
+        threading.Thread(target=lambda: asyncio.run(coro), daemon=True).start()
+
+
+async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
+    """Background record snapshot and optional HF push."""
+    try:
+        await asyncio.to_thread(emit, "record_open_snapshot", result, kelly_size=kelly_size)
+        # TODO: add live HF hub push here if needed.
+    except Exception as exc:
+        print(f"[async_record_snapshot_and_push] 异步记录异常: {exc}")
+
+
+def _bg_weixin_push(msg: str):
+    """Asynchronous wrapper around telegram push."""
+    try:
+        send_telegram(msg)
+    except Exception as exc:
+        print(f"[_bg_weixin_push] 微信推送失败: {exc}")
+
+
+def evaluate_signal_v6_routing(result: dict) -> dict:
+    """
+    【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
+    """
+    score = float(result.get("v6_final_score", result.get("score", 0.0)) or 0.0)
+    result["v6_final_score"] = score
+
+    if score >= 70.0:
+        result["v6_level"] = "A_GRADE"
+        result["action_route"] = "LIVE_FULL_TRADE"
+    elif 55.0 <= score < 70.0:
+        result["v6_level"] = "B_GRADE"
+        result["action_route"] = "LIVE_HALF_TRADE"
+    elif 45.0 <= score < 55.0:
+        result["v6_level"] = "OBSERVE_GRADE"
+        result["action_route"] = "RESEARCH_SILENT"
+    else:
+        result["v6_level"] = "REJECT_GRADE"
+        result["action_route"] = "ABSOLUTE_DROP"
+
+    return result
+
+
+def check_and_open_v6_with_routing(result: dict) -> bool:
+    """完全体分级路由执行中心：让 45-55 分的信号乖乖变成进化燃料"""
+    symbol = result.get("symbol", "?")
+    result["base_size"] = float(result.get("base_size", result.get("size", 0.05)) or 0.05)
+    result["v6_final_score"] = float(result.get("v6_final_score", result.get("score", 0.0)) or 0.0)
+
+    result = evaluate_signal_v6_routing(result)
+    route = result["action_route"]
+    level = result["v6_level"]
+    score = result["v6_final_score"]
+
+    if route == "ABSOLUTE_DROP":
+        print(f"🗑️ [V6_DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
+        return False
+
+    if route == "RESEARCH_SILENT":
+        research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
+        result["signal_id"] = research_id
+        result["exit_reason"] = "RESEARCH_OBSERVE"
+        print(f"🔬 [V6 科研收割] 捕获 {level} 信号 ({score}分) | 实盘静默不发单 -> 强行拍摄特征快照打入云端铁盒！")
+        async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+        return False
+
+    trade_size = result["base_size"]
+    if route == "LIVE_HALF_TRADE":
+        trade_size *= 0.5
+    result["size"] = trade_size
+    sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
+    result["signal_id"] = sig_id
+    print(f"🔥 [V6 实盘激活] 捕获优质 {level} 信号 ({score}分) | 触发交易所真实下单，分配仓位: {trade_size}")
+    async_background_task(_bg_weixin_push(f"📊 V6 分级开仓通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}"))
+    return True
+
 
 def check_and_open(result: dict | None) -> bool:
     """开单检查与推送
@@ -1153,6 +1236,22 @@ def check_and_open(result: dict | None) -> bool:
     ev = blended_ev
     score = result.get("score", 0.0)
     
+    # ===== 【V56.5 SQZMOM 精细化加分/扣分】=====
+    sqz_data = result.get("sqz_data", {}) or {}
+    if sqz_data.get("released", False):
+        _sqz_adj = 12.0
+        if int(sqz_data.get("duration", 0)) >= 15:
+            _sqz_adj += 8.0
+            print(f"⚡ [{symbol}] [SQZMOM蓄能爆发] 连续蓄势 {sqz_data['duration']} 根 K 线，追加爆发分！")
+        if not bool(sqz_data.get("volume_confirmed", False)):
+            _sqz_adj -= 10.0
+            print(f"⚠️ [{symbol}] [SQZMOM量能背离] 缩量释放 (放量比:{sqz_data.get('vol_ratio', 0):.2f})，触发软扣分。")
+        score += _sqz_adj
+        result["_sqz_score_adj"] = round(_sqz_adj, 2)
+        result["_sqz_data"] = sqz_data
+        result["score"] = score
+        print(f"[{symbol}] SQZMOM release adjust: duration={sqz_data.get('duration')} strength={sqz_data.get('strength')} vol_ratio={sqz_data.get('vol_ratio')} confirmed={sqz_data.get('volume_confirmed')} adj={_sqz_adj:+.1f}")
+
     # ===== 【V21 FeatureLearningEngine】权重调整分数 =====
     _fl_score = result.get("_feature_learning_score", 0.0)
     if _fl_score > 0 and _fl_score != score:
@@ -1181,12 +1280,13 @@ def check_and_open(result: dict | None) -> bool:
     result["feature_penalty"] = _overlap_penalty
     _adjusted_score = apply_feature_penalty(score, features)
     print(f"[{symbol}] FeaturePenalty: 原始score={score:.1f} -> 调整后={_adjusted_score:.1f} (penalty={_overlap_penalty})")
-    if _adjusted_score < MIN_SCORE_FOR_PUSH:
-        print(f"[{symbol}] FeaturePenalty 后 score={_adjusted_score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
-        return False
-    # 用调整后的 score 替代原始 score 用于后续检查
     score = _adjusted_score
-    
+    result["score"] = score
+    result["v6_final_score"] = score
+
+    if not check_and_open_v6_with_routing(result):
+        return False
+
     # ===== 【优化1 - Statistical EV Gate】动态EV阈值 =====
     _regime = str(result.get("regime", "unknown"))
     _vol_state = str(result.get("vol_state", "unknown"))
