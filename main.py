@@ -33,6 +33,7 @@ def _ensure_env():
         ("EXCHANGE_API_KEY", "BITGET_API_KEY"),
         ("EXCHANGE_API_SECRET", "BITGET_SECRET"),
         ("EXCHANGE_PASSWORD", "BITGET_PASSWORD"),
+        ("HF_TOKEN", None),
     ]
     for primary, alt in _essential_vars:
         if not os.getenv(primary):

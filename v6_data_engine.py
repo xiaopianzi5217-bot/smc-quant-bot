@@ -43,6 +43,20 @@ def make_json_serializable(obj):
 
 def _get_hf_config():
     """安全读取后台锁定的隐私密钥，已为你无缝对齐 Aisvbo 专属仓库配置"""
+    # 兜底：如果环境变量中没有 HF_TOKEN，尝试从 .env 文件读取
+    if not os.environ.get("HF_TOKEN"):
+        _env_path = _ROOT / ".env"
+        if _env_path.exists():
+            try:
+                for _line in _env_path.read_text(encoding="utf-8").splitlines():
+                    _line = _line.strip()
+                    if _line.startswith("HF_TOKEN="):
+                        _val = _line.split("=", 1)[1].strip().strip("'\"")
+                        if _val:
+                            os.environ["HF_TOKEN"] = _val
+                            break
+            except Exception:
+                pass
     repo_id = os.environ.get("HF_DATASET_REPO", "Aisvbo/svb-bot-v6-snapshots")
     token = os.environ.get("HF_TOKEN")          
     return repo_id, token
