@@ -324,6 +324,12 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
     if priority == "AUTO":
         priority = _auto_priority(msg)
 
+        # ===== 【修复推送重复】给 TRADE/SYSTEM 消息追加时间戳防止微信判重 =====
+    _now_dt = __import__("datetime").datetime.now()
+    _ts_suffix = f" [{_now_dt.strftime('%H:%M:%S.%f')[:-3]}]"
+    if priority in ("TRADE", "SYSTEM"):
+        msg = msg + _ts_suffix
+
     if priority == "TRADE" or priority == "SYSTEM":
         print(f"[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
     else:
