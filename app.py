@@ -684,14 +684,11 @@ def _start_hf_auto_trader():
 
 
 if __name__ == "__main__":
-    import asyncio
-    import sys
-
-    # 压制在 Hugging Face Spaces 中 Gradio 停止事件循环时产生的无效文件描述符报错
-    if sys.platform != "win32":
-        asyncio.get_event_loop_policy().get_event_loop().set_exception_handler(
-            lambda loop, context: None if "Invalid file descriptor" in str(context.get("message", "")) else loop.default_exception_handler(context)
-        )
+    # 【根本修复】不在主线程创建/扰动 asyncio 事件循环。
+    # Gradio 内部（uvicorn/Starlette）自建事件循环，主线程预创建循环会导致
+    # 退出时 BaseEventLoop.__del__ 争夺已由 Gradio 关闭的 fd，产生：
+    #   ValueError: Invalid file descriptor: -1
+    # 解决方案：完全删除对主线程事件循环的任何操作。
 
     start_background_monitor()
 

@@ -17,6 +17,9 @@ _ROOT = Path(__file__).parent.absolute()
 IS_HF_SPACE = "SPACE_ID" in os.environ
 DB_PATH = _ROOT / "data" / "v6_research.db"
 
+# 【根本修复】缓存标记：拉取成功/确认不存在后写入，避免每次启动重复尝试
+_DB_INIT_SENTINEL = _ROOT / "data" / ".db_initialized"
+
 def _get_db_path():
     """Return a normalized pathlib.Path for the configured database path."""
     return Path(DB_PATH) if not isinstance(DB_PATH, Path) else DB_PATH
@@ -30,9 +33,16 @@ def _get_hf_config():
 
 def pull_database_from_hub():
     """【启动恢复】从 HF Dataset 下载历史最新的数据库，防止容器重置导致数据流断裂"""
+    # 【根本修复】已拉取过（无论成功/确认不存在），跳过重复请求
+    if _DB_INIT_SENTINEL.exists():
+        print("[V6 DataEngine] 已确认过云端状态，跳过拉取。")
+        return
+
     repo_id, token = _get_hf_config()
     if not repo_id or not token:
-        print("[V6 DataEngine] ⚠️ 未检测到云端灾备配置，跳过云端数据库拉取。")
+        print("[V6 DataEngine] 未检测到云端灾备配置，跳过云端数据库拉取。")
+        _DB_INIT_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+        _DB_INIT_SENTINEL.write_text("no_cloud_config", encoding="utf-8")
         return
     try:
         from huggingface_hub import hf_hub_download
@@ -46,9 +56,17 @@ def pull_database_from_hub():
             token=token
         )
         shutil.copy(downloaded, str(db_path))
+        # 拉取成功 -> 写标记
+        _DB_INIT_SENTINEL.write_text("pulled_ok", encoding="utf-8")
         print("[V6 DataEngine] 历史交易快照库同步恢复成功！")
     except Exception as e:
-        print(f"[V6 DataEngine] ℹ️ 云端暂无历史备份，将初始化全新本地库。提示: {e}")
+        err_str = str(e)
+        if "404" in err_str or "Entry Not Found" in err_str:
+            print("[V6 DataEngine] 云端无历史备份 (首次部署)，初始化全新本地库。")
+            # 确认不存在 -> 写标记，下次不重复尝试
+            _DB_INIT_SENTINEL.write_text("no_cloud_backup_404", encoding="utf-8")
+        else:
+            print(f"[V6 DataEngine] io 云端数据库拉取异常: {e}")
 
 def push_database_to_hub():
     """【实时备份】将本地最新写入的快照瞬间同步至云端私有仓库"""
