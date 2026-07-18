@@ -62,6 +62,21 @@ class SignalTracker:
             "status": "open",
         }
         try:
+            # 递归转换 features 中所有 numpy/bool 类型为原生 Python 类型
+            def _to_native(o):
+                import numpy as np
+                if isinstance(o, (np.bool_, np.bool)):
+                    return bool(o)
+                if isinstance(o, (np.integer, np.int64, np.int32)):
+                    return int(o)
+                if isinstance(o, (np.floating, np.float64)):
+                    return float(o)
+                if isinstance(o, dict):
+                    return {k: _to_native(v) for k, v in o.items()}
+                if isinstance(o, (list, tuple)):
+                    return [_to_native(v) for v in o]
+                return o
+            record = _to_native(record)
             with open(self.log_file, "a") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
