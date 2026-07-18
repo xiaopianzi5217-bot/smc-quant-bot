@@ -19,6 +19,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pandas as pd
+import aiohttp
 
 # ---------- 基础指标与策略模块 ----------
 from indicators.basic import add_all_indicators, calculate_advanced_sqzmom
@@ -1101,13 +1102,33 @@ def _is_signal_processed(signal_id: str) -> bool:
     return False
 
 
-def async_background_task(coro):
-    """Schedule an async coroutine to run in the background."""
+def async_background_task(coro_or_func, *args, **kwargs):
+    """Unified background task dispatcher. Compatible with coroutines & sync functions."""
+    # ── case 1: coroutine object ──
+    if asyncio.iscoroutine(coro_or_func):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro_or_func)
+        except RuntimeError:
+            threading.Thread(target=lambda: asyncio.run(coro_or_func), daemon=True).start()
+        return
+
+    # ── case 2: coroutine function ──
+    if asyncio.iscoroutinefunction(coro_or_func):
+        coro = coro_or_func(*args, **kwargs)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except RuntimeError:
+            threading.Thread(target=lambda: asyncio.run(coro), daemon=True).start()
+        return
+
+    # ── case 3: normal sync function ──
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(coro)
+        loop.run_in_executor(None, lambda: coro_or_func(*args, **kwargs))
     except RuntimeError:
-        threading.Thread(target=lambda: asyncio.run(coro), daemon=True).start()
+        threading.Thread(target=lambda: coro_or_func(*args, **kwargs), daemon=True).start()
 
 
 async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
@@ -1119,10 +1140,16 @@ async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
         print(f"[async_record_snapshot_and_push] 异步记录异常: {exc}")
 
 
-def _bg_weixin_push(msg: str):
-    """Asynchronous wrapper around telegram push."""
+async def _bg_weixin_push(msg: str):
+    """Asynchronous wei xin push using aiohttp."""
+    url = "你的微信推送API地址"
+    payload = {"text": msg}
+
     try:
-        send_telegram(msg)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                result = await response.json()
+                print(f"[DEBUG] 微信推送: {result}")
     except Exception as exc:
         print(f"[_bg_weixin_push] 微信推送失败: {exc}")
 
@@ -1180,13 +1207,8 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
     print(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
-    # 【修复】_bg_weixin_push 是同步函数，用 run_in_executor 放入线程池
     _weixin_msg = f"V6 分级开仓通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}"
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, _bg_weixin_push, _weixin_msg)
-    except RuntimeError:
-        threading.Thread(target=_bg_weixin_push, args=(_weixin_msg,), daemon=True).start()
+    async_background_task(_bg_weixin_push, _weixin_msg)
     return True
 
 
