@@ -1173,7 +1173,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
         return False
 
-        trade_size = result["base_size"]
+    trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
     result["size"] = trade_size
