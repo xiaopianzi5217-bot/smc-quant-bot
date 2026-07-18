@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版
@@ -383,7 +383,21 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320) -> 
         granularity = tf_map.get(timeframe, "15m")
         url = "https://api.bitget.com/api/v2/mix/market/candles"
         params = {"symbol": sym, "productType": "umcbl", "granularity": granularity, "limit": min(limit, 500)}
-        resp = requests.get(url, params=params, timeout=15, verify=verify_ssl)
+        # ===== 【优化1 - 动态 TimeOut】行情感知自动分发 =====
+        # 趋势环境给更长 timeout（数据量更大需要更久），震荡/未知给较短 timeout
+        _current_regime_for_timeout = "TREND"
+        try:
+            from strategy.htf_regime_filter import get_htf_regime_filter
+            if hasattr(get_htf_regime_filter(), 'get_cached_regime'):
+                _cached = get_htf_regime_filter().get_cached_regime()
+                if _cached:
+                    _current_regime_for_timeout = _cached
+        except Exception:
+            pass
+        _regime_key = str(_current_regime_for_timeout).upper()
+        _timeout_map = {'TREND': 20, 'RANGE': 8, 'CHOP': 8, 'TRANSITION': 10}
+        _timeout = _timeout_map.get(_regime_key, 10)
+        resp = requests.get(url, params=params, timeout=_timeout, verify=verify_ssl)
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -501,7 +515,44 @@ async def scan_and_decide(symbol: str) -> dict | None:
     
     if trades is None or trades.empty:
         print(f"[{symbol}] V56.5 选择后无交易")
-        return None
+        # ── Observer-only 返回：即使无交易，也推送结构事件 ──
+        curr = df_exec.iloc[-1]
+        regime_name = str(get_htf_regime_filter().analyze(df_macro).get("regime", "UNKNOWN")).upper().strip()
+        long_score = float(exec_ctx.get("long_quality", 0))
+        short_score = float(exec_ctx.get("short_quality", 0))
+        return {
+            "symbol": symbol,
+            "direction": None, "expected_value": 0.0, "score": 0.0,
+            "approved": False, "reason": "OBSERVER_ONLY",
+            "regime": regime_name.lower(), "vol_state": exec_ctx.get("volatility", "unknown"),
+            "book": "OBSERVER", "size": 0.0,
+            "df_exec": df_exec, "exec_ctx": exec_ctx, "macro_ctx": macro_ctx, "curr": curr,
+            "observer_events": [],
+            "long_score": long_score, "short_score": short_score,
+            "long_ev": 0.0, "short_ev": 0.0,
+            "long_entry": 0.0, "long_sl": 0.0, "long_tp1": 0.0, "long_tp2": 0.0, "long_tp3": 0.0, "long_rr": 0.0,
+            "short_entry": 0.0, "short_sl": 0.0, "short_tp1": 0.0, "short_tp2": 0.0, "short_tp3": 0.0, "short_rr": 0.0,
+            "rr": 0.0, "price": float(curr["close"]),
+            "rsi": float(curr.get("rsi", 0)),
+            "adx": float(exec_ctx.get("adx", curr.get("adx", 0))),
+            "atr": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))),
+            "macd_hist": float(curr.get("MACDh_12_26_9", 0)),
+            "volume_ratio": float(curr.get("volume_ratio", 1)),
+            "candle_color": str(exec_ctx.get("curr_color", "")),
+            "color_changed": bool(exec_ctx.get("color_changed", False)),
+            "squeeze": str(exec_ctx.get("squeeze", "")),
+            "trend_direction": str(exec_ctx.get("trend_direction", "")),
+            "bsl_level": float(exec_ctx.get("bsl_level") or 0.0),
+            "ssl_level": float(exec_ctx.get("ssl_level") or 0.0),
+            "is_bsl_swept": bool(exec_ctx.get("is_bsl_swept", False)),
+            "is_ssl_swept": bool(exec_ctx.get("is_ssl_swept", False)),
+            "bullish_ob": exec_ctx.get("bullish_ob", None),
+            "bearish_ob": exec_ctx.get("bearish_ob", None),
+            "bullish_fvg": exec_ctx.get("bullish_fvg", None),
+            "bearish_fvg": exec_ctx.get("bearish_fvg", None),
+            "funding_rate": None,
+            "_is_observer_only": True,
+        }
     else:
         print(f"[{symbol}] V56.5 执行后产生 {len(trades)} 笔交易")
     
@@ -691,13 +742,31 @@ async def scan_and_decide(symbol: str) -> dict | None:
           f"confidence={_fb_result['confidence']:.3f}, ev={_fb_result['ev']:.4f}, "
           f"reject={_fb_result['should_reject']} (threshold={_fb_result['reject_threshold']})")
 
-    # ===== 【V21 FeatureLearningEngine】特征权重调整 =====
+        # ===== 【V21 FeatureLearningEngine】特征权重调整 =====
     _fl_weighted_score = get_feature_learner().get_weighted_score(_fb_raw_scores)
     _fl_final_score = score * 0.7 + _fl_weighted_score * 0.3 if _fl_weighted_score > 0 else score
     _fl_final_score = min(100.0, _fl_final_score)
     if _fl_final_score != score:
         print(f"[{symbol}] FeatureLearning: score={score:.1f} -> adjusted={_fl_final_score:.1f} "
               f"(weights={get_feature_learner().get_all_weights()})")
+
+    # ===== 【优化3 - 入场信号强制确认】LIQUIDITY_SWEEP 一票否决 =====
+    # 针对假清扫，利用布尔乘法做一票否决，不满足条件分数直接归零
+    _setup_name = str(best.get("setup_type", "")).upper()
+    _observer_events_list = _detect_observer_events(curr, exec_ctx, macro_ctx, _exec_lq, _exec_sq)
+    _observer_event_types = [e["type"] for e in _observer_events_list]
+    is_sweep = (_setup_name == 'LIQUIDITY_SWEEP')
+    has_choch = ('CHOCH' in _observer_event_types)
+    # 动能确认：使用 sqzmom vol_ratio > 1.0 作为动量指标
+    has_momentum = (sqz_data.get("vol_ratio", 0.0) > 1.0)
+    # 核心判定：要么不是 Sweep 信号直接放行；若是，必须满足全要素
+    sweep_approved = (not is_sweep) or (has_choch and has_momentum)
+    # 布尔乘法干预：False 转为 0，分数归零触发 ScoreGate 拦截
+    if is_sweep and not sweep_approved:
+        print(f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: setup={_setup_name} "
+              f"has_choch={has_choch} has_momentum={has_momentum}(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) "
+              f"score={_fl_final_score:.1f} -> 0")
+        _fl_final_score = 0.0  # 分数归零，后续 ScoreGate 直接拦截
 
         # 构建兼容返回格式
     return {
@@ -1776,9 +1845,34 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         else:
             profit_r = (entry - current_price) / risk
             
-    pos["mfe"] = max(pos.get("mfe", 0.0), profit_r)
+        pos["mfe"] = max(pos.get("mfe", 0.0), profit_r)
     pos["mae"] = min(pos.get("mae", 0.0), profit_r)
     pos["max_r"] = max(pos.get("max_r", 0.0), profit_r)
+
+    # ===== 【优化2 - TP 阶段推进机制】移动止损/保本/锁利 =====
+    # 利用 R 倍数累加计算推进阶段，再用棘轮机制确保止损单向移动
+    pos_dir = direction
+    dir_m = {'Long': 1, 'Short': -1}.get(pos_dir, 1)
+    _risk = abs(entry - sl) if risk <= 0 else risk  # 确保 risk > 0
+    curr_r = (current_price - entry) * dir_m / max(_risk, 1e-12)
+    # 布尔累加计算推进阶段：>=0.5R → 阶段1(保本), >=1.0R → 阶段2(锁利)
+    stage_advance = int(curr_r >= 0.5) + int(curr_r >= 1.0)
+    # 字典映射各阶段目标止损价
+    sl_targets = {
+        0: sl,
+        1: entry,  # 保本
+        2: entry + (0.3 * _risk * dir_m),  # 锁利 0.3R
+    }
+    target_sl = sl_targets.get(stage_advance, sl)
+    # 单向棘轮：多头止损只升不降，空头止损只降不升
+    new_sl_long = max(sl, target_sl)
+    new_sl_short = min(sl, target_sl)
+    new_sl = {'Long': new_sl_long, 'Short': new_sl_short}.get(pos_dir, sl)
+    # 只有当新价格更优时才更新止损
+    if (pos_dir == 'Long' and new_sl > sl) or (pos_dir == 'Short' and new_sl < sl):
+        sl = new_sl
+        pos['current_sl'] = new_sl
+        pos['stage'] = stage_advance
     
     action_plan = check_partial_close_and_trail(
         direction=direction,
@@ -1796,8 +1890,29 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         new_sl = action_plan["new_sl"]
         new_stage = action_plan["new_stage"]
         stage_label = {1: "TP1", 2: "TP2"}.get(new_stage, "TPx")
-        
-        msg = f"[{stage_label}] {symbol} close {close_pct:.0f}% SL->{new_sl:.2f}"
+
+        # ── 计算实时盈亏信息 ──
+        dir_cn = "多头" if direction == "Long" else "空头"
+        dir_emoji3 = "📈" if direction == "Long" else "📉"
+        pnl_pct = ((current_price / entry) - 1) * 100
+        if direction == "Short":
+            pnl_pct = ((entry / current_price) - 1) * 100
+        # 剩余目标
+        remaining = ""
+        if new_stage == 1:
+            remaining = f"TP2: {pos['tp2']:.2f}  TP3: {pos['tp3']:.2f}"
+        elif new_stage == 2:
+            remaining = f"TP3: {pos['tp3']:.2f}"
+        else:
+            remaining = f"TP1: {pos['tp1']:.2f}  TP2: {pos['tp2']:.2f}  TP3: {pos['tp3']:.2f}"
+
+        msg = (
+            f"{dir_emoji3} [{stage_label}止盈] {symbol} {dir_cn}\n"
+            f"平仓: {close_pct:.0f}%  入场: {entry:.2f}  当前: {current_price:.2f}\n"
+            f"盈亏: {pnl_pct:+.2f}%  |  R倍数: {profit_r:.2f}R\n"
+            f"SL已移至: {new_sl:.2f}\n"
+            f"剩余目标: {remaining}"
+        )
         msg_key = f"{stage_label}_{new_stage}"
         
         if pos.get("last_sl_msg") != msg_key:

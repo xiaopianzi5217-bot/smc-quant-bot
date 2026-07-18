@@ -9,6 +9,8 @@ import time
 import hashlib
 import shutil
 from pathlib import Path
+
+import numpy as np
 import pandas as pd
 
 _ROOT = Path(__file__).parent.absolute()
@@ -23,6 +25,20 @@ _DB_INIT_SENTINEL = _ROOT / "data" / ".db_initialized"
 def _get_db_path():
     """Return a normalized pathlib.Path for the configured database path."""
     return Path(DB_PATH) if not isinstance(DB_PATH, Path) else DB_PATH
+
+
+def make_json_serializable(obj):
+    if isinstance(obj, (np.bool_, np.bool)):
+        return bool(obj)
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: make_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [make_json_serializable(v) for v in obj]
+    return obj
 
 
 def _get_hf_config():
@@ -244,7 +260,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
             signal_id, int(time.time()), result["symbol"], result["direction"],
             str(result.get("regime", "UNKNOWN")).upper(), str(result.get("vol_state", "NORMAL")).upper(),
             _get_val(result, "adx"), _get_val(result, "atr"), _get_val(result, "rsi", default=50.0),
-            feat_hash, json.dumps(features, ensure_ascii=False),
+            feat_hash, json.dumps(make_json_serializable(features), ensure_ascii=False),
             float(result.get("p_win_raw", 0.5)), float(result.get("confidence", 0.5)),
             float(result.get("expected_value", 0.0)), float(result.get("blended_ev", 0.0)), float(result.get("confidence", 0.5)),
             float(result["entry"]), float(result["sl"]), float(result["tp1"]), float(result.get("rr", 1.0)), float(kelly_size),
