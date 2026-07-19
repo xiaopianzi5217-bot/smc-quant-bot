@@ -2437,8 +2437,12 @@ async def main_loop():
                                 funding_rate=result.get("funding_rate"),
                             )
 
-                                        # ---- 【第 2 步】Strategy 开单推送 ----
-                    check_and_open(result)
+                                                                                # ---- 【第 2 步】Strategy 开单推送 ----
+                    # 跳过 Observer-only 的 result（approved=False/direction=None 是故意的）
+                    if not result.get("_is_observer_only", False):
+                        check_and_open(result)
+                    else:
+                        print(f"[{symbol}] Observer-only 模式，跳过 Strategy 开单检查")
 
                                         # ---- 【持仓强制平仓检查】TradeJournal OPEN 但 position_manager 无记录 ----
             all_positions = position_manager.get()  # 【修复】提前获取持仓，避免后面引用时未定义
