@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from collections import deque
 
+import numpy as np
+
 
 class SmartPositionSizer:
     """智能仓位管理器。
@@ -242,17 +244,17 @@ class SmartPositionSizer:
         return max(0.2, mult)
 
     def _score_penalty(self, score: float) -> float:
-        """评分软缩减：与 score_grade 互补，但在 low end 更敏感。"""
-        if score >= 85:
-            return 1.0
-        elif score >= 75:
-            return 0.90
-        elif score >= 65:
-            return 0.75
-        elif score >= 50:
-            return 0.55
-        else:
-            return 0.30
+        """连续线性插值仓位乘数，消除硬分档拐点。
+
+        置信度映射轴与仓位乘数轴：
+          score=0~35  → 乘数=0.0（刚性底层防御，避免垃圾信号入场）
+          score=40    → 乘数=0.5（减半仓试探）
+          score=50    → 乘数=1.0（基准仓位）
+          score=70+   → 乘数=1.5（高质量信号共振加仓）
+        """
+        score_nodes = [0.0, 35.0, 40.0, 50.0, 70.0, 100.0]
+        size_scale_nodes = [0.0, 0.00, 0.50, 1.00, 1.50, 1.50]
+        return float(np.interp(score, score_nodes, size_scale_nodes))
 
     # ──────────────── 外部接口 ────────────────
 

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版
@@ -71,6 +71,7 @@ from utils.feedback_loop import FeedbackLoop  # 全链路闭环
 from utils.signal_tracker import SignalTracker
 from utils.daily_risk_guard import DailyRiskGuard
 from utils.signal_audit_log import signal_audit_log
+from utils.reject_audit import get_reject_audit
 from utils.smart_position_sizer import SmartPositionSizer, get_smart_sizer
 from analytics.feature_learning import FeatureLearningEngine, get_feature_learner
 from utils.daily_panel import DailyPanel, get_daily_panel
@@ -638,9 +639,15 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _sqz_white_short = bool(exec_ctx.get("sqzmom_white_reversal_short", False))
     _has_fe_bottom = bool(exec_ctx.get("fe_bottom", False))  # CM Williams Vix Fix 摸底信号
     _has_fe_top = bool(exec_ctx.get("fe_top", False))        # CM Williams Vix Fix 摸顶信号
-    # 红色K线(看跌) + ADX>=25 = 强下跌趋势，此时做多需要底背离/白线反转/FE摸底之一
+        # 红色K线(看跌) + ADX>=25 = 强下跌趋势，此时做多需要底背离/白线反转/FE摸底之一
     if direction == "Long" and ("红" in _candle_color or "red" in _candle_color.lower()):
         if _candle_adx >= 25 and not _has_bot_div and not _sqz_white_long and not _has_fe_bottom:
+            get_reject_audit().log(
+                symbol, "COLOR_DIRECTION_LONG",
+                score=score, ev=ev, regime=_regime_raw, vol_state=str(exec_ctx.get("volatility", "unknown")),
+                direction=direction or "", setup_type=str(best.get("setup_type","")),
+                extra={"candle_color": _candle_color, "adx": _candle_adx, "has_bot_div": _has_bot_div, "sqz_white_long": _sqz_white_long, "has_fe_bottom": _has_fe_bottom},
+            )
             print(f"[{symbol}] 方向不一致: Long 但 K线红色(看跌) ADX={_candle_adx:.1f}(强趋势), 无底部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
@@ -649,6 +656,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
         # 蓝色K线(看涨) + ADX>=25 = 强上涨趋势，此时做空需要顶背离/白线反转/FE摸顶之一
     if direction == "Short" and ("蓝" in _candle_color or "blue" in _candle_color.lower() or "bull" in _candle_color.lower()):
         if _candle_adx >= 25 and not _has_top_div and not _sqz_white_short and not _has_fe_top:
+            get_reject_audit().log(
+                symbol, "COLOR_DIRECTION_SHORT",
+                score=score, ev=ev, regime=_regime_raw, vol_state=str(exec_ctx.get("volatility", "unknown")),
+                direction=direction or "", setup_type=str(best.get("setup_type","")),
+                extra={"candle_color": _candle_color, "adx": _candle_adx, "has_top_div": _has_top_div, "sqz_white_short": _sqz_white_short, "has_fe_top": _has_fe_top},
+            )
             print(f"[{symbol}] 方向不一致: Short 但 K线蓝色(看涨) ADX={_candle_adx:.1f}(强趋势), 无顶部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
