@@ -972,7 +972,9 @@ def _detect_observer_events(curr, exec_ctx, macro_ctx, long_score: float, short_
 
 def _new_observer_events(symbol: str, events: list) -> list:
     """状态变化去重：事件从无→有才推送（首次触发）；持续存在不再重复推送。
-    连续状态事件（背离/接近side/K线变白等）每 30 分钟汇总推送一次状态摘要。
+
+    【20260719 优化】FVG 和 SQUEEZE_RELEASE 是非连续类型，首次触发推送后
+    不再重复推送（直到事件消失后重新出现）。连续状态事件每 30 分钟汇总一次。
     """
     global _OBSERVER_EVENT_ACTIVE, _OBSERVER_EVENT_PUSHED, _OBSERVER_PERIODIC_LAST
     if symbol not in _OBSERVER_EVENT_ACTIVE:
@@ -989,6 +991,8 @@ def _new_observer_events(symbol: str, events: list) -> list:
 
     # --- 连续状态类事件类型（状态持续时，只发一次，之后每30分钟汇总）---
     _CONTINUOUS_TYPES = {"DIVERGENCE_R", "NEAR_OB", "NEAR_LIQUIDITY", "CANDLE_COLOR", "SQZMOM_WHITE"}
+    # --- 一次性事件类型（触发推一次后，直到消失才可再次触发）---
+    _ONE_SHOT_TYPES = {"FVG", "SQUEEZE_RELEASE", "LIQUIDITY_SWEEP", "CHOCH", "BOS", "SQZMOM_EF"}
 
     # 1) 构建本次扫描到的 events key 集合
     current_keys = set()
@@ -1014,29 +1018,41 @@ def _new_observer_events(symbol: str, events: list) -> list:
                 periodic_last[ev_type] = now
             print(f"[{symbol}] Observer 事件触发: {key} (首次)")
         else:
-            # 事件持续存在（连续状态）
-            # 如果之前已经推送过，不再重复推送
-            if pushed.get(key, False):
-                # 但对于连续状态类型，每 OBSERVER_PERIODIC_INTERVAL 秒汇总一次
-                if ev_type in _CONTINUOUS_TYPES:
+            # 事件持续存在
+            # 如果是一类事件：仅首次推送过就不再重复（除非消失后重新出现）
+            if ev_type in _ONE_SHOT_TYPES:
+                # 一次性事件，已推送过，不再重复
+                if pushed.get(key, False):
+                    pass  # 完全静默
+                else:
+                    # 推送标记丢失但 active 还在，补推一次
+                    pushed[key] = True
+                    new_events.append(ev)
+                    print(f"[{symbol}] Observer 事件补推: {key}")
+            elif ev_type in _CONTINUOUS_TYPES:
+                # 连续状态类型：每 OBSERVER_PERIODIC_INTERVAL 秒汇总一次
+                if pushed.get(key, False):
                     last_periodic = periodic_last.get(ev_type, 0)
                     if now - last_periodic >= OBSERVER_PERIODIC_INTERVAL:
-                        # 标记为"定期汇总推送"（在调用方会生成摘要消息而非完整推送）
                         ev["is_periodic_summary"] = True
                         new_events.append(ev)
                         periodic_last[ev_type] = now
                         print(f"[{symbol}] Observer 状态持续汇总: {key} ({OBSERVER_PERIODIC_INTERVAL//60}min)")
+                else:
+                    # 推送标记丢失但 active 还在
+                    pushed[key] = True
+                    new_events.append(ev)
             else:
-                # 理论上不应走到这里，但以防万一
-                active[key] = True
-                pushed[key] = True
-                new_events.append(ev)
+                # 其他类型：默认走首次推送后不重复
+                if not pushed.get(key, False):
+                    pushed[key] = True
+                    new_events.append(ev)
 
     # 3) 检测事件从有→无：清除激活状态
     for key in list(active.keys()):
         if key not in current_keys:
             was_active = active.pop(key, False)
-            pushed.pop(key, None)  # 清除推送标记，下次出现时可重新触发
+            pushed.pop(key, None)
             if was_active:
                 print(f"[{symbol}] Observer 事件消失: {key}")
 
