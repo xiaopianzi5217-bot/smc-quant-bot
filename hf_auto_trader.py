@@ -1695,7 +1695,12 @@ def check_and_open(result: dict | None) -> bool:
         "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
     })
 
-    # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
+        # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
+    # 【修复 signal_id 一致性】使用 check_and_open_v6_with_routing 生成的 V6_XXX_TIMESTAMP 格式
+    _db_signal_id = result.get("signal_id", "")
+    if not _db_signal_id:
+        _db_signal_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
+        result["signal_id"] = _db_signal_id
     emit("record_open_snapshot", result, kelly_size=result.get("size", 0.05))
 
     print(f"[{symbol}] Strategy open after update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
@@ -1850,10 +1855,11 @@ def check_and_open(result: dict | None) -> bool:
             print(f"[信号后验] {sig_id} "
                 f"max_forward_r={_mf:.2f} max_adverse_r={_ma:.2f} "
                 f"final_r={_fr:.2f} exit={_er}")
-            # 存入 position_manager，供 check_trailing 平仓时更新
+                        # 存入 position_manager，供 check_trailing 平仓时更新
+            # 【修复 signal_id 一致性】使用 V6 格式的 signal_id 而非指纹格式
             _pos_data2 = position_manager.get(symbol)
             if _pos_data2:
-                _pos_data2["signal_id"] = sig_id
+                _pos_data2["signal_id"] = _db_signal_id  # 使用 V6_XXX_TIMESTAMP 格式
                 _pos_data2["audit_forward"] = _mf
                 _pos_data2["audit_adverse"] = _ma
                 _pos_data2["audit_final_r"] = _fr
