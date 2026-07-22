@@ -3,12 +3,15 @@
 import threading
 import json
 import os
+import shutil
 import atexit
 import traceback
 import copy
 import time
+from datetime import datetime
 
 POSITIONS_FILE = "state/managed_positions.json"
+BACKUP_DIR = "storage/position_backups"
 PROCESSED_SIGNALS_FILE = "state/processed_signals.json"
 PROCESSED_SIGNAL_TTL_SEC = 86400 * 7
 
@@ -64,6 +67,23 @@ class PositionManager:
             self._save()
         if self._processed_dirty:
             self._save_processed_signals()
+
+    # ── 每日快照 ──────────────────────────────────────────────
+
+    def _daily_snapshot(self):
+        """每日一次持仓快照备份，首次启动时文件不存在则跳过"""
+        if not os.path.exists(self._persist_path):
+            print("[PositionManager] 当前无持仓文件，跳过备份")
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        backup_path = f"{BACKUP_DIR}/managed_positions_{today}.json"
+        if not os.path.exists(backup_path):
+            try:
+                shutil.copy2(self._persist_path, backup_path)
+                print(f"[PositionManager] 每日快照备份完成: {backup_path}")
+            except Exception as e:
+                print(f"[PositionManager] 备份失败: {e}")
 
     def _mark_dirty(self):
         self._dirty = True
@@ -130,6 +150,7 @@ class PositionManager:
         with self._lock:
             self._positions.pop(symbol, None)
             self._mark_dirty()
+        self._daily_snapshot()
         self._save()
 
     def exists(self, symbol: str) -> bool:
