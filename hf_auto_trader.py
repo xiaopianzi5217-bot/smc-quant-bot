@@ -456,6 +456,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
     df_exec = exec_result
     if df_exec is None or len(df_exec) < 100:
         print(f"[{symbol}] 数据不足，跳过")
+        get_reject_audit().log(
+            symbol, "DATA_INSUFFICIENT_EXEC",
+            score=0.0, ev=0.0, regime="unknown",
+            extra={"len_exec": len(df_exec) if df_exec is not None else 0},
+        )
         return None
         
     df_macro = macro_result
@@ -469,12 +474,21 @@ async def scan_and_decide(symbol: str) -> dict | None:
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
         print(f"[{symbol}] V56 指标计算后数据不足")
+        get_reject_audit().log(
+            symbol, "DATA_INSUFFICIENT_V56",
+            score=0.0, ev=0.0, regime="unknown",
+            extra={"len_v56": len(df_v56) if df_v56 is not None else 0},
+        )
         return None
     
     # Step 1: generate_candidates — 调用 load_ohlcv + add_v56_indicators + generate_v56_candidates + enrich（含bucket_ev）
     candidates = _V56_ENGINE.generate_candidates(df_v56)
     if candidates is None or candidates.empty:
         print(f"[{symbol}] V56.5 引擎无候选信号")
+        get_reject_audit().log(
+            symbol, "NO_CANDIDATES",
+            score=0.0, ev=0.0, regime="unknown",
+        )
         return None
 
     if "idx" in candidates.columns:
@@ -485,6 +499,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
         print(f"[{symbol}] 🔍 正在扫描候选信号... 限制窗口拓宽至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
         if candidates.empty:
             print(f"[{symbol}] 仅历史信号存在，跳过本轮扫描")
+            get_reject_audit().log(
+                symbol, "HISTORY_ONLY",
+                score=0.0, ev=0.0, regime="unknown",
+                extra={"lookback": LOOKBACK_CANDLES},
+            )
             return None
 
                 # 🔒 信号排重：防止同一个 signal 在拓宽窗口内的第3/第4根K线重复开仓
@@ -503,6 +522,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
         candidates = pd.DataFrame(deduped_rows, columns=candidates.columns) if deduped_rows else pd.DataFrame(columns=candidates.columns)
         if candidates.empty:
             print(f"[{symbol}] 排重后无有效候选信号，跳过本轮扫描")
+            get_reject_audit().log(
+                symbol, "DEDUPED_EMPTY",
+                score=0.0, ev=0.0, regime="unknown",
+            )
             return None
 
     print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
@@ -571,16 +594,18 @@ async def scan_and_decide(symbol: str) -> dict | None:
     direction = best.get("direction", None)
     if not direction:
         print(f"[{symbol}] 无有效方向")
+        get_reject_audit().log(
+            symbol, "NO_DIRECTION",
+            score=float(best.get("score", 0)), ev=float(best.get("model_ev", 0)),
+            regime=str(best.get("regime", "unknown")),
+            setup_type=str(best.get("setup_type", "")),
+        )
         return None
     
                 # 用 exec_ctx 计算 entry quality（SMC 结构验证）
     curr = df_exec.iloc[-1]
     entry_price = float(curr["close"])
     
-    # ===== V56.5 SL/TP 统一重算（不再依赖 enrich 阶段的 initial_sl 列） =====
-    # V56.5《_execute_one_v565》使用 stop_dist 计算 SL/TP，逻辑正确。
-    # 但 trades DataFrame 的 initial_sl 列可能来自 enrich 阶段的旧数据，
-    # 导致 Long SL > entry 或 Short SL < entry 的错误。
     # 修复：直接重复 V56.5 公式算出 SL/TP，与交易引擎一致。
     _atr_val = max(float(curr.get("ATRr_14", exec_ctx.get("atr", 0))), entry_price * 0.0025)
     _stop_dist = max(0.80 * _atr_val, entry_price * 0.0025)
@@ -613,6 +638,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
             # mud + 极低ADX：原则上不交易
             if not _strong_exception:
                 print(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 无强共振例外, 跳过")
+                get_reject_audit().log(
+                    symbol, "MUD_HARD_BLOCK",
+                    score=score, ev=ev, regime=_regime_raw,
+                    vol_state=str(exec_ctx.get("volatility", "unknown")),
+                    direction=direction or "",
+                    setup_type=str(best.get("setup_type", "")),
+                    extra={"adx": _adx_check, "strong_exception": _strong_exception},
+                )
                 return None
             else:
                 # 有强共振例外 → 大幅降仓标记
@@ -627,11 +660,41 @@ async def scan_and_decide(symbol: str) -> dict | None:
     # ===== 【安全校验】重算后的 SL 方向合理性 =====
     if direction == "Long" and sl > entry_price:
         print(f"[{symbol}] SL方向异常(重算后): Long SL({sl:.2f}) > 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
+        get_reject_audit().log(
+            symbol, "SL_DIRECTION_INVALID",
+            score=score, ev=ev, regime=_regime_raw,
+            direction=direction or "",
+            extra={"entry": entry_price, "sl": sl, "atr": _atr_val, "sl_side": "LONG"},
+        )
         return None
     if direction == "Short" and sl < entry_price:
         print(f"[{symbol}] SL方向异常(重算后): Short SL({sl:.2f}) < 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
+        get_reject_audit().log(
+            symbol, "SL_DIRECTION_INVALID",
+            score=score, ev=ev, regime=_regime_raw,
+            direction=direction or "",
+            extra={"entry": entry_price, "sl": sl, "atr": _atr_val, "sl_side": "SHORT"},
+        )
         return None
     
+
+    # ===== 【新增 Mud Regime 软惩罚（不硬拦截，只削弱评分）】=====
+    if "mud" in _regime_raw or "chaos" in _regime_raw:
+        _orig_score = score
+        _orig_ev = ev
+        score = max(0.0, score - 10.0)           # 评分 -10 分
+        ev = ev * 0.8                             # EV ×0.8
+        print(f"[{symbol}] Mud Regime 软惩罚: score={_orig_score:.1f}->{score:.1f} (-10), "
+              f"ev={_orig_ev:.4f}->{ev:.4f} (×0.8)")
+        get_reject_audit().log(
+            symbol, "MUD_SOFT_PENALTY",
+            score=score, ev=ev, regime=_regime_raw,
+            vol_state=str(exec_ctx.get("volatility", "unknown")),
+            direction=direction or "",
+            setup_type=str(best.get("setup_type", "")),
+            extra={"orig_score": _orig_score, "score_delta": -10.0, "ev_mult": 0.8},
+        )
+
         # ===== 【修复20260715】K线颜色 + ADX方向一致性检查 =====
     _candle_color = str(exec_ctx.get("curr_color", ""))
     _candle_adx = float(exec_ctx.get("adx", 0))
@@ -1348,6 +1411,21 @@ def check_and_open(result: dict | None) -> bool:
         print("[check_and_open] result 为空，拒绝开单")
         return False
 
+    # ===== 【RiskGuard增强】总风险 R 硬上限 =====
+    try:
+        _total_risk_r = 0.0
+        for _sym, _pos in position_manager.get().items():
+            if _pos.get("direction") and _pos.get("entry") and _pos.get("current_sl"):
+                _e = float(_pos["entry"])
+                _s = float(_pos["current_sl"])
+                if _e > 0 and abs(_e - _s) / _e > 0.001:
+                    _total_risk_r += abs(_e - _s) / _e
+        if _total_risk_r > 0.03:  # 总风险 > 3%（≈ 3R）
+            print(f"[RiskGuard] 总风险 {_total_risk_r:.4f} > 0.03, 拒绝开单")
+            return False
+    except Exception:
+        pass
+
     symbol = result.get("symbol", "?")
     direction = result.get("direction", None)
 
@@ -1506,6 +1584,16 @@ def check_and_open(result: dict | None) -> bool:
             print(f"[{symbol}] PROBE 模式: gap={score_gap:.1f}<{_dynamic_gap} 但 EV+FVG 通过, 允许试单")
             result["is_probe"] = True
         
+        # ===== 【RiskGuard增强】同类信号冷却（防连续 Sweep）=====
+    _sig_cool_key = f"{symbol}_{direction}_{result.get('reason','?')}"
+    _SIGNAL_COOLDOWN_SECS = 5 * 75  # 5根15m K线
+    if _sig_cool_key in _last_signal_time:
+        _elapsed = time.time() - _last_signal_time[_sig_cool_key]
+        if _elapsed < _SIGNAL_COOLDOWN_SECS:
+            print(f"[RiskGuard] 同类信号冷却 {_sig_cool_key} ({_elapsed:.0f}s < {_SIGNAL_COOLDOWN_SECS}s)")
+            return False
+    _last_signal_time[_sig_cool_key] = time.time()
+
     sig_id = _signal_id(result)
     if _is_signal_processed(sig_id):
         print(f"[{symbol}] signal {sig_id} already processed")
