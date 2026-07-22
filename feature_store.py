@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Feature Store — 交易特征存储与统计
 
 V38.x 系列：
@@ -88,6 +88,16 @@ class FeatureStore:
 
         symbol = data.get("symbol", "")
         direction = data.get("direction", "")
+
+        # 【修复20260823】容错：如果 df 缺少 symbol/direction/exit_reason 列（如 CSV 损坏），
+        # 直接走追加逻辑，避免 KeyError 冒泡到调用方导致止损流程中断。
+        _required_cols = {"symbol", "direction", "exit_reason"}
+        if not _required_cols.issubset(df.columns):
+            logger.warning(f"[Feature] df 缺少必要列 {_required_cols - set(df.columns)}，直接追加记录")
+            df2 = pd.DataFrame([data])
+            df2.to_csv(self.trades_file, mode="a", header=False, index=False)
+            return
+
         # 找同一 symbol+direction 的最后一个 OPEN 记录
         mask = (df["symbol"] == symbol) & (df["direction"] == direction) & (df["exit_reason"] == "OPEN")
         if not mask.any():

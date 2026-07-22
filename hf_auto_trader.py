@@ -487,12 +487,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
             print(f"[{symbol}] 仅历史信号存在，跳过本轮扫描")
             return None
 
-        # 🔒 信号排重：防止同一个 signal 在拓宽窗口内的第3/第4根K线重复开仓
+                # 🔒 信号排重：防止同一个 signal 在拓宽窗口内的第3/第4根K线重复开仓
+        # 【修复20260823】用 _is_signal_processed（检查+标记）替代 is_signal_already_processed（仅检查）
+        # 这样第一次通过候选层的信号就被标记为已处理，后续扫描不再进入 check_and_open
         seen_signal_ids = set()
         deduped_rows = []
         for _, signal in candidates.iterrows():
             sig_id = _candidate_signal_id(signal)
-            if sig_id in seen_signal_ids or position_manager.is_signal_already_processed(sig_id):
+            if sig_id in seen_signal_ids or _is_signal_processed(sig_id):
                 print(f"[{symbol}] 信号 {sig_id} 之前已执行过，跳过排重。")
                 continue
             seen_signal_ids.add(sig_id)
@@ -1147,13 +1149,15 @@ def _push_observer_event(
 def _signal_id(result: dict) -> str:
     """构建高精度信号指纹，确保每次扫描的每个信号都是唯一可追踪的。
 
-    【修复20260730】移除了 entry_price 和 scan_slot，避免同一 K线信号
-    因价格微小变化/扫描槽变化被当成不同信号。
+    【修复20260823】用 datetime（K线时间戳）替代 idx。
+    因为每次 fetch_ohlcv 返回新的 index（0~319），同一物理 K 线
+    在不同扫描批次中的 idx 不同，导致指纹变化 → 去重失效。
+    K 线的 datetime 是绝对时间戳，恒定不变。
 
     指纹包含：
     - symbol / direction（基础标识）
     - setup_type（模式类型：LIQUIDITY_SWEEP / WEAK_BOS / FVG_TOUCH 等）
-    - idx（K线bar索引，唯一标识触发行情位置）
+    - datetime（K线绝对时间，唯一标识触发行情位置）
     - score + ev（量化特征，取整到 bucket）
     - regime（市场状态，区分同 setup 在不同环境下的信号）
 
@@ -1163,28 +1167,49 @@ def _signal_id(result: dict) -> str:
     symbol = result["symbol"]
     direction = result["direction"] or "NONE"
     setup_type = result.get("decision", {}).get("signal", {}).get("setup_type", result.get("reason", "UNKNOWN"))
-    idx = result.get("decision", {}).get("signal", {}).get("idx", -1)
+
+    # 🟢 用 datetime 替代不稳定的 idx
+    sig_dt = result.get("decision", {}).get("signal", {}).get("datetime", None)
+    if sig_dt is None:
+        # 兜底：用 result 中的 curr 时间戳
+        sig_dt = str(result.get("curr", {}).get("datetime", "")) if isinstance(result.get("curr"), dict) else ""
+    if not sig_dt:
+        sig_dt = "no_dt"
+
     score_bucket = int(result.get("score", 0) / 10) if result.get("score") else -1
     _ev = result.get("expected_value", 0.0)
     ev_bucket = f"{_ev:+.3f}"[:6]
     regime = str(result.get("regime", "UNKNOWN"))[:4]
-    return f"{symbol}_{direction}_{setup_type}_idx{idx}_s{score_bucket}_ev{ev_bucket}_{regime}"
+    return f"{symbol}_{direction}_{setup_type}_dt{sig_dt}_s{score_bucket}_ev{ev_bucket}_{regime}"
 
 
 def _candidate_signal_id(signal_row) -> str:
-    """Build a signal fingerprint from a candidate row without persisting it."""
+    """Build a signal fingerprint from a candidate row without persisting it.
+
+    【修复20260823】用 datetime（K线时间戳）替代 idx。
+    因为每次 fetch_ohlcv 返回新的 index（0~319），同一物理 K 线
+    在不同扫描批次中的 idx 不同，导致指纹变化 → 候选去重失效。
+    K 线的 datetime 是绝对时间戳，恒定不变。
+    """
     if hasattr(signal_row, "to_dict"):
         signal_row = signal_row.to_dict()
 
     symbol = str(signal_row.get("symbol", "UNKNOWN"))
     direction = str(signal_row.get("direction", "NONE") or "NONE")
     setup_type = str(signal_row.get("setup_type", signal_row.get("reason", "UNKNOWN")))
-    idx = int(signal_row.get("idx", -1)) if signal_row.get("idx", None) is not None else -1
+
+    # 🟢 用 datetime 替代不稳定的 idx
+    sig_dt = signal_row.get("datetime", None)
+    if sig_dt is not None:
+        sig_dt = str(sig_dt)
+    else:
+        sig_dt = "no_dt"
+
     score_bucket = int(float(signal_row.get("score", 0.0)) / 10) if signal_row.get("score", None) is not None else -1
     _ev = float(signal_row.get("model_ev", signal_row.get("expected_value", 0.0)) or 0.0)
     ev_bucket = f"{_ev:+.3f}"[:6]
     regime = str(signal_row.get("regime", "UNKNOWN"))[:4]
-    return f"{symbol}_{direction}_{setup_type}_idx{idx}_s{score_bucket}_ev{ev_bucket}_{regime}"
+    return f"{symbol}_{direction}_{setup_type}_dt{sig_dt}_s{score_bucket}_ev{ev_bucket}_{regime}"
 
 
 def _is_signal_already_processed(signal_id: str) -> bool:
@@ -2145,18 +2170,28 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float):
             except Exception as tj_err:
                 print(f"[TradeJournal] 止损记录失败: {tj_err}")
         
-        feature_store.save_trade({
-            "symbol": symbol,
-            "direction": pos["direction"],
-            "exit_reason": "SL",
-            "pnl_r": profit_r,
-            "mfe": pos.get("mfe", 0),
-            "mae": pos.get("mae", 0),
-            "max_r": pos.get("max_r", 0),
-            "max_r_before_stop": pos.get("max_r", 0),
-        })
+                # 【修复20260823】安全兜底：即使 feature_store.save_trade 因 CSV 结构异常抛 KeyError，
+        # 也确保止损主流程（close_trade、FeedbackLoop、position_manager.remove）不被阻断。
+        _save_trade_ok = False
+        try:
+            feature_store.save_trade({
+                "symbol": symbol,
+                "direction": pos["direction"],
+                "exit_reason": "SL",
+                "pnl_r": profit_r,
+                "mfe": pos.get("mfe", 0),
+                "mae": pos.get("mae", 0),
+                "max_r": pos.get("max_r", 0),
+                "max_r_before_stop": pos.get("max_r", 0),
+            })
+            _save_trade_ok = True
+        except Exception as feat_e:
+            print(f"[Feature] 止损特征更新异常: {feat_e}")
+            # 【修复20260823】即使 feature_store 异常，也已通过 TradeJournal.close_trade 记录了平仓
     except Exception as feat_e:
-        print(f"[Feature] 止损特征更新异常: {feat_e}")
+        # 兜底：如果 try 块中 _risk_dist 或 profit_r 计算也抛了异常
+        print(f"[Feature] 止损特征计算异常: {feat_e}")
+        profit_r = profit_r if 'profit_r' in dir() else -1.0
 
     # profit_r 已在上方 try 块内用 R 倍数公式重新计算
     # ===== 【修复20260721】后验验证：更新平仓结果 =====
