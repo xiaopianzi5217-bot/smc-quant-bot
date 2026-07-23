@@ -78,6 +78,11 @@ from utils.daily_panel import DailyPanel, get_daily_panel
 from utils.event_bus import emit
 import utils.v6_event_hooks
 
+# ---------- V58.6 统一事件日志与结果回填 ----------
+from analytics.event_schema import event_logger
+from analytics.outcome_db import OutcomeDatabase
+from analytics.feature_hash import generate_feature_hash
+
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
 _peak_equity = 0.0 
@@ -100,6 +105,9 @@ MIN_SCORE_GAP = 3.0  # 20260715修复: 从4.0降到3.0，V56.5 Short信号在BUL
 # ----- 止损冷却 -----
 STOP_LOSS_COOLDOWN = 300
 _last_stop_loss_time = {}
+
+# ----- 【修复20260824】同类信号冷却（防连续 Sweep）-----
+_last_signal_time: dict = {}  # symbol_direction_reason -> timestamp
 
 # 【修复20260704】去重与质量加强参数
 TREND_END_PULLBACK_ATR = 2.0  # 价格离 swing_high（Short）或 swing_low（Long）超过 N 倍 ATR 则不开
@@ -1379,6 +1387,24 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
 
     if route == "ABSOLUTE_DROP":
         print(f"[V6 分级路由 - DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
+        try:
+            event_logger.log_event("REJECT", {
+                "symbol": symbol,
+                "direction": result.get("direction", ""),
+                "score": result.get("v6_final_score", score),
+                "ev": result.get("expected_value", 0.0),
+                "confidence": result.get("confidence", 0.0),
+                "regime": str(result.get("regime", "unknown")),
+                "feature_hash": generate_feature_hash(str(result.get("features", {}))),
+                "features": result.get("features", {}),
+                "entry_price": result.get("entry", 0.0),
+                "stop_price": result.get("sl", 0.0),
+                "reason": "ABSOLUTE_DROP",
+                "v6_level": level,
+                "v6_route": route,
+            })
+        except Exception:
+            pass
         return False
 
     if route == "RESEARCH_SILENT":
@@ -1386,6 +1412,24 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
         print(f"[V6 分级路由 - 科研观察] {symbol} {level} 信号 ({score}分) | 实盘静默, 拍摄特征快照入云端铁盒")
+        try:
+            event_logger.log_event("REJECT", {
+                "symbol": symbol,
+                "direction": result.get("direction", ""),
+                "score": result.get("v6_final_score", score),
+                "ev": result.get("expected_value", 0.0),
+                "confidence": result.get("confidence", 0.0),
+                "regime": str(result.get("regime", "unknown")),
+                "feature_hash": generate_feature_hash(str(result.get("features", {}))),
+                "features": result.get("features", {}),
+                "entry_price": result.get("entry", 0.0),
+                "stop_price": result.get("sl", 0.0),
+                "reason": "RESEARCH_SILENT",
+                "v6_level": level,
+                "v6_route": route,
+            })
+        except Exception:
+            pass
         async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
         return False
 
@@ -1396,6 +1440,24 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
     print(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
+    try:
+        event_logger.log_event("LIVE_TRADE", {
+            "symbol": symbol,
+            "direction": result.get("direction", ""),
+            "score": result.get("v6_final_score", score),
+            "ev": result.get("expected_value", 0.0),
+            "confidence": result.get("confidence", 0.0),
+            "regime": str(result.get("regime", "unknown")),
+            "feature_hash": generate_feature_hash(str(result.get("features", {}))),
+            "features": result.get("features", {}),
+            "entry_price": result.get("entry", 0.0),
+            "stop_price": result.get("sl", 0.0),
+            "reason": route,
+            "v6_level": level,
+            "v6_route": route,
+        })
+    except Exception:
+        pass
     safe_send(f"🟢 开单通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}", priority="TRADE")
     return True
 
