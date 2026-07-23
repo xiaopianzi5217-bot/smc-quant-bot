@@ -88,7 +88,8 @@ class ProbabilityEngine:
         """兼容旧接口。"""
         return self.predict(score)
 
-    def calculate_ev(self, score: float, reward: float, risk: float = 1.0) -> dict:
+    def calculate_ev(self, score: float, reward: float, risk: float = 1.0,
+                     regime: str = "unknown") -> dict:
         """计算给定评分和盈亏比的预期价值（EV）。
 
         Args:
@@ -100,8 +101,20 @@ class ProbabilityEngine:
             {"probability": P(win), "ev": expected_value}
         """
         p = self.predict(score)
-        ev = p * reward - (1 - p) * risk
+
+        # ---- Regime multiplier：趋势放大，泥泞缩小 ----
+        regime_mult = {"trend": 1.25, "mud": 0.65, "transition": 1.0, "chop": 0.85}
+        mult = regime_mult.get(str(regime).strip().lower(), 1.0)
+        ev = (p * reward - (1 - p) * risk) * mult
+
+        # ---- 样本量置信衰减 ----
+        bucket = self._bucket(score)
+        data = self.table.get(bucket, {})
+        n = data.get("wins", 0) + data.get("losses", 0)
+        confidence = n / (n + 100)  # 10样本->9%, 500->83%, 5000->98%
+
         return {
             "probability": round(p, 4),
             "ev": round(ev, 4),
+            "confidence": round(confidence, 4),
         }
