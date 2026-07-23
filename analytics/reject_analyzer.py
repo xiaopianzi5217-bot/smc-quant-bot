@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
+from uuid import uuid4
 
 from analytics.feature_hash import generate_feature_hash
 
@@ -45,8 +46,9 @@ class RejectAnalytics:
             feature: 信号特征字典，用于生成 feature_hash
             ev_info: EV 相关信息（expected_value, confidence 等）
             extra: 额外补充字段
-        """
+                """
         entry = {
+            "signal_id": str(uuid4()),
             "timestamp": datetime.now().isoformat(),
             "symbol": symbol,
             "reason": reason,
@@ -284,7 +286,7 @@ class RejectAnalytics:
             }
             for bh in by_hash.values()
             if bh["reject_count"] >= min_rejects
-        ]
+                ]
         blacklist.sort(key=lambda x: -x["reject_count"])
         return blacklist
 
@@ -325,6 +327,67 @@ class RejectAnalytics:
             "quietest_hour": quietest_hour,
             "reasons_by_hour": reasons_by_hour,
         }
+
+    # ------------------------------------------------------------------
+    #  回填闭环：给被拒绝的信号补充后续真实结果
+    # ------------------------------------------------------------------
+
+    def update_future_result(
+        self,
+        signal_id: str,
+        future_pnl_r: float,
+        mfe: Optional[float] = None,
+        mae: Optional[float] = None,
+    ) -> bool:
+        """回填 Rejected Signal 的真实结果（跨文件扫描）
+
+        当信号被拒绝但事后想追踪"如果进了会怎样"时使用。
+        通过 signal_id 定位到历史记录，写入 future_result 字段。
+
+        Args:
+            signal_id: 信号的唯一 ID（由 log() 自动生成）
+            future_pnl_r: 事后该信号的实际 R 倍数
+            mfe: 最大有利波动（可选）
+            mae: 最大不利波动（可选）
+
+        Returns:
+            True 表示找到并更新成功，False 表示未找到记录
+        """
+        updated = False
+
+        for fpath in sorted(self.log_dir.glob("rejects_*.jsonl")):
+            lines: list = []
+            found_in_file = False
+
+            with open(fpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        lines.append(line)
+                        continue
+
+                    if rec.get("signal_id") == signal_id:
+                        rec["future_result"] = round(future_pnl_r, 4)
+                        if mfe is not None:
+                            rec["max_favorable"] = round(mfe, 4)
+                        if mae is not None:
+                            rec["max_adverse"] = round(mae, 4)
+                        lines.append(json.dumps(rec, ensure_ascii=False))
+                        found_in_file = True
+                        updated = True
+                    else:
+                        lines.append(line)
+
+            if found_in_file:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+                break  # signal_id 唯一，找到即停止
+
+        return updated
 
 
 # 全局单例，供外部直接使用
