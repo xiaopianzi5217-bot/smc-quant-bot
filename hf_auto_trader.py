@@ -787,7 +787,19 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
     if _blended_ev != ev:
         print(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
-
+    # ===== 【闭环】ProbabilityCalibrator 校准评分 -> EV + Confidence (含regime校准+样本置信) =====
+    _calibrated_prob = _calibrator.get_prob(score)
+    _calibrated_prob = round(_calibrated_prob, 4)
+    _calib_ev_result = _calibrator.calculate_ev(
+        score=score,
+        reward=float(best.get('estimated_rr', 1.82)),
+        risk=1.0,
+        regime=_regime_name.lower(),
+    )
+    _calibrated_ev = _calib_ev_result['ev']
+    _calibrated_conf = _calib_ev_result['confidence']
+    print(f"[{symbol}] ProbabilityCalibrator: score={score:.1f} -> confidence={_calibrated_prob:.3f} | "
+          f"calib_ev={_calibrated_ev:.4f} sample_conf={_calibrated_conf:.3f}")
         # ===== 【V60 ML Decision Engine】LightGBM 概率评估（并行） =====
     _ml_score, _ml_ev, _ml_conf, _ml_active = _ML_DECISION.evaluate(
         exec_ctx=exec_ctx,
