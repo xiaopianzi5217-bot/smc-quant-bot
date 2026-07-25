@@ -42,7 +42,7 @@ class OutcomeDatabase:
     def lookup(self, feature_hash: str) -> Optional[Dict[str, Any]]:
         return self.data.get(feature_hash)
 
-    def update(self, feature_hash: str, realized_r: float):
+    def update(self, feature_hash: str, realized_r: float, mode: str = "NORMAL"):
         if feature_hash not in self.data:
             self.data[feature_hash] = {
                 "trade": 0, "win": 0, "loss": 0, "mean_r": 0.0,
@@ -80,6 +80,22 @@ class OutcomeDatabase:
             if _k not in entry:
                 entry[_k] = _v
 
+        # ⚡ Probe 模式：只更新 Probe 统计，不影响正式 PF/win_rate
+        if mode == "PROBE":
+            entry["probe_trade"] = entry.get("probe_trade", 0) + 1
+            entry["probe_sum_r"] = entry.get("probe_sum_r", 0.0) + realized_r
+            if realized_r > 0:
+                entry["probe_win"] = entry.get("probe_win", 0) + 1
+                entry["probe_wins_r"] = entry.get("probe_wins_r", 0.0) + realized_r
+            else:
+                entry["probe_loss"] = entry.get("probe_loss", 0) + 1
+                entry["probe_losses_r"] = entry.get("probe_losses_r", 0.0) + abs(realized_r)
+            entry["probe_pf"] = round(entry.get("probe_wins_r", 0.0) / max(entry.get("probe_losses_r", 0.0), 1e-12), 4) if entry.get("probe_losses_r", 0.0) > 0 else (entry.get("probe_wins_r", 0.0) if entry.get("probe_wins_r", 0.0) > 0 else 0.0)
+            # Probe 不更新正式统计和 Welford，直接保存
+            self._save()
+            return
+
+        # 正式统计（mode == "NORMAL"）
         n = entry["trade"]  # 旧样本数（用于 Welford 算法）
         entry["trade"] += 1
         entry["sum_r"] += realized_r

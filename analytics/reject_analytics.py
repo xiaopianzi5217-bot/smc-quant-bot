@@ -146,6 +146,9 @@ class RejectAnalytics:
         self.stats[key] += 1
         self.stage_reason_stats[stage][reason] += 1
 
+        # ⚡ 同步 DailyReport
+        daily_report.record_reject(stage, reason)
+
         entry = {
             "time": time.time(),
             "symbol": symbol,

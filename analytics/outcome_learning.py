@@ -14,11 +14,11 @@ class OutcomeLearner:
     def __init__(self):
         self.db = OutcomeDatabase()
 
-    def update_from_trade(self, feature: Dict[str, Any], realized_r: float):
+    def update_from_trade(self, feature: Dict[str, Any], realized_r: float, mode: str = "NORMAL"):
         if not feature:
             return
         feature_hash = generate_feature_hash(feature)
-        self.db.update(feature_hash, realized_r)
+        self.db.update(feature_hash, realized_r, mode=mode)
 
     def get_stats(self, feature: Dict[str, Any], min_trades: int = 15) -> Optional[Dict[str, Any]]:
         if not feature:
