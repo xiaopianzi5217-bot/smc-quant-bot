@@ -9,7 +9,7 @@ Probe Manager — Observer 转探针交易决策引擎
 
 设计原则：
   - 不影响现有 Score/EV/Outcome 数据结构
-  - 与 config.py 中的 PROBE_* 配置联动
+  - 配置统一从 config/probe_config.py 读取
   - 与 analytics/reject_analytics 联动记录拒绝原因
 
 用法：
@@ -21,45 +21,26 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-# ════════════════════════════════════════════════════════════════
-# 默认 Probe 参数（仅当 config 不可用时作为后备）
-# ════════════════════════════════════════════════════════════════
-DEFAULT_PROBE_MIN_SCORE = 55.0
-DEFAULT_PROBE_MIN_CONFIDENCE = 0.55
-DEFAULT_STRONG_EVENTS = [
-    "CHOCH",
-    "LIQUIDITY_SWEEP",
-    "FVG",
-    "SQUEEZE_RELEASE",
-]
-DEFAULT_MIN_STRONG_EVENTS = 2
-DEFAULT_SIZE_MULTIPLIER = 0.25
-
-
 def _load_probe_config() -> dict:
-    """从 config.py 读取 Probe 配置，失败时返回默认值"""
+    """从 config/probe_config.py 读取配置，失败时回退默认值"""
     try:
-        from config import (
-            PROBE_MIN_SCORE,
-            PROBE_MIN_CONFIDENCE,
-            PROBE_REQUIRED_EVENTS,
-            PROBE_MIN_STRONG_EVENTS,
-            PROBE_SIZE_MULTIPLIER,
-        )
+        from config.probe_config import PROBE_CONFIG
         return {
-            "min_score": float(PROBE_MIN_SCORE),
-            "min_confidence": float(PROBE_MIN_CONFIDENCE),
-            "strong_events": list(PROBE_REQUIRED_EVENTS),
-            "min_strong_events": int(PROBE_MIN_STRONG_EVENTS),
-            "size_multiplier": float(PROBE_SIZE_MULTIPLIER),
+            "min_score": float(PROBE_CONFIG.get("min_score", 55)),
+            "min_confidence": float(PROBE_CONFIG.get("min_confidence", 0.55)),
+            "strong_events": list(PROBE_CONFIG.get("required_events", [
+                "CHOCH", "LIQUIDITY_SWEEP", "FVG", "SQUEEZE_RELEASE",
+            ])),
+            "min_strong_events": int(PROBE_CONFIG.get("min_events", 2)),
+            "size_multiplier": float(PROBE_CONFIG.get("size_multiplier", 0.25)),
         }
     except (ImportError, AttributeError, ValueError, TypeError):
         return {
-            "min_score": DEFAULT_PROBE_MIN_SCORE,
-            "min_confidence": DEFAULT_PROBE_MIN_CONFIDENCE,
-            "strong_events": DEFAULT_STRONG_EVENTS,
-            "min_strong_events": DEFAULT_MIN_STRONG_EVENTS,
-            "size_multiplier": DEFAULT_SIZE_MULTIPLIER,
+            "min_score": 55.0,
+            "min_confidence": 0.55,
+            "strong_events": ["CHOCH", "LIQUIDITY_SWEEP", "FVG", "SQUEEZE_RELEASE"],
+            "min_strong_events": 2,
+            "size_multiplier": 0.25,
         }
 
 
@@ -72,8 +53,8 @@ class ProbeManager:
 
     配置来源（优先级）：
       1. 构造参数显式传入
-      2. config.py 中的 PROBE_* 常量
-      3. 文件硬编码默认值（DEFAULT_*）
+      2. config/probe_config.py 中的 PROBE_CONFIG 字典
+      3. 文件硬编码默认值
     """
 
     def __init__(
@@ -84,7 +65,7 @@ class ProbeManager:
         min_strong_events: Optional[int] = None,
         size_multiplier: Optional[float] = None,
     ):
-        # 1. 用 config 值兜底
+        # 1. 用 config/probe_config.py 值兜底
         _cfg = _load_probe_config()
         self.min_score = min_score if min_score is not None else _cfg["min_score"]
         self.min_confidence = (
@@ -94,7 +75,7 @@ class ProbeManager:
         self.min_strong_events = (
             min_strong_events if min_strong_events is not None else _cfg["min_strong_events"]
         )
-        self.size_multiplier = (
+        self._size_multiplier = (
             size_multiplier if size_multiplier is not None else _cfg["size_multiplier"]
         )
 
@@ -144,14 +125,14 @@ class ProbeManager:
 
         return strong_count >= self.min_strong_events
 
-    def size_multiplier(self) -> float:
+    def get_size_multiplier(self) -> float:
         """
         返回 Probe 交易使用的仓位乘数。
 
         Returns:
             float: 0.0 ~ 1.0，默认 0.25
         """
-        return self.size_multiplier
+        return self._size_multiplier
 
     def reject_reason(
         self,
@@ -184,6 +165,6 @@ class ProbeManager:
         return "ALLOWED"
 
 
-# 全局单例 — 自动从 config.py 读取 PROBE_*
-# 修改 config.py 中的 PROBE_* 常量即可调整探针行为
+# 全局单例 — 配置从 config/probe_config.py 读取
+# 修改 config/probe_config.py 中的 PROBE_CONFIG 字典即可调整探针行为
 probe_manager = ProbeManager()
