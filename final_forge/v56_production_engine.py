@@ -147,8 +147,72 @@ def add_v56_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _liquidity_context(df: pd.DataFrame, i: int) -> Dict[str, Any]:
+    """
+    从已有指标推断流动性消耗状态，不需要 SMC 模块。
+    返回值字段：
+      - sweep_count_20: 近20bar流动性扫取次数
+      - bsl_dist_atr:   上方流动性（hh20-like）距离，正数=在上方，负数=已被突破
+      - ssl_dist_atr:   下方流动性（ll20-like）距离，正数=在下方，负数=已被突破
+      - is_bsl_swept:   买方流动性是否已被扫（当前close > hh20）
+      - is_ssl_swept:   卖方流动性是否已被扫（当前close < ll20）
+    """
+    r = df.iloc[i]
+    close = float(r["close"])
+    atr = max(float(r.get("atr", 1.0)), 1e-9)
+
+    # 使用 hh20/ll20 作为流动性参考点（已有指标，无需回看 df）
+    hh20 = float(r.get("hh20", close))
+    ll20 = float(r.get("ll20", close))
+
+    # BSL/SSL 距离：正数表示流动性在对应方向，负数表示已被价格突破
+    bsl_dist = (hh20 - close) / atr       # 上方还有多少流动性（正=在上方，负=已被扫）
+    ssl_dist = (close - ll20) / atr       # 下方还有多少流动性（正=在下方，负=已被扫）
+
+    # 判断该 bar 上 BSL/SSL 是否已被扫过
+    is_bsl_swept = bool(close > hh20 * 1.001)  # 价格已突破近期高点
+    is_ssl_swept = bool(close < ll20 * 0.999)  # 价格已突破近期低点
+
+    # 近20bar流动性扫取次数：通过扫描 df 中前后各10根bar
+    lookback = 10
+    lookforward = 10
+    start = max(0, i - lookback)
+    end = min(len(df), i + lookforward + 1)
+    sweep_count = 0
+    for j in range(start, end):
+        if j == i:
+            continue
+        b = df.iloc[j]
+        b_close = float(b["close"])
+        b_low = float(b["low"])
+        b_high = float(b["high"])
+        # 向上扫取：价格突破 ll20 后又涨回
+        if b_low < ll20 and b_close > ll20:
+            sweep_count += 1
+        # 向下扫取：价格突破 hh20 后又跌回
+        if b_high > hh20 and b_close < hh20:
+            sweep_count += 1
+
+    # OB 剩余强度估算：基于价格在 hh20~ll20 区间的相对位置和 ATR 归一化
+    liq_range = max(hh20 - ll20, atr * 0.5)
+    ob_remaining = max(0.0, min(1.0, (close - ll20) / liq_range))
+    # 如果价格已突破区间，OB 剩余强度为零
+    if close > hh20 or close < ll20:
+        ob_remaining = 0.0
+
+    return {
+        "sweep_count_20": min(sweep_count, 20),
+        "bsl_dist_atr": round(bsl_dist, 4),
+        "ssl_dist_atr": round(ssl_dist, 4),
+        "is_bsl_swept": is_bsl_swept,
+        "is_ssl_swept": is_ssl_swept,
+        "ob_remaining": round(ob_remaining, 4),
+    }
+
+
 def _append(rows: List[Dict[str, Any]], df: pd.DataFrame, i: int, setup: str, direction: str, score: float, reasons: List[str]) -> None:
     r = df.iloc[i]
+    liq = _liquidity_context(df, i)
     rows.append(
         {
             "idx": int(i),
@@ -165,6 +229,13 @@ def _append(rows: List[Dict[str, Any]], df: pd.DataFrame, i: int, setup: str, di
             "body_pct": round(float(r.get("body_pct", 0.0)), 4),
             "hour": int(r.get("hour", 0)),
             "dow": int(r.get("dow", 0)),
+            # 流动性推断字段
+            "sweep_count_20": liq["sweep_count_20"],
+            "bsl_dist_atr": liq["bsl_dist_atr"],
+            "ssl_dist_atr": liq["ssl_dist_atr"],
+            "is_bsl_swept": liq["is_bsl_swept"],
+            "is_ssl_swept": liq["is_ssl_swept"],
+            "ob_remaining": liq["ob_remaining"],
         }
     )
 

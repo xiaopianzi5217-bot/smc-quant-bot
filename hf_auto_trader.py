@@ -489,8 +489,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
         )
         return None
     
-    # Step 1: generate_candidates — 调用 load_ohlcv + add_v56_indicators + generate_v56_candidates + enrich（含bucket_ev）
+        # Step 1: generate_candidates — 调用 load_ohlcv + add_v56_indicators + generate_v56_candidates + enrich（含bucket_ev）
     candidates = _V56_ENGINE.generate_candidates(df_v56)
+    from analytics.daily_report import daily_report
+    daily_report.record_candidate()
     if candidates is None or candidates.empty:
         print(f"[{symbol}] V56.5 引擎无候选信号")
         get_reject_audit().log(
@@ -2053,8 +2055,12 @@ def check_and_open(result: dict | None) -> bool:
                 _pos_data2["audit_exit"] = _er
                 position_manager.update(symbol, _pos_data2)
     except Exception as _audit_e:
-        print(f"[SignalAuditLog] 后验记录异常: {_audit_e}")
+                print(f"[SignalAuditLog] 后验记录异常: {_audit_e}")
         
+    # ⚡ DailyReport：记录交易
+    from analytics.daily_report import daily_report
+    _mode = "PROBE" if result.get("probe_mode") else "NORMAL"
+    daily_report.record_trade(mode=_mode)
     return True
 
 # ============================================================

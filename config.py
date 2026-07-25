@@ -45,6 +45,20 @@ STRATEGY_PARAMS = {
 
 }
 
+# ===============================
+# Probe Mode — Observer 转探针交易
+# ===============================
+# 让 Observer-only 模式的信号以极小仓位执行，积累真实胜率数据
+PROBE_MODE = True                          # 是否启用 Probe Mode
+PROBE_SIZE_MULTIPLIER = 0.25               # Probe 仓位乘数（相对正常仓位）
+PROBE_MIN_SCORE = 55                       # Probe 最低 score 门槛
+PROBE_MIN_CONFIDENCE = 0.55                # Probe 最低 confidence 门槛
+PROBE_REQUIRED_EVENTS = [                  # Observer 事件白名单
+    "CHOCH", "LIQUIDITY_SWEEP", "FVG", "SQUEEZE_RELEASE",
+]
+PROBE_MIN_STRONG_EVENTS = 2                # 至少满足几个白名单事件
+
+
 PIVOT_PARAMS = {
     'macro': {'left': 5, 'right': 3, 'atr_threshold': 0.5, 'min_spacing': 5},
     'exec': {

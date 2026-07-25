@@ -32,6 +32,7 @@ from final_forge.v56_production_engine import (
     add_v56_indicators,
     generate_v56_candidates,
 )
+from analytics.adaptive_feature_weighter import feature_weighter  # noqa: E402
 
 
 @dataclass
@@ -179,10 +180,33 @@ def enrich_v565_candidates(candidates: pd.DataFrame, cfg: Optional[V565Config] =
     ev_for_score = pd.to_numeric(bucket_ev_col, errors="coerce").fillna(
         pd.to_numeric(out["model_ev"], errors="coerce").fillna(0.0)
     )
+    # 流动性惩罚列（初始为0，后续由 Quality Gate 填充，Engine 层不做推断）
+    out["liquidity_penalty"] = 0.0
+
+    # ⚡ Adaptive Feature Weight: 对 setup_type 映射为特征名，计算加权奖励
+    _FEATURE_MAP = {
+        "LIQUIDITY_SWEEP": "CHOCH",
+        "ORDERBLOCK_REACTION": "OB",
+        "FVG_TOUCH": "FVG",
+        "ENHANCED_BUY": "OB",
+        "WEAK_BOS": "SQZMOM",
+        "TREND_PULLBACK": "SQZMOM",
+    }
+    def _calc_feature_bonus(row):
+        feat_name = _FEATURE_MAP.get(str(row.get("setup_type", "")), None)
+        if feat_name is None:
+            return 0.0
+        weight = feature_weighter.get_weight(feat_name)
+        if weight > 1.0:
+            return (weight - 1.0) * 5.0
+        return 0.0
+    out["feature_bonus"] = out.apply(_calc_feature_bonus, axis=1)
+
     out["decision_score"] = (
         pd.to_numeric(out["score"], errors="coerce").fillna(0.0)
         + 2.0 * ev_for_score
         + out["tier"].map({1: 2.0, 2: 0.0, 3: -2.0}).astype(float)
+        + pd.to_numeric(out["feature_bonus"], errors="coerce").fillna(0.0)
     )
     return out.sort_values(["idx", "decision_score"], ascending=[True, False]).reset_index(drop=True)
 
@@ -201,10 +225,19 @@ def _eligible(cand: pd.DataFrame, cfg: V565Config) -> pd.Series:
         & (pd.to_numeric(cand["score"], errors="coerce") >= float(cfg.strong_tier2_score))
         & (pd.to_numeric(cand["model_ev"], errors="coerce") > 0.05)
     )
+    # ⚡ 20260830修复: 如果 primary_setups 包含非Tier1类型，放宽 tier 限制
+    # 允许 primary_setups 中的所有 setup_type 通过（无论 tier）
+    is_primary_loose = cand["setup_type"].isin(cfg.primary_setups)  # 移除 & (tier==1)
+    # ⚡ 当允许 Tier2 且 score 满足时，不强制 EV>0.05（实时 EV 分布偏负）
+    is_strong_tier2_loose = (
+        bool(cfg.allow_tier2_if_strong)
+        & (cand["tier"] == 2)
+        & (pd.to_numeric(cand["score"], errors="coerce") >= max(55.0, float(cfg.strong_tier2_score) * 0.85))
+    )
     return (
         (pd.to_numeric(cand["score"], errors="coerce") >= float(cfg.min_score))
         & cand["hour"].isin(tuple(cfg.allowed_hours))
-        & (is_primary | is_strong_tier2)
+        & (is_primary_loose | is_strong_tier2_loose)
     )
 
 
@@ -258,17 +291,21 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
         gate_passed_list: List[bool] = []
         gate_reason_list: List[str] = []
         size_penalty_list: List[float] = []
+        liquidity_penalty_list: List[float] = []
 
         for _, row in cand.iterrows():
             passed, reason, meta = v565_quality_gate(row.to_dict(), config={"min_score": cfg.min_score})
             gate_passed_list.append(passed)
             gate_reason_list.append(reason)
             size_penalty_list.append(float(meta.get("size_penalty", 1.0)))
+            # 读取流动性惩罚值，用于 decision_score 软调整
+            liquidity_penalty_list.append(float(meta.get("liquidity_penalty", 0.0)))
 
         cand = cand.copy()
         cand["gate_passed"] = gate_passed_list
         cand["gate_reason"] = gate_reason_list
         cand["gate_size_penalty"] = size_penalty_list
+        cand["gate_liquidity_penalty"] = liquidity_penalty_list
 
         rejected_count = int((~pd.Series(gate_passed_list)).sum())
         if rejected_count > 0:
@@ -278,17 +315,34 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
         if cand.empty:
             print("⚠️  V56.5 Quality Gate rejected ALL candidates. No trades this run.")
             return pd.DataFrame()
+
+        # ⚡ 第二层：Engine 软排名调整
+        # 使用 liquidity_penalty 降低 decision_score（不修改原始 score）
+        lp = pd.to_numeric(cand.get("gate_liquidity_penalty", 0.0), errors="coerce").fillna(0.0)
+        lp = lp.clip(lower=0.0, upper=1.0)
+        cand["decision_score"] = cand["decision_score"] - lp * 20.0
+        cand["liquidity_penalty"] = lp  # 记录最终使用的值
+
+        # 打印流动性惩罚统计
+        penalized_count = int((lp > 0).sum())
+        if penalized_count > 0:
+            avg_lp = float(lp[lp > 0].mean())
+            print(f"🔍 V56.5 Liquidity Penalty applied to {penalized_count}/{len(cand)} candidates "
+                  f"(avg penalty={avg_lp:.4f}, max cut={float(lp.max())*20:.1f} pts)")
+
     except ImportError as exc:
         # Quality gate not available; proceed without filtering
         print(f"⚠️  V56.5 Quality Gate not available ({exc}); proceeding without gate filtering.")
         cand["gate_passed"] = True
         cand["gate_reason"] = "GATE_UNAVAILABLE"
         cand["gate_size_penalty"] = 1.0
+        cand["gate_liquidity_penalty"] = 0.0
     except Exception as exc:
         print(f"⚠️  V56.5 Quality Gate error ({exc}); proceeding without gate filtering.")
         cand["gate_passed"] = True
         cand["gate_reason"] = f"GATE_ERROR_{exc}"
         cand["gate_size_penalty"] = 1.0
+        cand["gate_liquidity_penalty"] = 0.0
 
     selected: List[pd.Series] = []
     extras: List[pd.Series] = []

@@ -24,6 +24,7 @@ FIELD_NAMES = [
     "symbol",            # BTC/USDT
     "direction",         # Long / Short
     "status",            # OPEN / CLOSE
+    "mode",              # 【P1 20260730】交易模式: REGULAR / PROBE
     "open_time",         # 开仓时间
     "open_price",        # 入场价
     "sl",                # 止损
@@ -100,6 +101,7 @@ class TradeJournal:
         regime: str = "",
         volume: float = 0,
         note: str = "",
+        mode: str = "REGULAR",  # 【P1 20260730】新增 mode 参数
     ) -> str:
         """记录开仓。返回 order_id。"""
         order_id = self._next_id()
@@ -109,6 +111,7 @@ class TradeJournal:
             "symbol": symbol,
             "direction": direction,
             "status": "OPEN",
+            "mode": mode,           # 【P1 20260730】写入 mode
             "open_time": now,
             "open_price": round(open_price, 2),
             "sl": round(sl, 2),

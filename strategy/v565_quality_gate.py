@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+from analytics.reject_analytics import reject_analytics
+
 
 # ============================================================
 # ⚙️ 动态分数门槛表（按 regime × hour）
@@ -139,6 +141,66 @@ def v565_quality_gate(
     hour = int(row.get("hour", -1))
     regime = str(row.get("regime", "mixed")).lower().strip()
     model_ev = float(row.get("model_ev", -999.0))
+    setup_type_str = str(row.get("setup_type", "")).upper()
+
+        # ========================================================
+    # 0. Structure Override（特权通道）⚡ 优先级最高
+    # - 任何满足 override 条件的信号直接通过
+    # - 不执行后续过滤检查（包括 model_ev 硬地板和 score 门槛）
+    # ========================================================
+    #
+    # 0a. 流动性惩罚预估算（用于阻止 Override 绕过流动风险）
+    # -------------------------------------------------------
+    # 如果估算惩罚 >0.4，则禁用 Override（避免顶部追单）
+    # 估算逻辑与 Step 4 流动性的惩罚一致
+    _liq_penalty_estimate: float = 0.0
+    direction = str(row.get("direction", ""))
+    if row.get("is_bsl_swept", False):
+        _liq_penalty_estimate += 0.25
+    if row.get("is_ssl_swept", False):
+        _liq_penalty_estimate += 0.25
+    sweep_count = int(row.get("sweep_count_20", 0))
+    if sweep_count >= 4:
+        _liq_penalty_estimate += 0.25
+    elif sweep_count >= 2:
+        _liq_penalty_estimate += 0.15
+    bsl_dist = float(row.get("bsl_dist_atr", 99.0))
+    ssl_dist = float(row.get("ssl_dist_atr", 99.0))
+    if direction == "Long":
+        if ssl_dist < 0.0:
+            _liq_penalty_estimate += 0.20
+    elif direction == "Short":
+        if bsl_dist < 0.0:
+            _liq_penalty_estimate += 0.20
+    ob_remaining = float(row.get("ob_remaining", 1.0))
+    if ob_remaining < 0.2 and _liq_penalty_estimate > 0:
+        _liq_penalty_estimate += 0.10
+    _liq_penalty_estimate = min(_liq_penalty_estimate, 0.90)
+
+    # ⚡ 流动性惩罚过高时禁用 Override（避免顶部追单）
+    _override_disabled = _liq_penalty_estimate > 0.4
+
+    strong_structure = (
+        float(row.get("mitigation_strength", 0)) > 0.35 or
+        bool(row.get("liquidity_sweep_confirmed", False)) or
+        bool(row.get("is_bsl_swept", False)) or
+        bool(row.get("is_ssl_swept", False)) or
+        "OB" in setup_type_str or
+        "FVG" in setup_type_str or
+        "LIQUIDITY" in setup_type_str or
+        "CHOCH" in setup_type_str or
+        bool(row.get("has_choch", False)) or
+        bool(row.get("has_bot_div", False)) or
+        bool(row.get("has_top_div", False))
+    )
+
+    if strong_structure and score >= 41 and model_ev > -0.50 and not _override_disabled:
+        meta["override"] = True
+        meta["size_mult"] = 0.96
+        meta["reason"] = "Optimized High Structure"
+        meta["liquidity_penalty_estimate"] = round(_liq_penalty_estimate, 4)
+        meta["passed_checks"].append("structure_override")
+        return True, "STRUCTURE_OVERRIDE", meta
 
     # ========================================================
     # 1. model_ev 硬地板
@@ -147,10 +209,21 @@ def v565_quality_gate(
     if model_ev < ev_min:
         reasons.append(f"MODEL_EV_TOO_LOW_{model_ev:.4f}<{ev_min:.2f}")
         meta["failed_checks"].append("model_ev")
+        # 【P0 20260730】RejectAnalytics 记录
+        reject_analytics.record(
+            symbol=row.get("symbol", ""),
+            signal_id=row.get("signal_id", ""),
+            stage="EV",
+            reason="LOW_EV",
+            score=score,
+            confidence=row.get("confidence"),
+            regime=regime,
+            extra={"model_ev": round(model_ev, 4), "ev_min": round(ev_min, 4)},
+        )
     else:
         meta["passed_checks"].append("model_ev")
 
-        # ========================================================
+    # ========================================================
     # 2. 动态分数门槛
     # ========================================================
     # config.min_score 作为 fallback：如果动态表的值比它高，优先用 config 值
@@ -160,6 +233,17 @@ def v565_quality_gate(
     if score < min_score:
         reasons.append(f"SCORE_LOW_{score:.1f}<{min_score:.0f}_REGIME={regime}_HOUR={hour}")
         meta["failed_checks"].append("score")
+        # 【P0 20260730】RejectAnalytics 记录
+        reject_analytics.record(
+            symbol=row.get("symbol", ""),
+            signal_id=row.get("signal_id", ""),
+            stage="SCORE",
+            reason="LOW_SCORE",
+            score=score,
+            confidence=row.get("confidence"),
+            regime=regime,
+            extra={"min_score": round(min_score, 1), "hour": hour},
+        )
     else:
         meta["passed_checks"].append("score")
 
@@ -167,48 +251,107 @@ def v565_quality_gate(
     # 3. 低分信号（score<80）额外检查
     # ========================================================
     if score < 80:
-        # 3a. 低分 + 不利小时 → 硬拒绝
+        # ⚡ 20260830修复: 保守强化——对低分信号不再硬拦截
+        # 移除 hard_block_hours 和 trend_extreme 硬拒绝，改为软缩减+通道增强
+        # 3a. 低分 + 不利小时 → 软缩减（不拒绝，降仓位）
         hard_hours = set(cfg.get("hard_block_hours", {4, 6, 7, 23}))
         if hour in hard_hours:
-            reasons.append(f"HOUR_BLOCKED_{hour}_LOW_SCORE")
             meta["failed_checks"].append("hour_blocked")
-            meta["blocked"] = True
+            meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.70)  # 降至70%仓位，不拒单
+            meta["blocked"] = False  # ⚡ 不再硬拒绝
 
-                        # 3b. 低分 + trend_strength 极端
+        # 3b. 低分 + trend_strength 极端 → 软缩减
         trend_strength = float(row.get("trend_strength", 0.0))
         if abs(trend_strength) > 1.8:
-            reasons.append(f"TREND_EXTREME_{trend_strength:.2f}_LOW_SCORE")
             meta["failed_checks"].append("trend_extreme")
+            meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.80)  # 降至80%仓位
     else:
         # 高分信号（score>=80）：加分
         meta["passed_checks"].append("high_score_bonus")
 
+        # ========================================================
+    # 4. 流动性惩罚（硬惩罚——降 quality_score，不拒绝）
     # ========================================================
-    # 4. Structure Override（特权通道）
-    # ========================================================
-    strong_structure = (
-        float(row.get("mitigation_strength", 0)) > 0.54 or
-        bool(row.get("liquidity_sweep_confirmed", False)) or
-        "ob" in str(row.get("setup_type", "")).lower() or
-        "fvg" in str(row.get("setup_type", "")).lower()
-    )
+    liquidity_penalty: float = 0.0
+    direction = str(row.get("direction", ""))
+    setup_type = str(row.get("setup_type", "")).upper()
 
-    if strong_structure and score >= 41 and model_ev > -0.50:
-        meta["override"] = True
-        meta["size_mult"] = 0.96
-        meta["reason"] = "Optimized High Structure"
-        return True, "STRUCTURE_OVERRIDE", meta
+    # 4a. 已完成的流动性扫取
+    if row.get("is_bsl_swept", False):  # 买方流动性已被扫
+        liquidity_penalty += 0.25
+        meta["failed_checks"].append("liquidity_bsl_exhausted")
+    if row.get("is_ssl_swept", False):  # 卖方流动性已被扫
+        liquidity_penalty += 0.25
+        meta["failed_checks"].append("liquidity_ssl_exhausted")
+
+    # 4b. 多次扫流动性（sweep_count >= 2 → 反复震荡，流动性已消耗）
+    sweep_count = int(row.get("sweep_count_20", 0))
+    if sweep_count >= 4:
+        liquidity_penalty += 0.25
+        meta["failed_checks"].append(f"liquidity_sweep_excessive_{sweep_count}")
+    elif sweep_count >= 2:
+        liquidity_penalty += 0.15
+        meta["failed_checks"].append(f"liquidity_repeated_sweep_{sweep_count}")
+
+    # 4c. BSL/SSL 距离过近（流动性已被价格逼近或突破）
+    bsl_dist = float(row.get("bsl_dist_atr", 99.0))
+    ssl_dist = float(row.get("ssl_dist_atr", 99.0))
+    if direction == "Long":
+        if ssl_dist < 0.0:  # 下方流动性已被扫穿（价格已跌破 ll20）
+            liquidity_penalty += 0.20
+            meta["failed_checks"].append("ssl_breached")
+        elif ssl_dist < 0.5:  # 离下方流动性很近
+            liquidity_penalty += 0.10
+            meta["failed_checks"].append("ssl_near_breach")
+        if bsl_dist < 0.5:  # 上方流动性也很近（上下夹击）
+            liquidity_penalty += 0.10
+            meta["failed_checks"].append("bsl_near")
+    elif direction == "Short":
+        if bsl_dist < 0.0:  # 上方流动性已被扫穿（价格已突破 hh20）
+            liquidity_penalty += 0.20
+            meta["failed_checks"].append("bsl_breached")
+        elif bsl_dist < 0.5:
+            liquidity_penalty += 0.10
+            meta["failed_checks"].append("bsl_near_breach")
+        if ssl_dist < 0.5:
+            liquidity_penalty += 0.10
+            meta["failed_checks"].append("ssl_near")
+
+    # 4d. OB 剩余强度过低（价格已远离合理区间）
+    ob_remaining = float(row.get("ob_remaining", 1.0))
+    if ob_remaining < 0.2 and liquidity_penalty > 0:
+        liquidity_penalty += 0.10
+        meta["failed_checks"].append("ob_depleted")
+
+    # 记录流动性惩罚值，供 Engine 层使用
+    liquidity_penalty = min(liquidity_penalty, 0.90)  # 上限
+    meta["liquidity_penalty"] = round(liquidity_penalty, 4)
+
+    # 应用惩罚：缩小 quality_score（不拒绝，只降分）
+    # quality_score 降到 < min_score 时会拒绝，但我们不改变 score
+    # 而是通过 size_penalty 降仓位
+    if liquidity_penalty > 0:
+        # 每个惩罚点对应 10% 仓位缩减
+        liq_size_cut = 1.0 - liquidity_penalty * 0.80
+        meta["size_penalty"] = min(meta.get("size_penalty", 1.0), liq_size_cut)
 
     # ========================================================
     # 5. 分数软缩减（不拒绝但降仓位）
     # ========================================================
-    size_penalty = 1.0
-    if score < 75:
-        size_penalty = 0.60
-        meta["size_penalty"] = 0.60
-    elif score < 78:
-        size_penalty = 0.80
-        meta["size_penalty"] = 0.80
+    if "size_penalty" not in meta:
+        size_penalty = 1.0
+        if score < 75:
+            size_penalty = 0.60
+        elif score < 78:
+            size_penalty = 0.80
+        meta["size_penalty"] = size_penalty
+    else:
+        # 已经有流动性惩罚或之前的缩减，再叠加分数缩减
+        existing = meta["size_penalty"]
+        if score < 75:
+            meta["size_penalty"] = min(existing, 0.60)
+        elif score < 78:
+            meta["size_penalty"] = min(existing, 0.80)
 
     # 最终决策
     passed = len(reasons) == 0

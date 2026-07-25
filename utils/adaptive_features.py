@@ -62,15 +62,22 @@ class AdaptiveFeatureWeighter:
                 if feat in self.feature_stats:
                     s = self.feature_stats[feat]
                     s["trades"] += 1
+                    # ⚡ 样本计数保护：至少30次交易才调整权重
+                    if s["trades"] < 30:
+                        continue
                     if outcome_r > 0.2:  # 仅 >0.2R 才算胜局
                         s["wins"] += 1
-                # 递推更新 avg_r：new_avg = (old_avg * (n-1) + new_r) / n
+                else:
+                    continue
+                # 递推更新 avg_r
                 prev_total = s.get("avg_r", 0) * (s["trades"] - 1)
                 s["avg_r"] = (prev_total + outcome_r) / s["trades"]
 
                 win_rate = s["wins"] / s["trades"] if s["trades"] > 0 else 0.5
                 # 平滑权重更新：60% 保留旧值 + 40% 新信号
-                s["weight"] = 0.6 * s.get("weight", 1.0) + 0.4 * (win_rate * 1.8 + s["avg_r"] * 0.8)
+                new_weight = 0.6 * s.get("weight", 1.0) + 0.4 * (win_rate * 1.8 + s["avg_r"] * 0.8)
+                # ⚡ 权重范围限制 0.7~1.3，防止过度学习
+                s["weight"] = max(0.7, min(new_weight, 1.3))
 
         self._save_stats()
 
@@ -102,3 +109,7 @@ class AdaptiveFeatureWeighter:
         # 乘数上限 1.5，防止分数越界破坏后续阈值
         factor = max(0.8, min(factor, 1.2))
         return round(total * factor, 2)
+
+    def get_weight(self, feature: str) -> float:
+        """获取单个特征当前权重，供 V56.5 Engine 使用。"""
+        return self.feature_stats.get(feature, {}).get("weight", 1.0)
