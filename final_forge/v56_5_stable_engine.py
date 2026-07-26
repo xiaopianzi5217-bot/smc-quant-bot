@@ -35,6 +35,43 @@ from final_forge.v56_production_engine import (
 from analytics.adaptive_feature_weighter import feature_weighter  # noqa: E402
 
 
+# ⚡ Adaptive Feature Weight: 对 setup_type 映射为特征名，计算加权奖励
+#      Structure / Momentum / Liquidity / Volatility / Regime / VWAP 全覆盖
+
+_FEATURE_MAP = {
+# =====================
+# Momentum / Structure
+# =====================
+"LIQUIDITY_SWEEP": "LIQUIDITY",
+"ORDERBLOCK_REACTION": "OB",
+"FVG_TOUCH": "FVG",
+"ENHANCED_BUY": "OB",
+"WEAK_BOS": "SQZMOM",
+"TREND_PULLBACK": "SQZMOM",
+"SQUEEZE_RELEASE": "SQZMOM",
+# =====================
+# Liquidity
+# =====================
+"BSL_SWEEP": "LIQUIDITY",
+"SSL_SWEEP": "LIQUIDITY",
+"LIQUIDITY_GRAB": "LIQUIDITY",
+# =====================
+# Volatility
+# =====================
+"ATR_EXPANSION": "VOLATILITY",
+"VOL_BREAKOUT": "VOLATILITY",
+# =====================
+# Regime
+# =====================
+"TREND_REGIME": "REGIME",
+"RANGE_REGIME": "REGIME",
+# =====================
+# VWAP
+# =====================
+"VWAP_SUPPORT": "VWAP",
+"VWAP_RECLAIM": "VWAP",
+}
+
 @dataclass
 class V565Config:
     # Data / selection
@@ -185,39 +222,6 @@ def enrich_v565_candidates(candidates: pd.DataFrame, cfg: Optional[V565Config] =
 
     # ⚡ Adaptive Feature Weight: 对 setup_type 映射为特征名，计算加权奖励
     #      Structure / Momentum / Liquidity / Volatility / Regime / VWAP 全覆盖
-    _FEATURE_MAP = {
-        # =====================
-        # Momentum / Structure
-        # =====================
-        "LIQUIDITY_SWEEP": "LIQUIDITY",
-        "ORDERBLOCK_REACTION": "OB",
-        "FVG_TOUCH": "FVG",
-        "ENHANCED_BUY": "OB",
-        "WEAK_BOS": "SQZMOM",
-        "TREND_PULLBACK": "SQZMOM",
-        "SQUEEZE_RELEASE": "SQZMOM",
-        # =====================
-        # Liquidity
-        # =====================
-        "BSL_SWEEP": "LIQUIDITY",
-        "SSL_SWEEP": "LIQUIDITY",
-        "LIQUIDITY_GRAB": "LIQUIDITY",
-        # =====================
-        # Volatility
-        # =====================
-        "ATR_EXPANSION": "VOLATILITY",
-        "VOL_BREAKOUT": "VOLATILITY",
-        # =====================
-        # Regime
-        # =====================
-        "TREND_REGIME": "REGIME",
-        "RANGE_REGIME": "REGIME",
-        # =====================
-        # VWAP
-        # =====================
-        "VWAP_SUPPORT": "VWAP",
-        "VWAP_RECLAIM": "VWAP",
-    }
     def _calc_feature_bonus(row):
         feat_name = _FEATURE_MAP.get(str(row.get("setup_type", "")), None)
         if feat_name is None:

@@ -21,11 +21,11 @@
     "bucket_ev": 0.7274
   },
   "range_MID": {
-    "trades": 2,
-    "win_rate": 0.5,
-    "pf": 0.2617,
-    "avg_r": -0.395,
-    "bucket_ev": 0.34
+    "trades": 3,
+    "win_rate": 0.3333,
+    "pf": 0.1539,
+    "avg_r": -0.513,
+    "bucket_ev": -0.13
   },
   "trend_HIGH": {
     "trades": 163,

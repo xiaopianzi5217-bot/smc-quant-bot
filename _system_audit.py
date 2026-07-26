@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """系统审计：当前状态与待优化项"""
 import ast
 import sys

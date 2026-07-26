@@ -1,0 +1,56 @@
+{
+  "OB": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.15
+  },
+  "FVG": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.0
+  },
+  "CHOCH": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.12
+  },
+  "SQZMOM": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.25
+  },
+  "DIVERGENCE": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.35
+  },
+  "LIQUIDITY": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.0
+  },
+  "VOLATILITY": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.0
+  },
+  "REGIME": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.0
+  },
+  "VWAP": {
+    "wins": 0,
+    "trades": 0,
+    "avg_r": 0.0,
+    "weight": 1.0
+  }
+}
