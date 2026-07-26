@@ -1,115 +1,111 @@
-# utils/adaptive_features.py
+# -*- coding: utf-8 -*-
+"""
+Adaptive feature weighter module.
+Dynamically adjusts signal feature weights based on historical P&L.
+"""
 import json
 import os
-from collections import defaultdict
 
 
 class AdaptiveFeatureWeighter:
-    """自适应特征加权：根据历史盈亏动态调整各信号特征的权重。
-
-    支持以下特征类型权重自学习：
-      - OB (Order Block)
-      - FVG (Fair Value Gap)
-      - CHOCH (Change of Character)
-      - SQZMOM (Squeeze Momentum)
-      - DIVERGENCE (背离)
-
-    用法：
-        weighter = AdaptiveFeatureWeighter()
-        # 每笔交易结束后更新
-        weighter.update(features=["OB", "SQZMOM"], outcome_r=1.5)
-        # 计算加权总分
-        weighted = weighter.get_weighted_score({"OB": 10, "SQZMOM": 8})
-    """
+    """Adaptive feature weighting based on historical P&L."""
 
     def __init__(self, window=200, save_path="data/feature_stats.json"):
         self.window = window
         self.save_path = save_path
         self.feature_stats = self._load_stats()
         self.history = []
+        self.samples = {}
 
     def _load_stats(self):
-        """从磁盘加载统计，若文件不存在则返回默认初始权重。"""
+        """Load stats from disk, return defaults if file missing."""
         if os.path.exists(self.save_path):
             try:
-                with open(self.save_path, 'r') as f:
+                with open(self.save_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception:
                 pass
-        # 默认初始权重（基于历史经验）
         return {
             "OB": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.15},
             "FVG": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.0},
             "CHOCH": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.12},
             "SQZMOM": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.25},
             "DIVERGENCE": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.35},
+            "LIQUIDITY": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.00},
+            "VOLATILITY": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.00},
+            "REGIME": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.00},
+            "VWAP": {"wins": 0, "trades": 0, "avg_r": 0.0, "weight": 1.00},
         }
 
-    def update(self, features: list, outcome_r: float):
-        """用一笔交易的结果更新特征统计。
+    def update(self, features, outcome_r):
+        """Update feature stats with a trade outcome.
 
         Args:
-            features: 该笔交易激活的特征名称列表（如 ["OB", "DIVERGENCE"]）
-            outcome_r: 该笔交易的最终盈亏 R 倍数
+            features: List of activated feature names
+            outcome_r: Final P&L in R-multiple
         """
-        # 噪音过滤：|outcome_r| < 0.2R 不纳入学习
         if abs(outcome_r) >= 0.2:
             self.history.append((features, outcome_r))
             if len(self.history) > self.window:
                 self.history.pop(0)
-
             for feat in features:
-                if feat in self.feature_stats:
-                    s = self.feature_stats[feat]
-                    s["trades"] += 1
-                    # ⚡ 样本计数保护：至少30次交易才调整权重
-                    if s["trades"] < 30:
-                        continue
-                    if outcome_r > 0.2:  # 仅 >0.2R 才算胜局
-                        s["wins"] += 1
-                else:
+                if feat not in self.feature_stats:
                     continue
-                # 递推更新 avg_r
+                s = self.feature_stats[feat]
+                self.samples[feat] = self.samples.get(feat, 0) + 1
+                if self.samples[feat] < 30:
+                    continue
+                s["trades"] += 1
+                if outcome_r > 0.2:
+                    s["wins"] += 1
                 prev_total = s.get("avg_r", 0) * (s["trades"] - 1)
                 s["avg_r"] = (prev_total + outcome_r) / s["trades"]
-
                 win_rate = s["wins"] / s["trades"] if s["trades"] > 0 else 0.5
-                # 平滑权重更新：60% 保留旧值 + 40% 新信号
                 new_weight = 0.6 * s.get("weight", 1.0) + 0.4 * (win_rate * 1.8 + s["avg_r"] * 0.8)
-                # ⚡ 权重范围限制 0.7~1.3，防止过度学习
-                s["weight"] = max(0.7, min(new_weight, 1.3))
-
+                _new_features = {"LIQUIDITY", "VOLATILITY", "REGIME", "VWAP"}
+                if feat in _new_features:
+                    new_weight = max(0.85, min(new_weight, 1.15))
+                else:
+                    new_weight = max(0.70, min(new_weight, 1.30))
+                s["weight"] = new_weight
         self._save_stats()
 
     def _save_stats(self):
-        """持久化特征统计到磁盘。"""
+        """Persist feature stats to disk."""
         try:
-            with open(self.save_path, 'w') as f:
+            with open(self.save_path, 'w', encoding='utf-8') as f:
                 json.dump(self.feature_stats, f, indent=2)
         except Exception:
             pass
 
-    def get_weighted_score(self, raw_scores: dict) -> float:
-        """用自适应权重计算加权总分。
-
-        限制：总乘数上限 1.5，防止连续优秀特征导致分数爆炸越界。
-
-        Args:
-            raw_scores: 特征名 -> 原始分值 dict
-
-        Returns:
-            加权后的总分
-        """
+    def get_weighted_score(self, raw_scores):
+        """Calculate weighted total score."""
         total = 0.0
         factor = 1.0
         for feat, value in raw_scores.items():
             weight = self.feature_stats.get(feat, {}).get("weight", 1.0)
             total += value * weight
             factor *= weight
-        # 乘数上限 1.5，防止分数越界破坏后续阈值
-        factor = max(0.8, min(factor, 1.2))
+        factor = max(0.85, min(factor, 1.15))
         return round(total * factor, 2)
 
-    def get_weight(self, feature: str) -> float:
-        """获取单个特征当前权重，供 V56.5 Engine 使用。"""
+    def get_weight(self, feature):
+        """Get current weight for a single feature."""
         return self.feature_stats.get(feature, {}).get("weight", 1.0)
+
+
+# ===== Module-level convenience functions (for V56.5 Engine) =====
+_weighter = AdaptiveFeatureWeighter()
+
+
+def get_weight(feature):
+    """Module-level: get current weight for a feature."""
+    return _weighter.get_weight(feature)
+
+
+def update_feature(feature, outcome_r):
+    """Module-level: update a feature's weight with trade outcome."""
+    _weighter.update([feature], outcome_r)
+
+
+feature_weighter = _weighter
