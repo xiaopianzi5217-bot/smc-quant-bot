@@ -641,56 +641,56 @@ def _start_hf_auto_trader():
     # 清理 ccxt 旧模块（防止热加载冲突）
     for mod_name in list(sys.modules.keys()):
         if "ccxt" in mod_name:
-            del sys.modules[mod_name]
+                        del sys.modules[mod_name]
 
-    try:
-        import ccxt as _ccxt
-        _ccxt  # noqa: 只是验证导入成功
-    except Exception as exc:
-        print(f"[HF] ccxt 导入失败 (非致命): {exc}")
+            try:
+                import ccxt as _ccxt
+                _ccxt  # noqa: 只是验证导入成功
+            except Exception as exc:
+                print(f"[HF] ccxt 导入失败 (非致命): {exc}")
 
     try:
         import hf_auto_trader
-                import asyncio
-                from execution.micro.feeder import MicroFeeder
+        import asyncio
+        from execution.micro.feeder import MicroFeeder
 
-                # == [fix] 首次启动时初始化 V6 研究数据库表结构，防止 trade_snapshots 缺失 ==
-                from v6_data_engine import init_v6_database
-                try:
-                    init_v6_database()
-                    print("[V6 DataEngine] trade_snapshots 数据库表已就绪")
-                except Exception as _db_e:
-                    print(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
+        # == [fix] 首次启动时初始化 V6 研究数据库表结构，防止 trade_snapshots 缺失 ==
+        from v6_data_engine import init_v6_database
+        try:
+            init_v6_database()
+            print("[V6 DataEngine] trade_snapshots 数据库表已就绪")
+        except Exception as _db_e:
+            print(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
 
-                async def _run_async_main():
-                    _feeder = None
-                    try:
-                        if _feeder is not None:
-                            print("[Feeder] gather 启动 feeder + main_loop")
-                            # 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
-                            results = await asyncio.gather(
-                                _feeder.run(),
-                                hf_auto_trader.main_loop(),
-                                return_exceptions=True,
-                            )
-                            # 检查结果中的异常
-                            for i, res in enumerate(results):
-                                if isinstance(res, Exception):
-                                    name = "_feeder.run()" if i == 0 else "hf_auto_trader.main_loop()"
-                                    print(f"[Feeder] {name} 异常: {res}")
-                                    _tb.print_exc()
-                        else:
-                            await hf_auto_trader.main_loop()
-                    except Exception as e:
-                        print(f"[hf_auto_trader] 主循环崩溃: {e}")
-                        _tb.print_exc()
-
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(_run_async_main())
+        async def _run_async_main():
+            _feeder = None
+            try:
+                if _feeder is not None:
+                    print("[Feeder] gather 启动 feeder + main_loop")
+                    # 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
+                    results = await asyncio.gather(
+                        _feeder.run(),
+                        hf_auto_trader.main_loop(),
+                        return_exceptions=True,
+                    )
+                    # 检查结果中的异常
+                    for i, res in enumerate(results):
+                        if isinstance(res, Exception):
+                            name = "_feeder.run()" if i == 0 else "hf_auto_trader.main_loop()"
+                            print(f"[Feeder] {name} 异常: {res}")
+                            _tb.print_exc()
+                else:
+                    await hf_auto_trader.main_loop()
             except Exception as e:
-                print(f"[HF] 自动扫描启动失败: {e}")
+                print(f"[hf_auto_trader] 主循环崩溃: {e}")
                 _tb.print_exc()
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_async_main())
+    except Exception as e:
+        print(f"[HF] 自动扫描启动失败: {e}")
+        _tb.print_exc()
 
 
 if __name__ == "__main__":
