@@ -1,164 +1,205 @@
 # -*- coding: utf-8 -*-
+"""signal_deduper.py — 统一信号去重 + 冷却
+
+功能:
+- should_process(signal_id)  : 未处理过则返回 True，并标记已处理
+- is_processed(signal_id)    : 只查询，不标记
+- mark_processed(signal_id)  : 强制标记
+- is_symbol_cooled(symbol, direction=None, reason=None) : 同类信号冷却检查
+- mark_symbol_fired(...)     : 记录开仓时刻，启动冷却
+- is_sl_cooled(symbol)       : 止损后冷却
+- mark_sl_hit(symbol)        : 记录止损时刻
+
+线程安全 + JSON 持久化 + TTL 自动清理。
 """
-P0-3: 统一信号去重服务 SignalDeduper
-
-职责：
-  消除分散在多处的冷却/去重逻辑（SIGNAL_COOLDOWN、processed_signals TTL、止损冷却），
-  统一管理已处理信号的 TTL 过期和持久化。
-
-用法：
-  from state.signal_deduper import signal_deduper
-
-  # 判断是否已处理
-  if not signal_deduper.should_process("BTC/USDT:USDT", "Long", signal_id):
-      print("信号已被处理或冷却中")
-
-  # 标记为已处理（自动记录时间戳，自动清理过期）
-  signal_deduper.mark_processed("BTC/USDT:USDT", "Long", signal_id)
-
-  # 检查同品种同方向冷却（避免重复开仓）
-  if not signal_deduper.is_symbol_cooled("BTC/USDT:USDT", "Long"):
-      print("该品种方向冷却中")
-
-设计：
-  - 内存使用 OrderedDict，LRU 风格清理
-  - 持久化到 state/signal_deduper.json
-  - 默认 TTL: 24 小时（可配置）
-  - 线程安全（threading.Lock）
-"""
-
+from __future__ import annotations
 import json
 import os
 import threading
 import time
-from collections import OrderedDict
+from pathlib import Path
 from typing import Optional
 
-DEFAULT_TTL_SEC = 86400  # 24 小时
-PERSIST_PATH = "state/signal_deduper.json"
+
+DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(86400 * 7)))
+DEFAULT_SYMBOL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SYMBOL_COOLDOWN_SEC", "900"))
+DEFAULT_SAME_SETUP_COOLDOWN_SEC = int(os.getenv("SIGNAL_SAME_SETUP_COOLDOWN_SEC", str(5 * 75)))
+DEFAULT_SL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SL_COOLDOWN_SEC", "300"))
+STATE_DIR = Path(os.getenv("SMC_STATE_DIR", "state"))
+DEDUP_FILE = STATE_DIR / "signal_deduper.json"
 
 
 class SignalDeduper:
-    """统一信号去重服务。"""
+    def __init__(
+        self,
+        persist_path: Optional[str | Path] = None,
+        signal_ttl_sec: int = DEFAULT_SIGNAL_TTL_SEC,
+        symbol_cooldown_sec: int = DEFAULT_SYMBOL_COOLDOWN_SEC,
+        same_setup_cooldown_sec: int = DEFAULT_SAME_SETUP_COOLDOWN_SEC,
+        sl_cooldown_sec: int = DEFAULT_SL_COOLDOWN_SEC,
+    ):
+        self._lock = threading.RLock()
+        self._path = Path(persist_path) if persist_path else DEDUP_FILE
+        self.signal_ttl_sec = int(signal_ttl_sec)
+        self.symbol_cooldown_sec = int(symbol_cooldown_sec)
+        self.same_setup_cooldown_sec = int(same_setup_cooldown_sec)
+        self.sl_cooldown_sec = int(sl_cooldown_sec)
+        self._processed: dict[str, float] = {}
+        self._cooldowns: dict[str, float] = {}
+        self._sl_times: dict[str, float] = {}
+        self._load()
 
-    def __init__(self, ttl_sec: int = DEFAULT_TTL_SEC):
-        self._ttl = ttl_sec
-        self._lock = threading.Lock()
-        self._signals: OrderedDict[str, float] = OrderedDict()
-        self._loaded = False
-
-    # ── 持久化 ──────────────────────────────────────────────
-
-    def _load(self):
-        if self._loaded:
-            return
-        self._loaded = True
-        if not os.path.exists(PERSIST_PATH):
+    def _load(self) -> None:
+        if not self._path.exists():
             return
         try:
-            with open(PERSIST_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return
-            now = time.time()
-            cutoff = now - self._ttl
-            for k, v in data.items():
-                if isinstance(k, str) and isinstance(v, (int, float)) and float(v) >= cutoff:
-                    self._signals[k] = float(v)
-        except Exception:
-            pass
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            self._processed = {k: float(v) for k, v in (data.get("processed") or {}).items()}
+            self._cooldowns = {k: float(v) for k, v in (data.get("cooldowns") or {}).items()}
+            self._sl_times = {k: float(v) for k, v in (data.get("sl_times") or {}).items()}
+            self._cleanup_unlocked()
+        except Exception as exc:
+            print(f"[SignalDeduper] load failed: {exc}")
 
-    def _save(self):
+    def _save(self) -> None:
         try:
-            os.makedirs(os.path.dirname(PERSIST_PATH) or ".", exist_ok=True)
-            serialized = json.dumps(self._signals, ensure_ascii=False, default=str)
-            with open(PERSIST_PATH + ".tmp", "w", encoding="utf-8") as f:
-                f.write(serialized)
-            os.replace(PERSIST_PATH + ".tmp", PERSIST_PATH)
-        except Exception:
-            pass
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "processed": self._processed,
+                "cooldowns": self._cooldowns,
+                "sl_times": self._sl_times,
+                "updated_at": time.time(),
+            }
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, self._path)
+        except Exception as exc:
+            print(f"[SignalDeduper] save failed: {exc}")
 
-    # ── 核心方法 ────────────────────────────────────────────
-
-    def _make_key(self, symbol: str, direction: str, signal_id: str = "") -> str:
-        """生成唯一键，区分精确信号和品种冷却。"""
-        return f"{symbol}|{direction}|{signal_id}"
-
-    def _prune_expired(self):
+    def _cleanup_unlocked(self) -> None:
         now = time.time()
-        cutoff = now - self._ttl
-        expired = [k for k, v in self._signals.items() if v < cutoff]
-        for k in expired:
-            del self._signals[k]
+        cutoff = now - self.signal_ttl_sec
+        for k in [k for k, ts in self._processed.items() if ts < cutoff]:
+            self._processed.pop(k, None)
+        cool_cutoff = now - max(self.same_setup_cooldown_sec, self.symbol_cooldown_sec) * 3
+        for k in [k for k, ts in self._cooldowns.items() if ts < cool_cutoff]:
+            self._cooldowns.pop(k, None)
+        sl_cutoff = now - self.sl_cooldown_sec * 3
+        for k in [k for k, ts in self._sl_times.items() if ts < sl_cutoff]:
+            self._sl_times.pop(k, None)
 
-    def should_process(self, symbol: str, direction: str, signal_id: str = "") -> bool:
-        """
-        判断该信号是否应该处理。
-        返回 True 表示「未被处理过，可以处理」
-        """
+    def is_processed(self, signal_id: str) -> bool:
+        if not signal_id:
+            return False
         with self._lock:
-            self._load()
-            key = self._make_key(symbol, direction, signal_id)
-            return key not in self._signals
+            ts = self._processed.get(signal_id)
+            if ts is None:
+                return False
+            if time.time() - ts > self.signal_ttl_sec:
+                self._processed.pop(signal_id, None)
+                return False
+            return True
 
-    def mark_processed(self, symbol: str, direction: str, signal_id: str = "") -> None:
-        """标记信号为已处理。"""
+    def mark_processed(self, signal_id: str) -> None:
+        if not signal_id:
+            return
         with self._lock:
-            self._load()
-            key = self._make_key(symbol, direction, signal_id)
-            self._signals[key] = time.time()
-            self._prune_expired()
-        self._save()
+            self._processed[signal_id] = time.time()
+            self._cleanup_unlocked()
+            self._save()
 
-    def is_symbol_cooled(self, symbol: str, direction: str) -> bool:
-        """
-        判断品种+方向是否在冷却中。
-        冷却条件：3 分钟（180秒）内有同方向任意信号被处理过。
-        返回 True = 正在冷却，不应当开仓
-        """
+    def should_process(self, signal_id: str) -> bool:
+        """True=首次可处理并已标记；False=已处理过应跳过。"""
+        if not signal_id:
+            return True
         with self._lock:
-            self._load()
+            ts = self._processed.get(signal_id)
             now = time.time()
-            for k, ts in list(self._signals.items()):
-                # 匹配品种+方向，忽略具体 signal_id
-                prefix = self._make_key(symbol, direction, "")
-                if k.startswith(prefix) and (now - ts) < 180:
+            if ts is not None and now - ts <= self.signal_ttl_sec:
+                return False
+            self._processed[signal_id] = now
+            self._cleanup_unlocked()
+            self._save()
+            return True
+
+    @staticmethod
+    def _cooldown_key(symbol: str, direction: Optional[str] = None, reason: Optional[str] = None) -> str:
+        parts = [symbol or "?"]
+        if direction:
+            parts.append(str(direction))
+        if reason:
+            parts.append(str(reason))
+        return "_".join(parts)
+
+    def is_symbol_cooled(
+        self,
+        symbol: str,
+        direction: Optional[str] = None,
+        reason: Optional[str] = None,
+        cooldown_sec: Optional[int] = None,
+    ) -> bool:
+        """True = 仍在冷却中（应跳过）。"""
+        with self._lock:
+            now = time.time()
+            keys = []
+            if direction and reason:
+                keys.append(self._cooldown_key(symbol, direction, reason))
+            if direction:
+                keys.append(self._cooldown_key(symbol, direction))
+            keys.append(self._cooldown_key(symbol))
+            for key in keys:
+                ts = self._cooldowns.get(key)
+                if ts is None:
+                    continue
+                window = cooldown_sec
+                if window is None:
+                    window = (
+                        self.same_setup_cooldown_sec
+                        if key.count("_") >= 2
+                        else self.symbol_cooldown_sec
+                    )
+                if now - ts < window:
                     return True
             return False
 
-    def clear_symbol(self, symbol: str) -> int:
-        """清除指定品种的所有记录。返回清除数。"""
+    def mark_symbol_fired(
+        self,
+        symbol: str,
+        direction: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
         with self._lock:
-            self._load()
-            before = len(self._signals)
-            self._signals = OrderedDict(
-                (k, v) for k, v in self._signals.items() if not k.startswith(f"{symbol}|")
-            )
-            cleared = before - len(self._signals)
-        if cleared:
+            now = time.time()
+            self._cooldowns[self._cooldown_key(symbol)] = now
+            if direction:
+                self._cooldowns[self._cooldown_key(symbol, direction)] = now
+            if direction and reason:
+                self._cooldowns[self._cooldown_key(symbol, direction, reason)] = now
             self._save()
-        return cleared
 
-    def clear_all(self) -> int:
-        """清除所有记录。"""
+    def is_sl_cooled(self, symbol: str) -> bool:
         with self._lock:
-            self._load()
-            count = len(self._signals)
-            self._signals.clear()
-        if count:
+            ts = self._sl_times.get(symbol)
+            if ts is None:
+                return False
+            return time.time() - ts < self.sl_cooldown_sec
+
+    def mark_sl_hit(self, symbol: str) -> None:
+        with self._lock:
+            self._sl_times[symbol] = time.time()
             self._save()
-        return count
 
-    def get_stats(self) -> dict:
-        """返回当前去重器统计。"""
+    def stats(self) -> dict:
         with self._lock:
-            self._load()
-            self._prune_expired()
             return {
-                "total_records": len(self._signals),
-                "ttl_sec": self._ttl,
+                "processed_count": len(self._processed),
+                "cooldown_count": len(self._cooldowns),
+                "sl_count": len(self._sl_times),
+                "signal_ttl_sec": self.signal_ttl_sec,
+                "symbol_cooldown_sec": self.symbol_cooldown_sec,
+                "same_setup_cooldown_sec": self.same_setup_cooldown_sec,
+                "sl_cooldown_sec": self.sl_cooldown_sec,
             }
 
 
-# 单例
 signal_deduper = SignalDeduper()

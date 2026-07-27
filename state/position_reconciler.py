@@ -1,249 +1,295 @@
 # -*- coding: utf-8 -*-
+"""position_reconciler.py — 本地持仓 vs 交易所持仓对账
+能力:
+1. startup_recover()  — 启动时：磁盘恢复 + 可选交易所对账
+2. reconcile_once()   — 单次对账，返回差异报告
+3. periodic_check()   — 供后台线程调用的定期巡查
+dry_run / 无 API Key 时自动降级为「只读本地」。
 """
-P0-1: 持仓对账系统
-
-职责：
-  1. 启动时：将交易所持仓恢复至本地 PositionManager（防止重启丢仓）
-  2. 运行中：定期巡查本地与交易所持仓差异，告警幽灵仓/缺失仓
-  3. 不自动修正（只报告），由运维人员或外部 handler 处理
-
-依赖：
-  - pathlib, json, os, time, logging
-  - requests (直连 Bitget API，避免 ccxt 阻塞)
-"""
-
-import json
+from __future__ import annotations
 import os
 import time
 import traceback
-import logging
-from pathlib import Path
-from typing import Optional
-
-import requests as _rq
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable, Dict, List, Optional
 
 from state.position_manager import position_manager
 
-logger = logging.getLogger("PositionReconciler")
+
+def _is_live_ready() -> bool:
+    return bool(
+        os.getenv("BITGET_API_KEY")
+        or os.getenv("EXCHANGE_API_KEY")
+    ) and not (
+        os.getenv("SMC_MODE", "dry_run").lower() in {"dry_run", "probe", "paper"}
+        and os.getenv("FORCE_LIVE_RECONCILE", "").lower() not in {"1", "true", "yes"}
+    )
 
 
-BITGET_API_BASE = "https://api.bitget.com"
+@dataclass
+class ReconcileDiff:
+    symbol: str
+    kind: str  # local_only | exchange_only | direction_mismatch | size_mismatch | ok
+    local: Optional[dict] = None
+    exchange: Optional[dict] = None
+    detail: str = ""
+
+
+@dataclass
+class ReconcileReport:
+    ts: float = field(default_factory=time.time)
+    mode: str = "local_only"
+    local_count: int = 0
+    exchange_count: int = 0
+    diffs: List[ReconcileDiff] = field(default_factory=list)
+    recovered_symbols: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "mode": self.mode,
+            "local_count": self.local_count,
+            "exchange_count": self.exchange_count,
+            "recovered_symbols": self.recovered_symbols,
+            "errors": self.errors,
+            "diffs": [asdict(d) for d in self.diffs],
+            "has_issues": any(d.kind != "ok" for d in self.diffs),
+        }
+
+    def summary_text(self) -> str:
+        issues = [d for d in self.diffs if d.kind != "ok"]
+        if not issues:
+            return f"[Reconcile] OK mode={self.mode} local={self.local_count} exchange={self.exchange_count}"
+        lines = [
+            f"[Reconcile] ISSUES mode={self.mode} local={self.local_count} exchange={self.exchange_count}"
+        ]
+        for d in issues:
+            lines.append(f"  - {d.kind}: {d.symbol} {d.detail}")
+        for e in self.errors:
+            lines.append(f"  ! error: {e}")
+        return "\n".join(lines)
 
 
 class PositionReconciler:
-    """
-    持仓对账器。
+    def __init__(
+        self,
+        adapter_factory: Optional[Callable[[], Any]] = None,
+        notify: Optional[Callable[[str], Any]] = None,
+        size_tolerance: float = 1e-8,
+    ):
+        self._adapter_factory = adapter_factory
+        self._notify = notify
+        self.size_tolerance = size_tolerance
+        self._last_report: Optional[ReconcileReport] = None
+        self._last_run_ts: float = 0.0
 
-    用法:
-        reconciler = PositionReconciler()
-        reconciler.run_full_reconciliation()
-    """
-
-    def __init__(self):
-        self._api_key: Optional[str] = os.getenv("BITGET_API_KEY", "")
-        self._api_secret: Optional[str] = os.getenv("BITGET_SECRET", "")
-        self._api_passphrase: Optional[str] = os.getenv("BITGET_PASSPHRASE", "")
-
-        if not self._api_key or not self._api_secret:
-            logger.warning("BITGET_API_KEY 或 BITGET_SECRET 未设置，对账功能不可用")
-
-        # 本地 sym -> 统一格式: "BTC/USDT:USDT"
-        # 交易所 sym -> 原始格式: "BTCUSDT"
-
-    # ── 交易所持仓获取 ──────────────────────────────────────
-
-    def _sign_request(self, method: str, path: str, params: dict) -> dict:
-        """Bitget V2 签名（简化版，仅用于 GET 持仓）"""
-        from datetime import datetime
-
-        import hmac
-        import hashlib
-
-        timestamp = str(int(time.time() * 1000))
-        sign_payload = f"{timestamp}{method.upper()}{path}"
-        if params:
-            sorted_keys = sorted(params.keys())
-            query_string = "&".join(f"{k}={params[k]}" for k in sorted_keys)
-            sign_payload += f"?{query_string}"
-
-        signature = hmac.new(
-            self._api_secret.encode("utf-8"),
-            sign_payload.encode("utf-8"),
-            digestmod=hashlib.sha256,
-        ).hexdigest()
-
-        return {
-            "ACCESS-KEY": self._api_key,
-            "ACCESS-SIGN": signature,
-            "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-PASSPHRASE": self._api_passphrase,
-            "Content-Type": "application/json",
-        }
-
-    def fetch_exchange_positions(self, product_type: str = "umcbl") -> dict:
-        """
-        从 Bitget 拉取真实持仓。
-        返回: {"BTCUSDT": {"hold": 0.01, "direction": "long", "entry": 60000.0, "upnl": 0.0}, ...}
-        """
-        if not self._api_key:
-            return {}
-
-        path = "/api/v2/mix/account/positions"
-        params = {"productType": product_type}
-        url = f"{BITGET_API_BASE}{path}"
-
+    def _get_adapter(self):
+        if self._adapter_factory:
+            return self._adapter_factory()
         try:
-            headers = self._sign_request("GET", path, params)
-            resp = _rq.get(url, params=params, headers=headers, timeout=10)
-            if resp.status_code != 200:
-                logger.warning("交易所持仓查询 HTTP %s", resp.status_code)
-                return {}
-            data = resp.json()
-            if data.get("code") != "00000":
-                logger.warning("交易所持仓查询 API 错误: %s", data.get("msg"))
-                return {}
+            from execution.exchange_adapter import ExchangeAdapter
+            dry = not _is_live_ready()
+            return ExchangeAdapter(exchange_name="bitget", dry_run=dry)
+        except Exception as exc:
+            print(f"[Reconciler] adapter init failed: {exc}")
+            return None
 
-            positions = {}
-            for item in data.get("data", []):
-                hold = float(item.get("total", "0"))
-                if hold <= 0:
-                    continue
-                sym_exchange = item.get("symbol", "")
-                direction = "long" if item.get("holdSide", "") == "long" else "short"
-                entry = float(item.get("openPriceAvg", "0"))
-                upnl = float(item.get("unrealizedPL", "0"))
+    def _notify_msg(self, msg: str) -> None:
+        if not self._notify:
+            return
+        try:
+            self._notify(msg)
+        except Exception:
+            pass
 
-                # 统一格式: BTCUSDT -> BTC/USDT:USDT
-                sym_local = self._to_local_symbol(sym_exchange)
-                positions[sym_local] = {
-                    "hold": hold,
-                    "direction": direction,
-                    "entry": entry,
-                    "upnl": upnl,
-                }
-            return positions
-        except Exception as e:
-            logger.error("获取交易所持仓异常: %s", e)
-            traceback.print_exc()
-            return {}
+    def startup_recover(self, do_exchange: bool = True) -> ReconcileReport:
+        report = ReconcileReport()
+        try:
+            recovered = position_manager.recover_from_disk()
+            report.recovered_symbols = list(recovered or [])
+            report.local_count = len(position_manager)
+        except Exception as exc:
+            report.errors.append(f"disk recover: {exc}")
 
-    @staticmethod
-    def _to_local_symbol(sym_exchange: str) -> str:
-        """BTCUSDT -> BTC/USDT:USDT"""
-        # 常见模式：BTCUSDT, ETHUSDT, SOLUSDT
-        s = sym_exchange.strip().upper()
-        if s.endswith("USDT"):
-            base = s[:-4]
-            return f"{base}/USDT:USDT"
-        return sym_exchange  # fallback
-
-    # ── 对账核心 ────────────────────────────────────────────
-
-    def run_full_reconciliation(self) -> dict:
-        """
-        执行一次完整对账。
-        返回报告字典，包含:
-          - "ok": 无差异
-          - "ghost": 本地有、交易所无（幽灵仓）
-          - "missing": 交易所无、本地有（缺失仓）
-          - "mismatch": 方向/数量不匹配
-        """
-        report: dict = {"ok": [], "ghost": [], "missing": [], "mismatch": []}
-
-        exchange_positions = self.fetch_exchange_positions()
-        local_positions = position_manager.get()
-
-        if not exchange_positions and not local_positions:
-            report["ok"].append("无持仓，双方一致")
-            return report
-
-        if not exchange_positions and local_positions:
-            # 交易所无持仓 but 本地有（可能是刚启动未恢复，或断线后本地未清除）
-            for sym, pos in local_positions.items():
-                report["ghost"].append(f"{sym}: local_hold={pos.get('entry', '?')}")
-            return report
-
-        if exchange_positions and not local_positions:
-            for sym, pos in exchange_positions.items():
-                report["missing"].append(f"{sym}: exchange_hold={pos['hold']}")
-            return report
-
-        # 双方都有持仓，逐品种对比
-        all_symbols = set(local_positions.keys()) | set(exchange_positions.keys())
-        for sym in sorted(all_symbols):
-            local = local_positions.get(sym)
-            exchange = exchange_positions.get(sym)
-
-            if local and not exchange:
-                report["ghost"].append(f"{sym}: 本地存在但交易所无")
-                continue
-            if not local and exchange:
-                report["missing"].append(f"{sym}: 交易所存在但本地无 (hold={exchange['hold']})")
-                continue
-            if not local and not exchange:
-                continue
-
-            # 双方都有 -> 对比方向和大致数量
-            local_dir = local.get("direction", "?").lower()[:4]
-            exchange_dir = exchange.get("direction", "?").lower()[:4]
-            local_hold = float(local.get("entry", 0))
-            exchange_hold = float(exchange["hold"])
-
-            if local_dir != exchange_dir or abs(local_hold - exchange_hold) > 0.01:
-                report["mismatch"].append(
-                    f"{sym}: dir本地={local_dir} vs 交易所={exchange_dir}, "
-                    f"hold本地={local_hold:.4f} vs 交易所={exchange_hold:.4f}"
+        if do_exchange and _is_live_ready():
+            sub = self.reconcile_once(sync_local_from_exchange=False)
+            report.mode = sub.mode
+            report.exchange_count = sub.exchange_count
+            report.diffs.extend(sub.diffs)
+            report.errors.extend(sub.errors)
+        else:
+            report.mode = "local_only"
+            for sym, pos in (position_manager.get() or {}).items():
+                report.diffs.append(
+                    ReconcileDiff(symbol=sym, kind="ok", local=pos, detail="dry/local-only")
                 )
-            else:
-                report["ok"].append(f"{sym}: 一致")
 
+        self._last_report = report
+        self._last_run_ts = time.time()
+
+        if report.recovered_symbols:
+            self._notify_msg(
+                f"🔁 持仓恢复: {len(report.recovered_symbols)} 个 — {report.recovered_symbols}"
+            )
+        if any(d.kind != "ok" for d in report.diffs):
+            self._notify_msg(report.summary_text())
+        print(report.summary_text())
         return report
 
-    # ── 启动恢复 ────────────────────────────────────────────
+    def reconcile_once(
+        self,
+        symbols: Optional[List[str]] = None,
+        sync_local_from_exchange: bool = False,
+    ) -> ReconcileReport:
+        report = ReconcileReport()
+        local_map: Dict[str, dict] = position_manager.get() or {}
+        report.local_count = len(local_map)
 
-    def recover_from_exchange(self) -> list:
-        """
-        启动时：用交易所持仓覆盖本地 PositionManager。
-        仅在本地无持仓且交易所有时执行。
-        返回恢复的 sym 列表。
-        """
-        recovered = []
-        exchange_positions = self.fetch_exchange_positions()
-        if not exchange_positions:
-            return recovered
+        if not _is_live_ready():
+            report.mode = "local_only"
+            for sym, pos in local_map.items():
+                report.diffs.append(
+                    ReconcileDiff(symbol=sym, kind="ok", local=pos, detail="dry/local-only")
+                )
+            self._last_report = report
+            self._last_run_ts = time.time()
+            return report
 
-        for sym, pos in exchange_positions.items():
-            if not position_manager.exists(sym):
-                position_manager.update(sym, {
-                    "direction": "Long" if pos["direction"] == "long" else "Short",
-                    "entry": pos["entry"],
-                    "current_sl": pos["entry"] * 0.98 if pos["direction"] == "long" else pos["entry"] * 1.02,
-                    "tp1": None,
-                    "tp2": None,
-                    "stage": 0,
-                    "recovered": True,
-                    "upnl": pos.get("upnl", 0.0),
-                })
-                recovered.append(sym)
-                logger.info("从交易所恢复持仓: %s", sym)
-        return recovered
+        adapter = self._get_adapter()
+        if adapter is None or getattr(adapter, "dry_run", True):
+            report.mode = "local_only"
+            report.errors.append("adapter unavailable or dry_run")
+            self._last_report = report
+            self._last_run_ts = time.time()
+            return report
 
-    # ── 巡查（供后台线程调用） ──────────────────────────────
+        report.mode = "live"
+        try:
+            fetch_syms = symbols
+            if fetch_syms is None:
+                fetch_syms = list(local_map.keys()) or None
+            exchange_positions = adapter.fetch_positions(fetch_syms)
+        except Exception as exc:
+            report.errors.append(f"fetch_positions: {exc}")
+            traceback.print_exc()
+            self._last_report = report
+            self._last_run_ts = time.time()
+            return report
 
-    def periodic_check(self) -> Optional[str]:
-        """
-        快速巡查（每 5 分钟调用一次）。
-        仅在发现严重不一致时返回告警消息（供 Telegram 推送），否则返回 None。
-        """
-        report = self.run_full_reconciliation()
-        if report["ghost"] or report["missing"] or report["mismatch"]:
-            lines = ["🔍 持仓一致告警"]
-            for k in ("ghost", "missing", "mismatch"):
-                for detail in report[k]:
-                    lines.append(f"  [{k}] {detail}")
-            return "\n".join(lines)
-        return None
+        report.exchange_count = len(exchange_positions)
+        exch_map: Dict[str, dict] = {}
+        for ep in exchange_positions:
+            sym = ep.get("symbol") or ""
+            if not sym:
+                continue
+            exch_map[sym] = ep
+            raw = ep.get("symbol_raw") or ""
+            if raw and raw != sym:
+                exch_map.setdefault(raw, ep)
+
+        all_symbols = set(local_map.keys()) | {
+            ep.get("symbol") for ep in exchange_positions if ep.get("symbol")
+        }
+
+        for sym in sorted(s for s in all_symbols if s):
+            local = local_map.get(sym)
+            exch = exch_map.get(sym)
+
+            if local and not exch:
+                report.diffs.append(
+                    ReconcileDiff(
+                        symbol=sym, kind="local_only", local=local,
+                        detail="本地有仓、交易所无仓（可能已平或幽灵仓）",
+                    )
+                )
+                continue
+            if exch and not local:
+                report.diffs.append(
+                    ReconcileDiff(
+                        symbol=sym, kind="exchange_only", exchange=exch,
+                        detail="交易所有仓、本地无记录（可能漏记或外部开仓）",
+                    )
+                )
+                if sync_local_from_exchange:
+                    self._import_exchange_position(sym, exch)
+                continue
+
+            local_dir = (local or {}).get("direction")
+            exch_dir = (exch or {}).get("direction")
+            if local_dir and exch_dir and local_dir != exch_dir:
+                report.diffs.append(
+                    ReconcileDiff(
+                        symbol=sym, kind="direction_mismatch",
+                        local=local, exchange=exch,
+                        detail=f"方向不一致 local={local_dir} exchange={exch_dir}",
+                    )
+                )
+                continue
+
+            local_size = float((local or {}).get("size") or (local or {}).get("volume") or 0)
+            exch_size = float((exch or {}).get("size") or 0)
+            if local_size > 0 and exch_size > 0:
+                if abs(local_size - exch_size) > self.size_tolerance * max(local_size, exch_size, 1):
+                    report.diffs.append(
+                        ReconcileDiff(
+                            symbol=sym, kind="size_mismatch",
+                            local=local, exchange=exch,
+                            detail=f"数量不一致 local={local_size} exchange={exch_size}",
+                        )
+                    )
+                    continue
+
+            report.diffs.append(
+                ReconcileDiff(symbol=sym, kind="ok", local=local, exchange=exch, detail="一致")
+            )
+
+        self._last_report = report
+        self._last_run_ts = time.time()
+        return report
+
+    def _import_exchange_position(self, symbol: str, exch: dict) -> None:
+        if position_manager.exists(symbol):
+            return
+        pos = {
+            "direction": exch.get("direction", "Long"),
+            "entry": float(exch.get("entry") or 0),
+            "current_sl": 0.0,
+            "tp1": 0.0,
+            "tp2": 0.0,
+            "tp3": 0.0,
+            "stage": 0,
+            "size": float(exch.get("size") or 0),
+            "source": "exchange_reconcile",
+            "unrealized_pnl": float(exch.get("unrealized_pnl") or 0),
+        }
+        try:
+            position_manager.update(symbol, pos)
+            print(f"[Reconciler] imported exchange position: {symbol} {pos['direction']}")
+        except Exception as exc:
+            print(f"[Reconciler] import failed {symbol}: {exc}")
+
+    def periodic_check(self, min_interval_sec: float = 60.0) -> Optional[ReconcileReport]:
+        now = time.time()
+        if now - self._last_run_ts < min_interval_sec:
+            return None
+        report = self.reconcile_once(sync_local_from_exchange=False)
+        if any(d.kind != "ok" for d in report.diffs) or report.errors:
+            self._notify_msg(report.summary_text())
+            print(report.summary_text())
+        return report
+
+    @property
+    def last_report(self) -> Optional[ReconcileReport]:
+        return self._last_report
 
 
-# 单例
-position_reconciler = PositionReconciler()
+def _default_notify(msg: str) -> None:
+    try:
+        from notifier.telegram import send_telegram
+        send_telegram(msg)
+    except Exception:
+        print(msg)
+
+
+position_reconciler = PositionReconciler(notify=_default_notify)

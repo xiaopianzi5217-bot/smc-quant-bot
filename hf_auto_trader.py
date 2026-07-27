@@ -260,6 +260,9 @@ def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: 
     return round(max_forward, 4), round(max_adverse, 4), round(final_r, 4), exit_reason
 
 def _check_cooldown(symbol):
+    if signal_deduper.is_sl_cooled(symbol):
+        print(f"[{symbol}] cooling skip (deduper SL)")
+        return False
     last = _last_stop_loss_time.get(symbol, 0)
     if time.time() - last < STOP_LOSS_COOLDOWN:
         print(f"[{symbol}] cooling skip")
@@ -1215,7 +1218,7 @@ def _push_observer_event(
     lp, sp = long_score, short_score
     score_dir = "Long" if lp >= sp else "Short"
     msg = (
-        f"{icon} [{type_name}] {symbol}\n"
+        f"{icon} [{type_name}] {symbol}\nfrom state.signal_deduper import signal_deduper\nfrom state.position_reconciler import position_reconciler\nfrom utils.safe_extract import safe_get, safe_get_str, safe_get_float, safe_get_bool\n"
         f"方向: {dir_emoji.get(score_dir, dir_emoji['N/A'])} | {ev['desc']}\n"
         f"多头: {lp:.1f}分  空头: {sp:.1f}分 | 分差: {abs(lp-sp):.1f}分"
     )
@@ -1654,12 +1657,12 @@ def check_and_open(result: dict | None) -> bool:
         if _elapsed < _SIGNAL_COOLDOWN_SECS:
             print(f"[RiskGuard] 同类信号冷却 {_sig_cool_key} ({_elapsed:.0f}s < {_SIGNAL_COOLDOWN_SECS}s)")
             return False
-    _last_signal_time[_sig_cool_key] = time.time()
-
     sig_id = _signal_id(result)
     if _is_signal_processed(sig_id):
         print(f"[{symbol}] signal {sig_id} already processed")
         return False
+    signal_deduper.mark_symbol_fired(symbol, direction, _reason)
+    _last_signal_time[_sig_cool_key] = time.time()
         
     if position_manager.exists(symbol):
         print(f"[{symbol}] already has position")
@@ -2123,6 +2126,10 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     # 更新止损冷却
     global _last_stop_loss_time
     _last_stop_loss_time[symbol] = time.time()
+    try:
+        signal_deduper.mark_sl_hit(symbol)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -2140,7 +2147,12 @@ async def main_loop():
     global _RECOVERED_POSITIONS
     try:
         if not _RECOVERED_POSITIONS and ENABLE_RUNTIME_RECOVERY:
-            _recovered = position_manager.recover_from_disk()
+            try:
+                _report = position_reconciler.startup_recover(do_exchange=True)
+                _recovered = _report.recovered_symbols
+            except Exception as _rec2:
+                print(f"[main_loop] reconciler 恢复失败，回退磁盘恢复: {_rec2}")
+                _recovered = position_manager.recover_from_disk()
             if _recovered:
                 safe_send(f"🔁 重启持仓恢复: {len(_recovered)} 个持仓已还原", priority="SYSTEM")
                 print(f"[main_loop] 持仓恢复完成: {len(_recovered)} 个")
@@ -2262,6 +2274,13 @@ async def main_loop():
                             check_trailing(_sym, _pos, _price)
                         except Exception as _pos_e:
                             print(f"[main_loop] {_sym} 追踪止损异常: {_pos_e}")
+
+            # ---- 定期对账 ----
+            try:
+                position_reconciler.periodic_check(min_interval_sec=120.0)
+            except Exception as _rec_e:
+                if _loop_count % 30 == 0:
+                    print(f"[main_loop] reconciler 巡查异常: {_rec_e}")
 
             # ---- 3. 日终面板推送 ----
             _now_dt = __import__("datetime").datetime.now()

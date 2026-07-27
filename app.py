@@ -58,6 +58,8 @@ from notifier.manager import dispatch_observer_snapshot, dispatch_strategy_decis
 from decision.v9_decision_kernel import V9DecisionKernel
 from decision.v37_gate import v37_final_gate
 from state.position_manager import position_manager
+from state.position_reconciler import position_reconciler
+from utils.safe_extract import safe_get, safe_get_str, safe_get_float
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
@@ -520,6 +522,12 @@ def background_monitor_worker():
         time.sleep(5)  # 【修复1】将 60 秒改为 5 秒，确保不会错过插针行情
         loop_count += 1
         try:
+                        # 0. 定期持仓对账（每 24 次 ≈ 120s）
+            if loop_count % 24 == 0:
+                try:
+                    position_reconciler.periodic_check(min_interval_sec=100.0)
+                except Exception as _re:
+                    print(f"[Monitor] reconciler 异常: {_re}")
             # 1. 灾难自愈检测 (没必要每5秒查一次，每12次即60秒查一次即可)
             if loop_count % 12 == 0:
                 if not health_monitor.is_healthy():
@@ -547,7 +555,7 @@ def background_monitor_worker():
                     current_sl=pos['current_sl'],
                     tp1=pos['tp1'],
                     tp2=pos['tp2'],
-                    stage=pos.get('stage', 0)
+                    stage=safe_get(pos, 'stage', default=0)
                 )
                 
                 if action_plan['action'] == 'PARTIAL_CLOSE':
