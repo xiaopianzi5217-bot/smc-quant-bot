@@ -63,6 +63,8 @@ from strategy.statistical_ev import StatisticalEV, get_statistical_ev
 # ---------- 状态与特征存储 ----------
 from state.position_manager import position_manager
 from feature_store import feature_store
+from state.signal_deduper import signal_deduper
+from state.position_reconciler import position_reconciler
 
 # ---------- 【新增20260723】工具类导入 ----------
 from utils.adaptive_features import AdaptiveFeatureWeighter
@@ -1218,7 +1220,7 @@ def _push_observer_event(
     lp, sp = long_score, short_score
     score_dir = "Long" if lp >= sp else "Short"
     msg = (
-        f"{icon} [{type_name}] {symbol}\nfrom state.signal_deduper import signal_deduper\nfrom state.position_reconciler import position_reconciler\nfrom utils.safe_extract import safe_get, safe_get_str, safe_get_float, safe_get_bool\n"
+        f"{icon} [{type_name}] {symbol}\n"
         f"方向: {dir_emoji.get(score_dir, dir_emoji['N/A'])} | {ev['desc']}\n"
         f"多头: {lp:.1f}分  空头: {sp:.1f}分 | 分差: {abs(lp-sp):.1f}分"
     )
@@ -1661,7 +1663,7 @@ def check_and_open(result: dict | None) -> bool:
     if _is_signal_processed(sig_id):
         print(f"[{symbol}] signal {sig_id} already processed")
         return False
-    signal_deduper.mark_symbol_fired(symbol, direction, _reason)
+    signal_deduper.mark_symbol_fired(symbol, direction, result.get("reason", ""))
     _last_signal_time[_sig_cool_key] = time.time()
         
     if position_manager.exists(symbol):
