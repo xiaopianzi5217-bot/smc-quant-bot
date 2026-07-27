@@ -61,6 +61,20 @@ class PositionManager:
             print(f"[PositionManager] 持久化写入失败: {exc}")
             traceback.print_exc()
 
+    # ── 新增：启动时恢复持仓 ──────────────────────────────
+
+    def recover_from_disk(self) -> list:
+        """
+        从持久化文件恢复未结算持仓。
+        返回已恢复的持仓 symbol 列表（可用于日志/通知计数）。
+        """
+        self._load()
+        with self._lock:
+            symbols = list(self._positions.keys())
+            if symbols:
+                print(f"[PositionManager] 从磁盘恢复持仓: {symbols}")
+            return symbols
+
     def _save_at_exit(self):
         """程序退出时强制保存"""
         if self._dirty:
