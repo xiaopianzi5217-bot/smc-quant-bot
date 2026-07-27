@@ -65,6 +65,7 @@ from state.position_manager import position_manager
 from feature_store import feature_store
 from state.signal_deduper import signal_deduper
 from state.position_reconciler import position_reconciler
+from utils.safe_extract import safe_get, safe_get_str, safe_get_float, safe_get_bool
 
 # ---------- 【新增20260723】工具类导入 ----------
 from utils.adaptive_features import AdaptiveFeatureWeighter
@@ -1304,23 +1305,29 @@ def _candidate_signal_id(signal_row) -> str:
 
 
 def _is_signal_already_processed(signal_id: str) -> bool:
-    """Check whether a signal fingerprint has already been seen without marking it."""
+    """只查询是否已处理，不标记。优先 signal_deduper，兼容 position_manager。"""
+    if not signal_id:
+        return False
+    if signal_deduper.is_processed(signal_id):
+        return True
     return position_manager.is_signal_already_processed(signal_id)
 
 
 def _is_signal_processed(signal_id: str) -> bool:
-    """信号去重：检查是否已处理过。
-
-    修复时机：同一 signal_id 只允许触发一次，避免历史 K 线“诈尸”复活。
-    通过 signal_id 永久阻止同一根 K 线上的同一个 Setup 再次开单。
     """
-    if position_manager.is_signal_already_processed(signal_id):
+    信号去重：True = 已处理过应跳过；False = 首次见到（已标记）可继续。
+    优先 signal_deduper.should_process，并双写 position_manager 保持兼容。
+    """
+    if not signal_id:
+        return False
+    # should_process: True=首次可处理并已标记；False=已见过
+    if not signal_deduper.should_process(signal_id):
         return True
-
-    position_manager.mark_signal_processed(signal_id)
+    try:
+        position_manager.mark_signal_processed(signal_id)
+    except Exception:
+        pass
     return False
-
-
 def async_background_task(coro_or_func, *args, **kwargs):
     """Unified background task dispatcher. Compatible with coroutines & sync functions."""
     # ── case 1: coroutine object ──
@@ -1637,7 +1644,7 @@ def check_and_open(result: dict | None) -> bool:
     # ===== 【修复20260726】动态 Gap 阈值 =====
     # 在震荡市（ADX<25或CHOP/RANGE）降低 gap 要求
     _regime_for_gap = str(result.get("regime", "UNKNOWN")).upper().strip()
-    _adx_for_gap = float(result.get("adx", 0) or result.get("exec_ctx", {}).get("adx", 0))
+    _adx_for_gap = safe_get_float(result, "adx", default=0.0) or safe_get_float(result, "exec_ctx", "adx", default=0.0)
     _is_chop = _regime_for_gap in ("CHOP", "RANGE") or _adx_for_gap < 25
     _dynamic_gap = MIN_SCORE_GAP * (0.66 if _is_chop else 0.80)  # ⚠️ 降级: V56.5信号自证实方向，gap仅做噪音过滤
     print(f"[{symbol}] GapCheck: regime={_regime_for_gap} adx={_adx_for_gap:.1f} "
@@ -1652,18 +1659,27 @@ def check_and_open(result: dict | None) -> bool:
         print(f"[{symbol}] Gap 不满足, skip. ")
         return False
 
-    _sig_cool_key = f"{symbol}_{direction}_{result.get('reason','?')}"
+    _reason = safe_get_str(result, "reason", default="?")
+    # 统一冷却：开仓前先查 deduper
+    if signal_deduper.is_symbol_cooled(symbol, direction, _reason):
+        print(f"[RiskGuard] 同类信号冷却 {symbol}_{direction}_{_reason} (deduper)")
+        return False
+    # 兼容旧内存冷却字典
+    _sig_cool_key = f"{symbol}_{direction}_{_reason}"
     _SIGNAL_COOLDOWN_SECS = 5 * 75  # 5根15m K线
     if _sig_cool_key in _last_signal_time:
         _elapsed = time.time() - _last_signal_time[_sig_cool_key]
         if _elapsed < _SIGNAL_COOLDOWN_SECS:
             print(f"[RiskGuard] 同类信号冷却 {_sig_cool_key} ({_elapsed:.0f}s < {_SIGNAL_COOLDOWN_SECS}s)")
             return False
+
     sig_id = _signal_id(result)
     if _is_signal_processed(sig_id):
         print(f"[{symbol}] signal {sig_id} already processed")
         return False
-    signal_deduper.mark_symbol_fired(symbol, direction, result.get("reason", ""))
+
+    # 通过去重后立刻记冷却，防止并发双开
+    signal_deduper.mark_symbol_fired(symbol, direction, _reason)
     _last_signal_time[_sig_cool_key] = time.time()
         
     if position_manager.exists(symbol):
@@ -1672,10 +1688,10 @@ def check_and_open(result: dict | None) -> bool:
     
     # ===== 【修复20260704】趋势位置检查：防止开在趋势末尾 =====
     # Short 开单检查：如果价格已经从 swing_high 下跌超过一定幅度，不开
-    exec_ctx = result.get("exec_ctx", {}) or {}
-    swing_high = exec_ctx.get("swing_high", 0) or 0
-    swing_low = exec_ctx.get("swing_low", 0) or 0
-    atr_val = result.get("atr", 0) or 1
+    exec_ctx = safe_get(result, "exec_ctx", default={}) or {}
+    swing_high = safe_get_float(exec_ctx, "swing_high", default=0.0)
+    swing_low = safe_get_float(exec_ctx, "swing_low", default=0.0)
+    atr_val = safe_get_float(result, "atr", default=1.0) or 1.0
     entry_price = entry
     
     if direction == "Short" and swing_high > 0 and swing_high > entry_price:
@@ -1944,7 +1960,7 @@ def check_and_open(result: dict | None) -> bool:
     
     # 2. FeatureStore（信号特征分析）
     try:
-        _adx_val = result.get("adx", 0) if result.get("adx") else (result.get("exec_ctx", {}) or {}).get("adx", 0)
+        _adx_val = safe_get_float(result, "adx", default=0.0) or safe_get_float(result, "exec_ctx", "adx", default=0.0)
         regime2 = "Trend" if _adx_val > 25 else ("Compression" if "squeeze" in str(result.get("squeeze", "")).lower() else "Range")
         
         # 获取 score_raw 用于记录分析
