@@ -654,18 +654,12 @@ def _start_hf_auto_trader():
         import asyncio
         from execution.micro.feeder import MicroFeeder
 
-        _feeder = None
-        try:
-            _feeder = MicroFeeder("BTCUSDT")
-            print("[Feeder] MicroFeeder 已创建")
-        except Exception as feeder_err:
-            print(f"[Feeder] MicroFeeder 创建失败: {feeder_err}")
-
-                async def _run_async_main():
+        async def _run_async_main():
+            _feeder = None
             try:
                 if _feeder is not None:
                     print("[Feeder] gather 启动 feeder + main_loop")
-                    # ✅ 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
+                    # 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
                     results = await asyncio.gather(
                         _feeder.run(),
                         hf_auto_trader.main_loop(),
