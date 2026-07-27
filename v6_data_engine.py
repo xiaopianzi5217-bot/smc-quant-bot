@@ -122,6 +122,15 @@ def push_database_to_hub():
     except Exception as e:
         print(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 
+# ── 统一特征分类映射器 ──
+from state.feature_mapper import (
+    FEATURE_GROUP_MAP,
+    classify_feature_group,
+    classify_all_features,
+    GROUP_MAP_V6_BRIDGE,
+)
+
+
 # ============================================================
 # PART 1: SQLite 高维交易快照持久化
 # ============================================================
@@ -220,6 +229,7 @@ def init_v6_database():
             sqz_strength REAL DEFAULT 0.0,
             sqz_vol_ratio REAL DEFAULT 1.0,
             sqz_volume_confirmed INTEGER DEFAULT 0,
+            mode TEXT DEFAULT 'NORMAL',
             exit_reason TEXT DEFAULT 'OPEN',
             pnl_r REAL DEFAULT NULL,
             max_forward_r REAL DEFAULT 0.0,
@@ -231,6 +241,7 @@ def init_v6_database():
     _ensure_column(cursor, "trade_snapshots", "sqz_strength", "REAL DEFAULT 0.0")
     _ensure_column(cursor, "trade_snapshots", "sqz_vol_ratio", "REAL DEFAULT 1.0")
     _ensure_column(cursor, "trade_snapshots", "sqz_volume_confirmed", "INTEGER DEFAULT 0")
+    _ensure_column(cursor, "trade_snapshots", "mode", "TEXT DEFAULT 'NORMAL'")
     conn.commit()
     conn.close()
     expand_v6_table_for_smc()
@@ -262,14 +273,20 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
             return float(default)
 
         sqz_data = result.get("sqz_data", {}) or {}
+                # mode 字段：PROBE / NORMAL；调用方可通过 result["mode"] 指定，缺省 NORMAL
+        _mode = str(result.get("mode", "NORMAL")).upper()
+        if _mode not in ("NORMAL", "PROBE"):
+            _mode = "NORMAL"
+
         cursor.execute("""
             INSERT OR REPLACE INTO trade_snapshots (
                 signal_id, timestamp, symbol, direction,
                 regime, vol_state, adx_14, atr_14, rsi_50, feature_hash, raw_features_json,
                 p_win_raw, p_win_calibrated, model_ev, blended_ev, confidence,
                 entry_price, initial_sl, initial_tp1, estimated_rr, kelly_size,
-                sqz_released, sqz_duration, sqz_strength, sqz_vol_ratio, sqz_volume_confirmed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sqz_released, sqz_duration, sqz_strength, sqz_vol_ratio, sqz_volume_confirmed,
+                mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             signal_id, int(time.time()), result["symbol"], result["direction"],
             str(result.get("regime", "UNKNOWN")).upper(), str(result.get("vol_state", "NORMAL")).upper(),
@@ -283,6 +300,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
             float(sqz_data.get("strength", 0.0)),
             float(sqz_data.get("vol_ratio", 1.0)),
             1.0 if bool(sqz_data.get("volume_confirmed", False)) else 0.0,
+            _mode,
         ))
         conn.commit()
         conn.close()
@@ -315,10 +333,27 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
         print(f"[V6 DataEngine] 拼接平仓标签失败: {e}")
 
 class DynamicFeatureOptimizer:
+    """
+    基于历史交易结果动态重算特征分组权重。
+
+    使用统一的 feature_mapper 将 raw_feature 归入 Feature Group，
+    避免数据标签污染。
+    """
+
     def __init__(self, min_samples: int = 50, window_size: int = 1000):
         self.min_samples = min_samples
         self.window_size = window_size
-        self.feature_weights = {"OB": 20.0, "SQZMOM": 15.0, "CHOCH": 25.0, "FVG": 10.0, "DIVERGENCE": 12.0}
+        # 初始权重（按 Feature Group 维度）
+        self.feature_weights = {
+            "MOMENTUM": 15.0,
+            "STRUCTURE": 25.0,
+            "LIQUIDITY": 20.0,
+            "VOLATILITY": 10.0,
+            "TREND": 10.0,
+            "VOLUME": 5.0,
+            "VWAP": 5.0,
+            "DIVERGENCE": 10.0,
+        }
 
     def update_feature_importance_from_db(self):
         if not _get_db_path().exists():
@@ -328,43 +363,58 @@ class DynamicFeatureOptimizer:
             query = "SELECT raw_features_json, pnl_r FROM trade_snapshots WHERE pnl_r IS NOT NULL ORDER BY timestamp DESC LIMIT ?"
             df = pd.read_sql_query(query, conn, params=(self.window_size,))
             conn.close()
-            
+
             if len(df) < self.min_samples:
                 return self.feature_weights
+
+            # ── 使用 Feature Mapper 统一归因 ──
 
             parsed_rows = []
             for _, row in df.iterrows():
                 try:
                     feat_dict = json.loads(row["raw_features_json"])
-                    parsed_rows.append({
-                        "OB": 1.0 if (feat_dict.get("bullish_ob") or feat_dict.get("bearish_ob")) else 0.0,
-                        "SQZMOM": 1.0 if feat_dict.get("squeeze_release") else 0.0,
-                        "CHOCH": 1.0 if feat_dict.get("structure_break") else 0.0,
-                        "FVG": 1.0 if (feat_dict.get("bullish_fvg") or feat_dict.get("bearish_fvg")) else 0.0,
-                        "DIVERGENCE": 1.0 if feat_dict.get("momentum") else 0.0,
-                        "pnl_r": float(row["pnl_r"])
-                    })
-                except: continue
-            
+                    grouped = classify_all_features(feat_dict)
+                    # 构造特征组激活向量（该笔交易中哪些 Feature Group 出现）
+                    row_features = {g: 0.0 for g in self.feature_weights}
+                    for g in grouped:
+                        v6_group = GROUP_MAP_V6_BRIDGE.get(g, g)
+                        if v6_group in row_features:
+                            row_features[v6_group] = 1.0
+                    row_features["pnl_r"] = float(row["pnl_r"])
+                    parsed_rows.append(row_features)
+                except Exception:
+                    continue
+
             analysis_df = pd.DataFrame(parsed_rows)
-            if analysis_df.empty: return self.feature_weights
+            if analysis_df.empty:
+                return self.feature_weights
 
             new_weights = {}
             total_contribution = 0.0
-            for feat in ["OB", "SQZMOM", "CHOCH", "FVG", "DIVERGENCE"]:
+            for feat in self.feature_weights:
                 sub_df = analysis_df[analysis_df[feat] == 1.0]
-                contribution = max(0.01, sub_df["pnl_r"].mean() + 1.0) if len(sub_df) >= 5 else 1.0
+                contribution = (
+                    max(0.01, sub_df["pnl_r"].mean() + 1.0)
+                    if len(sub_df) >= 5
+                    else 1.0
+                )
                 new_weights[feat] = contribution
                 total_contribution += contribution
 
             if total_contribution > 0:
                 for k in new_weights:
-                    self.feature_weights[k] = round((new_weights[k] / total_contribution) * 100, 2)
-            
-            print(f"[V6 FeatureOptimizer] 🔄 特征权重动态重算成功: {self.feature_weights}")
+                    self.feature_weights[k] = round(
+                        (new_weights[k] / total_contribution) * 100, 2
+                    )
+
+            print(
+                f"[V6 FeatureOptimizer] 🔄 特征权重动态重算成功"
+                f" (feature_mapper 驱动): {self.feature_weights}"
+            )
             return self.feature_weights
         except Exception as e:
             print(f"自动更新特征权重异常: {e}")
             return self.feature_weights
+
 
 get_v6_optimizer = DynamicFeatureOptimizer()
