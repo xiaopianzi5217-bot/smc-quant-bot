@@ -638,7 +638,7 @@ def _start_hf_auto_trader():
     """
     import sys, traceback as _tb
 
-        # 清理 ccxt 旧模块（防止热加载冲突）
+    # 清理 ccxt 旧模块（防止热加载冲突）
     for mod_name in list(sys.modules.keys()):
         if "ccxt" in mod_name:
             del sys.modules[mod_name]
