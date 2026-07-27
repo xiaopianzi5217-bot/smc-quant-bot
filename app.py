@@ -661,14 +661,22 @@ def _start_hf_auto_trader():
         except Exception as feeder_err:
             print(f"[Feeder] MicroFeeder 创建失败: {feeder_err}")
 
-        async def _run_async_main():
+                async def _run_async_main():
             try:
                 if _feeder is not None:
                     print("[Feeder] gather 启动 feeder + main_loop")
-                    await asyncio.gather(
+                    # ✅ 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
+                    results = await asyncio.gather(
                         _feeder.run(),
                         hf_auto_trader.main_loop(),
+                        return_exceptions=True,
                     )
+                    # 检查结果中的异常
+                    for i, res in enumerate(results):
+                        if isinstance(res, Exception):
+                            name = "_feeder.run()" if i == 0 else "hf_auto_trader.main_loop()"
+                            print(f"[Feeder] {name} 异常: {res}")
+                            _tb.print_exc()
                 else:
                     await hf_auto_trader.main_loop()
             except Exception as e:
