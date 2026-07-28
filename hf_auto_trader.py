@@ -477,12 +477,20 @@ async def scan_and_decide(symbol: str) -> dict | None:
             extra={"len_exec": len(df_exec) if df_exec is not None else 0},
         )
         return None
-        
+
+    # 诊断：确认真实行情是否在更新（避免静默卡在固定历史数据）
+    try:
+        _last_ts = df_exec["datetime"].iloc[-1] if "datetime" in df_exec.columns else df_exec.index[-1]
+        print(f"[{symbol}] 最新K线时间: {_last_ts} | bars={len(df_exec)}")
+    except Exception:
+        print(f"[{symbol}] 最新K线时间: (无法解析) | bars={len(df_exec)}")
+
     df_macro = macro_result
     if df_macro is None or len(df_macro) < 50:
+        print(f"[{symbol}] ⚠️ macro 数据不足，临时使用 sample OHLCV（仅兜底，不应用于正式评估）")
         df_macro = make_sample_ohlcv(start=102.0)
-        
-                # ===== V56.5 唯一决策管线（使用预加载回测 bucket_ev 的 Engine）=====
+
+    # ===== V56.5 唯一决策管线（使用预加载回测 bucket_ev 的 Engine）=====
     # 全局 _V56_ENGINE 已预加载回测 bucket_ev（365天BTC 15m数据训练）
     # 每次扫描生成候选 → enrich（含 bucket_ev 匹配）→ 选择 → 执行
 
@@ -495,8 +503,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
             extra={"len_v56": len(df_v56) if df_v56 is not None else 0},
         )
         return None
-    
-        # Step 1: generate_candidates — 调用 load_ohlcv + add_v56_indicators + generate_v56_candidates + enrich（含bucket_ev）
+
+    # Step 1: generate_candidates
     candidates = _V56_ENGINE.generate_candidates(df_v56)
     from analytics.daily_report import daily_report
     daily_report.record_candidate()
@@ -510,22 +518,38 @@ async def scan_and_decide(symbol: str) -> dict | None:
 
     if "idx" in candidates.columns:
         last_idx = int(df_v56.index.max())
-        LOOKBACK_CANDLES = 5
+        # 原 LOOKBACK=5（仅75分钟）过紧，SMC 结构常需多根确认。
+        # 改为 16 根（15m × 16 ≈ 4 小时）；排重逻辑仍会防止重复开仓。
+        LOOKBACK_CANDLES = 16
         recent_threshold = max(0, last_idx - LOOKBACK_CANDLES)
+        _full_count = len(candidates)
+        _idx_min = int(candidates["idx"].min()) if _full_count else -1
+        _idx_max = int(candidates["idx"].max()) if _full_count else -1
+        print(
+            f"[{symbol}] 全量候选: {_full_count} | idx范围: {_idx_min}~{_idx_max} | "
+            f"last_idx={last_idx} | 窗口阈值: idx>={recent_threshold} (lookback={LOOKBACK_CANDLES})"
+        )
         candidates = candidates[candidates["idx"] >= recent_threshold].copy()
-        print(f"[{symbol}] 🔍 正在扫描候选信号... 限制窗口拓宽至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
+        print(f"[{symbol}] 🔍 正在扫描候选信号... 限制窗口至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
         if candidates.empty:
-            print(f"[{symbol}] 仅历史信号存在，跳过本轮扫描")
+            print(
+                f"[{symbol}] 仅历史信号存在，跳过本轮扫描 "
+                f"(全量={_full_count}, 最近窗口=0, lookback={LOOKBACK_CANDLES})"
+            )
             get_reject_audit().log(
                 symbol, "HISTORY_ONLY",
                 score=0.0, ev=0.0, regime="unknown",
-                extra={"lookback": LOOKBACK_CANDLES},
+                extra={
+                    "lookback": LOOKBACK_CANDLES,
+                    "full_count": _full_count,
+                    "idx_min": _idx_min,
+                    "idx_max": _idx_max,
+                    "last_idx": last_idx,
+                },
             )
             return None
 
-                # 🔒 信号排重：防止同一个 signal 在拓宽窗口内的第3/第4根K线重复开仓
-        # 【修复20260823】用 _is_signal_processed（检查+标记）替代 is_signal_already_processed（仅检查）
-        # 这样第一次通过候选层的信号就被标记为已处理，后续扫描不再进入 check_and_open
+        # 🔒 信号排重
         seen_signal_ids = set()
         deduped_rows = []
         for _, signal in candidates.iterrows():
@@ -546,6 +570,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
             return None
 
     print(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
+
     # 检查是否有 bucket_ev 列
     if "bucket_ev" in candidates.columns:
         _has_bucket = (candidates["bucket_ev"] != candidates["model_ev"]).sum()
