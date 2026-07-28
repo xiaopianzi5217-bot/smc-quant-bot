@@ -473,9 +473,9 @@ def evaluate_symbol(symbol, cfg):
     else:
         slog.info("[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
 
-    slog.info("[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | ")
-          f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
-          f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
+        slog.info("[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
+              f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
+              f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
 
     try:
         from state.signal_diary import diary as _sd
