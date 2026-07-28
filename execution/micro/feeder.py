@@ -23,6 +23,7 @@ import asyncio
 import json
 import time
 from typing import Any, Dict
+from utils.structured_logger import slog
 
 try:
     import websockets
@@ -75,7 +76,7 @@ class MicroFeeder:
             raise ImportError("websockets is required. Run: pip install websockets>=11.0.3")
 
     async def run(self):
-        print(f"[MicroFeeder] 启动: {self.symbol}")
+        slog.info("[MicroFeeder] 启动: {self.symbol}")
         while self._retry_count < RECONNECT_MAX_ATTEMPTS:
             try:
                 async with websockets.connect(
@@ -85,7 +86,7 @@ class MicroFeeder:
                     close_timeout=3,
                     max_size=2**20,   # 1 MB 消息上限
                 ) as ws:
-                    print(f"[MicroFeeder] Bitget WS 已连接: {self.symbol}")
+                    slog.info("[MicroFeeder] Bitget WS 已连接: {self.symbol}")
                     self._retry_count = 0
                     self.state["is_stale"] = True
                     self.state["error_code"] = ""
@@ -99,7 +100,7 @@ class MicroFeeder:
                         ],
                     }
                     await ws.send(json.dumps(subscribe_msg))
-                    print("[MicroFeeder] 已发送订阅: books + trade")
+                    slog.info("[MicroFeeder] 已发送订阅: books + trade")
 
                     # ---- 启动独立心跳监控 ----
                     if self._heartbeat_task is None or self._heartbeat_task.done():
@@ -128,7 +129,7 @@ class MicroFeeder:
                             pass
 
             except asyncio.CancelledError:
-                print("[MicroFeeder] 协程已取消")
+                slog.info("[MicroFeeder] 协程已取消")
                 self._cancel_heartbeat()
                 return
 
@@ -137,7 +138,7 @@ class MicroFeeder:
                 wait = self._backoff_wait()
                 # 【新增】连续断连惩罚
                 wait = self._apply_consecutive_penalty(wait)
-                print(f"[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), "
+                slog.info("[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), ")
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"CLOSE_{e.code}"
                 self._mark_stale()
@@ -147,7 +148,7 @@ class MicroFeeder:
                 self._retry_count += 1
                 wait = self._backoff_wait()
                 wait = self._apply_consecutive_penalty(wait)
-                print(f"[MicroFeeder] 网络异常 ({type(e).__name__}), "
+                slog.error("[MicroFeeder] 网络异常 ({type(e).__name__}), ")
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"NET_{type(e).__name__}"
                 self._mark_stale()
@@ -155,7 +156,7 @@ class MicroFeeder:
 
             except websockets.exceptions.InvalidStatus as e:
                 # Bitget 返回 HTTP 错误 —— 致命，不重试
-                print(f"[MicroFeeder] 致命 HTTP 错误: {e.response.status_code}")
+                slog.error("[MicroFeeder] 致命 HTTP 错误: {e.response.status_code}")
                 self.state["error_code"] = f"HTTP_{e.response.status_code}"
                 await self._alert_fatal(f"Bitget WS 返回 HTTP {e.response.status_code}")
                 return
@@ -165,14 +166,14 @@ class MicroFeeder:
                 wait = self._backoff_wait()
                 wait = self._apply_consecutive_penalty(wait)
                 err_name = type(e).__name__
-                print(f"[MicroFeeder] 未知异常 ({err_name}): {e}, "
+                slog.error("[MicroFeeder] 未知异常 ({err_name}): {e}, ")
                       f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"UNKNOWN_{err_name}"
                 self._mark_stale()
                 await asyncio.sleep(wait)
 
         # 超过最大重连次数
-        print(f"[MicroFeeder] 已达到最大重连次数 ({RECONNECT_MAX_ATTEMPTS})，放弃")
+        slog.info("[MicroFeeder] 已达到最大重连次数 ({RECONNECT_MAX_ATTEMPTS})，放弃")
         self.state["error_code"] = "MAX_RETRY_EXCEEDED"
         self._cancel_heartbeat()
 
@@ -192,7 +193,7 @@ class MicroFeeder:
                 now = time.time()
                 # 如果超过 HEARTBEAT_TIMEOUT 没有收到任何数据
                 if now - self.state["ts"] > HEARTBEAT_TIMEOUT and self.state["ts"] > 0:
-                    print(f"[MicroFeeder] 数据静默超时 ({now - self.state['ts']:.0f}s > {HEARTBEAT_TIMEOUT}s)")
+                    slog.info("[MicroFeeder] 数据静默超时 ({now - self.state['ts']:.0f}s > {HEARTBEAT_TIMEOUT}s)")
                     self.state["error_code"] = "DATA_SILENT_TIMEOUT"
         except asyncio.CancelledError:
             pass
@@ -238,7 +239,7 @@ class MicroFeeder:
         ]
         if len(self._consecutive_disconnect_log) >= CONSECUTIVE_THRESHOLD:
             extra = CONSECUTIVE_PENALTY
-            print(f"[MicroFeeder] 连续断连 {len(self._consecutive_disconnect_log)}次/{(CONSECUTIVE_WINDOW/60):.0f}分钟，额外等待{extra:.0f}s")
+            slog.info("[MicroFeeder] 连续断连 {len(self._consecutive_disconnect_log)}次/{(CONSECUTIVE_WINDOW/60):.0f}分钟，额外等待{extra:.0f}s")
             return base_wait + extra
         return base_wait
 
@@ -253,7 +254,7 @@ class MicroFeeder:
 
     async def _alert_fatal(self, msg: str):
         """致命错误时发 Telegram 告警并终止"""
-        print(f"[MicroFeeder] 致命错误: {msg}")
+        slog.error("[MicroFeeder] 致命错误: {msg}")
         self.state["is_stale"] = True
         self.state["error_code"] = "FATAL"
         try:
@@ -295,11 +296,11 @@ class MicroFeeder:
             event = data.get("event", "")
             if event == "subscribe":
                 channel = data.get("arg", {}).get("channel", "")
-                print(f"[MicroFeeder] 订阅成功: {channel}")
+                slog.info("[MicroFeeder] 订阅成功: {channel}")
             elif event == "error":
                 code = data.get("code", "")
                 msg_text = data.get("msg", "")
-                print(f"[MicroFeeder] 订阅错误: code={code} msg={msg_text}")
+                slog.error("[MicroFeeder] 订阅错误: code={code} msg={msg_text}")
                 self.state["error_code"] = f"SUB_{code}"
                 # code=40001（签名错误）或 code=429（限流）—— 致命
                 if code in ("40001", "429"):
@@ -318,7 +319,7 @@ class MicroFeeder:
         # ---- 收到数据说明连接正常，解除脏标记 ----
         if self.state["is_stale"]:
             self.state["is_stale"] = False
-            print(f"[MicroFeeder] 数据流恢复")
+            slog.info("[MicroFeeder] 数据流恢复")
 
         if channel == BOOKS_TOPIC:
             self._handle_depth(raw_data)
@@ -342,7 +343,7 @@ class MicroFeeder:
 
             if not self._has_initial_depth:
                 self._has_initial_depth = True
-                print(f"[MicroFeeder] 深度初始快照已接收: OBI={self.state['obi']:.4f}")
+                slog.info("[MicroFeeder] 深度初始快照已接收: OBI={self.state['obi']:.4f}")
 
     def _handle_trade(self, data_list: list):
         for trade in data_list:

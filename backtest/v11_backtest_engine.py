@@ -376,7 +376,7 @@ def backtest_evaluate_symbol(
         return decision, None
 
     except Exception as e:
-        print(f"[回测] evaluate 异常: {e}")
+        slog.error("[回测] evaluate 异常: {e}")
         return None, None
 
 
@@ -430,8 +430,8 @@ def run_backtest(
         end_idx = len(df_exec)
     df_exec = df_exec.iloc[start_idx:end_idx].reset_index(drop=True)
 
-    print(f"[回测] 数据: {len(df_exec)} 条 15M K 线, {len(df_macro)} 条 1H K 线")
-    print(f"[回测] 范围: {df_exec['datetime'].min()} ~ {df_exec['datetime'].max()}")
+    slog.info("[回测] 数据: {len(df_exec)} 条 15M K 线, {len(df_macro)} 条 1H K 线")
+    slog.info("[回测] 范围: {df_exec['datetime'].min()} ~ {df_exec['datetime'].max()}")
 
     # 加载 wvf 参数
     wvf = cfg.get("strategy_params", {}).get("wvf_std_mult", 2.0)
@@ -441,7 +441,7 @@ def run_backtest(
     df_macro = add_all_indicators(df_macro, wvf)
 
     # 预计算 SMC 执行上下文（一次 build_exec_context ≈ 5秒）
-    print(f"[回测] 预计算 SMC 执行上下文...")
+    slog.info("[回测] 预计算 SMC 执行上下文...")
     smc_exec_full = build_exec_context(df_exec)
 
     # 回测状态
@@ -471,11 +471,11 @@ def run_backtest(
 
     # 回测采样步长：每 4 根 K 线（=1小时）扫描一次
     SCAN_STEP = 4
-    print(f"[回测] 开始逐 K 线回放（每 {SCAN_STEP} 根 K 线扫描一次）...")
+    slog.info("[回测] 开始逐 K 线回放（每 {SCAN_STEP} 根 K 线扫描一次）...")
 
     for i in range(warmup, total_bars):
         if i % 5000 == 0:
-            print(f"[回测] 进度: {i}/{total_bars} ({100*i/total_bars:.0f}%)")
+            slog.info("[回测] 进度: {i}/{total_bars} ({100*i/total_bars:.0f}%)")
 
         # 每根 K 线更新现有持仓
         curr_bar = df_exec.iloc[i]
@@ -565,7 +565,7 @@ def run_backtest(
         except Exception:
             pass
 
-    print(f"[回测] 完成: {len(trades)} 笔交易, {scan_count} 次扫描")
+    slog.info("[回测] 完成: {len(trades)} 笔交易, {scan_count} 次扫描")
 
     # 保存结果
     return _summarize_backtest(trades, df_exec, cfg)
@@ -656,7 +656,7 @@ def _summarize_backtest(
 def save_backtest_trades(trades: List[Dict[str, Any]]):
     """将回测交易记录写入 feature_store（喂给 EVLearner 和 adaptive_calibrator）"""
     if not trades:
-        print("[回测] 无交易记录可保存")
+        slog.info("[回测] 无交易记录可保存")
         return
 
     df = pd.DataFrame(trades)
@@ -672,7 +672,7 @@ def save_backtest_trades(trades: List[Dict[str, Any]]):
         df = pd.concat([df_existing, df], ignore_index=True)
     
     df.to_csv(FEATURE_STORE_PATH, index=False, encoding="utf-8")
-    print(f"[回测] 已保存 {len(trades)} 笔交易到 {FEATURE_STORE_PATH}")
+    slog.info("[回测] 已保存 {len(trades)} 笔交易到 {FEATURE_STORE_PATH}")
 
 
 # =============================================================
@@ -713,19 +713,19 @@ def run_full_backtest(
     print(f"\n{'='*60}")
     print(f"  回测结果")
     print(f"{'='*60}")
-    print(f"  总交易: {result['total_trades']}")
-    print(f"  胜率: {result['win_rate']*100:.1f}%")
-    print(f"  平均 R: {result['avg_r']:.4f}")
-    print(f"  总 R: {result['total_r']:.4f}")
-    print(f"  Sharpe: {result['sharpe']:.4f}")
-    print(f"  Profit Factor: {result['profit_factor']:.4f}")
-    print(f"  最大连续亏损: {result['max_consecutive_losses']}")
-    print(f"  平均持仓 bars: {result['avg_bars_held']:.1f}")
+    slog.info("  总交易: {result['total_trades']}")
+    slog.info("  胜率: {result['win_rate']*100:.1f}%")
+    slog.info("  平均 R: {result['avg_r']:.4f}")
+    slog.info("  总 R: {result['total_r']:.4f}")
+    slog.info("  Sharpe: {result['sharpe']:.4f}")
+    slog.info("  Profit Factor: {result['profit_factor']:.4f}")
+    slog.info("  最大连续亏损: {result['max_consecutive_losses']}")
+    slog.info("  平均持仓 bars: {result['avg_bars_held']:.1f}")
 
     if result.get("by_exit_reason"):
         print(f"\n  退出类型分布:")
         for reason, stats in result["by_exit_reason"].items():
-            print(f"    {reason}: {stats['count']} 笔, avg_r={stats['avg_r']:.4f}, wr={stats['win_rate']*100:.1f}%")
+            slog.info("    {reason}: {stats['count']} 笔, avg_r={stats['avg_r']:.4f}, wr={stats['win_rate']*100:.1f}%")
 
     # 保存交易记录 → 喂给 EVLearner
     if save_trades and result["total_trades"] > 0:
@@ -739,21 +739,21 @@ def run_full_backtest(
             # 过滤出有 pnl_r 的
             df = df[df["pnl_r"].notna() & (df["pnl_r"] != 0)]
             df.to_csv(output_path, index=False, encoding="utf-8")
-            print(f"\n[回测] 交易已保存到 {output_path}")
+            slog.info("\n[回测] 交易已保存到 {output_path}")
 
     # 自适应调参
     if auto_calibrate and result["total_trades"] >= 10:
-        print(f"\n[回测] 触发自适应调参 ({result['total_trades']} 笔交易)...")
+        slog.info("\n[回测] 触发自适应调参 ({result['total_trades']} 笔交易)...")
         try:
             cal_result = run_auto_calibrate()
             if cal_result.get("note") == "CALIBRATED":
-                print(f"[回测] 参数优化: threshold={cal_result['threshold']}, min_rr={cal_result['min_rr']}")
+                slog.info("[回测] 参数优化: threshold={cal_result['threshold']}, min_rr={cal_result['min_rr']}")
                 result["calibrated_params"] = {
                     "threshold": cal_result["threshold"],
                     "min_rr": cal_result["min_rr"],
                 }
         except Exception as e:
-            print(f"[回测] 自适应调参异常: {e}")
+            slog.error("[回测] 自适应调参异常: {e}")
 
     return result
 

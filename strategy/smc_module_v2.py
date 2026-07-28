@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from utils.safe import safe_float, safe_bool, safe_str
+from utils.structured_logger import slog
 
 
 
@@ -181,7 +182,7 @@ def calculate_smc_score(ctx: Dict[str, Any]) -> Dict[str, Any]:
     鐢ㄦ硶:
         result = calculate_smc_score(ctx)
         smc_score = result["smc_score"]  # 0~100
-        print(result["breakdown"])
+        slog.info("breakdown")
     """
     zone = _zone_quality(ctx)
     mitigation = _mitigation_strength(ctx)

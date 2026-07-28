@@ -13,6 +13,7 @@ import json
 import math
 import os
 from collections import defaultdict
+from utils.structured_logger import slog
 
 
 class ProbabilityEngine:
@@ -37,7 +38,7 @@ class ProbabilityEngine:
                     for k, v in raw.items():
                         self.table[k] = v
             except Exception as exc:
-                print(f"[ProbabilityEngine] 加载失败: {exc}")
+                slog.error("[ProbabilityEngine] 加载失败: {exc}")
 
     def save(self):
         try:
@@ -45,7 +46,7 @@ class ProbabilityEngine:
             with open(self.path, "w") as f:
                 json.dump(dict(self.table), f, indent=2)
         except Exception as exc:
-            print(f"[ProbabilityEngine] 保存失败: {exc}")
+            slog.error("[ProbabilityEngine] 保存失败: {exc}")
 
     # ------------------------------------------------------------------
     # 核心逻辑

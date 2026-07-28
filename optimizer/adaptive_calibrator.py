@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from utils.structured_logger import slog
 
 
 # =============================================================
@@ -37,7 +38,7 @@ def load_trades(csv_path: Optional[Path] = None) -> pd.DataFrame:
     """从 feature_store 加载已平仓交易"""
     p = csv_path or FEATURE_STORE_PATH
     if not p.exists():
-        print(f"[自适应] 未找到交易记录: {p}")
+        slog.info("[自适应] 未找到交易记录: {p}")
         return pd.DataFrame()
     
     df = pd.read_csv(p, encoding="utf-8")
@@ -52,7 +53,7 @@ def load_trades(csv_path: Optional[Path] = None) -> pd.DataFrame:
     if "pnl_r" in df.columns:
         df = df[df["pnl_r"].notna() & (df["pnl_r"] != 0)].copy()
     
-    print(f"[自适应] 加载 {len(df)} 笔已平仓交易")
+    slog.info("[自适应] 加载 {len(df)} 笔已平仓交易")
     return df
 
 
@@ -135,7 +136,7 @@ def auto_calibrate(
     
     # 需要 score 和 pnl_r 字段
     if "score" not in df.columns or "pnl_r" not in df.columns:
-        print(f"[自适应] 缺少 score/pnl_r 字段，无法校准")
+        slog.info("[自适应] 缺少 score/pnl_r 字段，无法校准")
         return {
             "threshold": current_threshold,
             "min_rr": current_min_rr,
@@ -152,7 +153,7 @@ def auto_calibrate(
     current_result = calc_score(current_df)
     
     if len(df) < min_trades:
-        print(f"[自适应] 样本不足 ({len(df)} < {min_trades})，使用当前参数")
+        slog.info("[自适应] 样本不足 ({len(df)} < {min_trades})，使用当前参数")
         return {
             "threshold": current_threshold,
             "min_rr": current_min_rr,
@@ -185,9 +186,9 @@ def auto_calibrate(
                 best_params = {"threshold": th, "min_rr": rr_val}
                 best_result = result
     
-    print(f"[自适应] 当前: threshold={current_threshold} min_rr={current_min_rr} "
+    slog.info("[自适应] 当前: threshold={current_threshold} min_rr={current_min_rr} ")
           f"Sharpe={current_result['sharpe']} n={current_result['n']}")
-    print(f"[自适应] 最优: threshold={best_params['threshold']} min_rr={best_params['min_rr']} "
+    slog.info("[自适应] 最优: threshold={best_params['threshold']} min_rr={best_params['min_rr']} ")
           f"Sharpe={best_result['sharpe']} n={best_result['n']}")
     
     return {
@@ -211,7 +212,7 @@ def apply_params(params: Dict[str, Any], config_path: Optional[Path] = None) -> 
     """将最优参数写入配置文件"""
     p = config_path or CONFIG_PATH
     if not p.exists():
-        print(f"[自适应] 配置文件不存在: {p}")
+        slog.info("[自适应] 配置文件不存在: {p}")
         return False
     
     try:
@@ -241,11 +242,11 @@ def apply_params(params: Dict[str, Any], config_path: Optional[Path] = None) -> 
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
         
-        print(f"[自适应] 参数已更新: threshold={params['threshold']}, min_rr={params['min_rr']}")
+        slog.info("[自适应] 参数已更新: threshold={params['threshold']}, min_rr={params['min_rr']}")
         return True
     
     except Exception as e:
-        print(f"[自适应] 参数写入失败: {e}")
+        slog.error("[自适应] 参数写入失败: {e}")
         return False
 
 
@@ -300,8 +301,8 @@ def run_auto_calibrate(
 if __name__ == "__main__":
     result = run_auto_calibrate()
     print(f"\n=== 自适应调参结果 ===")
-    print(f"score_threshold: {result['current_score']['n']}笔 → {result['optimized_score']['n']}笔")
+    slog.info("score_threshold: {result['current_score']['n']}笔 → {result['optimized_score']['n']}笔")
     print(f"当前: th={result.get('threshold','?')} min_rr={result.get('min_rr','?')}")
     if "improvement" in result:
         imp = result["improvement"]
-        print(f"提升: Sharpe {imp['sharpe_delta']:+.4f} | WinRate {imp['win_rate_delta']:+.4f} | AvgR {imp['avg_r_delta']:+.4f}")
+        slog.info("提升: Sharpe {imp['sharpe_delta']:+.4f} | WinRate {imp['win_rate_delta']:+.4f} | AvgR {imp['avg_r_delta']:+.4f}")

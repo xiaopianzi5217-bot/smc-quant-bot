@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from utils.structured_logger import slog
 sys.path.insert(0, '.')
 import json
 from pathlib import Path
@@ -52,7 +53,7 @@ for c in sorted(df['cluster'].unique()):
     wins = (sub['pnl_r'] > 0).sum()
     total = len(sub)
     pf = sub['pnl_r'][sub['pnl_r'] > 0].sum() / abs(sub['pnl_r'][sub['pnl_r'] < 0].sum()) if sub['pnl_r'][sub['pnl_r'] < 0].sum() != 0 else float('inf')
-    print(f"  {c:<50s} | n={total:3d} wr={wins/total:.2%} pf={pf:.3f} avg_ev={sub['expected_value'].mean():.4f} avg_pnl={sub['pnl_r'].mean():+.4f}")
+    slog.info("  {c:<50s} | n={total:3d} wr={wins/total:.2%} pf={pf:.3f} avg_ev={sub['expected_value'].mean():.4f} avg_pnl={sub['pnl_r'].mean():+.4f}")
 
 # ============================================================
 # 3. Temporal decay
@@ -71,9 +72,9 @@ for i, sl in enumerate(slices):
     losses = (pnl < 0).sum()
     pf = pnl[pnl > 0].sum() / abs(pnl[pnl < 0].sum()) if pnl[pnl < 0].sum() != 0 else float('inf')
     span = f"{sl['opened_at'].min().strftime('%m/%d')} - {sl['opened_at'].max().strftime('%m/%d')}"
-    print(f"  Slice {i+1}: [{span}] n={len(sl):3d} wr={wins/len(sl):.2%} pf={pf:.3f} avg={pnl.mean():+.4f} sum={pnl.sum():+.4f}")
+    slog.info("  Slice {i+1}: [{span}] n={len(sl):3d} wr={wins/len(sl):.2%} pf={pf:.3f} avg={pnl.mean():+.4f} sum={pnl.sum():+.4f}")
     if 'regime' in sl.columns:
-        print(f"           regime: {sl['regime'].value_counts().to_dict()}")
+        slog.info("           regime: {sl['regime'].value_counts().to_dict()}")
 
 # ============================================================
 # 4. Temporal by hour-of-day

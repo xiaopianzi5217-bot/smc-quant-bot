@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from typing import Any, Callable
+from utils.structured_logger import slog
 
 _EVENT_HANDLERS: dict[str, list[Callable[..., Any]]] = {}
 
@@ -21,7 +22,7 @@ def emit(event_name: str, *args: Any, **kwargs: Any) -> None:
         try:
             handler(*args, **kwargs)
         except Exception as exc:
-            print(f"[EventBus] 事件处理器失败: {event_name} -> {exc}")
+            slog.error("[EventBus] 事件处理器失败: {event_name} -> {exc}")
 
 
 def clear(event_name: str | None = None) -> None:

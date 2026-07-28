@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from typing import Dict, Optional
+from utils.structured_logger import slog
 
 # ============================================================
 # 默认阈值
@@ -151,5 +152,5 @@ class MicroExecutionGuard:
             )
             time.sleep(POLL_INTERVAL)
 
-        print(f"[MicroGuard] ❌ 微观确认超时 ({timeout_seconds}s)，拦截")
+        slog.info("[MicroGuard] ❌ 微观确认超时 ({timeout_seconds}s)，拦截")
         return False

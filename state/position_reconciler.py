@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional
 
 from state.position_manager import position_manager
+from utils.structured_logger import slog
 
 
 def _is_live_ready() -> bool:
@@ -92,7 +93,7 @@ class PositionReconciler:
             dry = not _is_live_ready()
             return ExchangeAdapter(exchange_name="bitget", dry_run=dry)
         except Exception as exc:
-            print(f"[Reconciler] adapter init failed: {exc}")
+            slog.error("[Reconciler] adapter init failed: {exc}")
             return None
 
     def _notify_msg(self, msg: str) -> None:
@@ -265,9 +266,9 @@ class PositionReconciler:
         }
         try:
             position_manager.update(symbol, pos)
-            print(f"[Reconciler] imported exchange position: {symbol} {pos['direction']}")
+            slog.info("[Reconciler] imported exchange position: {symbol} {pos['direction']}")
         except Exception as exc:
-            print(f"[Reconciler] import failed {symbol}: {exc}")
+            slog.error("[Reconciler] import failed {symbol}: {exc}")
 
     def periodic_check(self, min_interval_sec: float = 60.0) -> Optional[ReconcileReport]:
         now = time.time()

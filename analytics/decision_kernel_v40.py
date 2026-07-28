@@ -10,14 +10,15 @@ DecisionKernel V40 — 编排层
 
 用法：
     from analytics.decision_kernel_v40 import DecisionKernelV40
+from utils.structured_logger import slog
     kernel = DecisionKernelV40()
 
     # 开单前评估
     result = kernel.evaluate(signal, ctx, exec_ctx)
     if result["action"] == "REJECT":
-        print(f"拒绝原因: {result['reason']}")
+        slog.warning("拒绝原因: {result['reason']}")
     else:
-        print(f"开单, 可信度: {result['confidence']}")
+        slog.info("开单, 可信度: {result['confidence']}")
 
     # 平仓后归因
     kernel.attribute_close(trade, feature, realized_r)

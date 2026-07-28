@@ -1,18 +1,19 @@
 from __future__ import annotations
 import os, requests
 from typing import Any, Dict
+from utils.structured_logger import slog
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN") or ""
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TG_CHAT_ID") or ""
 TG_API_BASE = os.getenv("TG_API_BASE", "https://api.telegram.org")
 
 def send_telegram(message: str) -> bool:
     if not TOKEN or not CHAT_ID:
-        print("[TG] TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID/TG_CHAT_ID missing"); return False
+        slog.info("[TG] TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN or TELEGRAM_CHAT_ID/TG_CHAT_ID missing")
     for base in dict.fromkeys([str(TG_API_BASE).rstrip("/"), "https://api.telegram.org"]):
         try:
             resp = requests.post(f"{base}/bot{TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": str(message), "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=8)
             if resp.status_code == 200 and resp.json().get("ok"): return True
-            print(f"[TG] send failed: {resp.status_code} {resp.text[:200]}")
+            slog.error("[TG] send failed: {resp.status_code} {resp.text[:200]}")
         except Exception as exc: print(f"[TG] send error via {base}: {exc}")
     return False
 

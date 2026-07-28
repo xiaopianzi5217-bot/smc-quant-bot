@@ -3,6 +3,7 @@ import os
 import requests
 from pathlib import Path
 from utils.time_utils import now_bj_str
+from utils.structured_logger import slog
 
 # 自动加载 .env 文件（如果存在）
 _env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -71,7 +72,7 @@ def send_telegram(message: str) -> str:
         try: print("[DEBUG] 微信推送:", requests.post("http://www.pushplus.plus/send", data={"token": wechat_token, "title": "SMC量化通知", "content": str(message), "template": "html"}, timeout=5).text)
         except Exception as e: print(f"[DEBUG] 微信异常: {e}")
     else:
-        print("[DEBUG] 微信跳过: 未找到 PushPlus Token")
+        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
     # --- 微信双发代码结束 ---
 
     token, chat_id, api_base = _telegram_config()
@@ -143,7 +144,7 @@ def test_telegram() -> str:
         try: print("[DEBUG] 微信测试:", requests.post("http://www.pushplus.plus/send", data={"token": wechat_token, "title": "SMC系统测试", "content": "测试联通成功！微信与Telegram均已激活。", "template": "html"}, timeout=5).text)
         except Exception as e: print(f"[DEBUG] 微信测试异常: {e}")
     else:
-        print("[DEBUG] 微信跳过: 未找到 PushPlus Token")
+        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
     # --- 微信测试代码结束 ---
 
     token, chat_id, api_base = _telegram_config()

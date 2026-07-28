@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from utils.structured_logger import slog
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -185,12 +186,12 @@ def run_backtest_with_observer(
         "atr", "adx", "rsi",
     ]
 
-    print(f"[数据] df={len(df)} bars, df_smc={len(df_smc)} bars")
+    slog.info("[数据] df={len(df)} bars, df_smc={len(df_smc)} bars")
 
     # ---------- 候选信号 ----------
     broad = generate_v56_candidates(df, None)
     candidates = enrich_v565_candidates(broad, cfg)
-    print(f"[候选] broad={len(broad)}, enriched={len(candidates)}")
+    slog.info("[候选] broad={len(broad)}, enriched={len(candidates)}")
 
     # ---------- 对每个候选信号注入 Observer + V37 Gate ----------
     enriched_rows: List[Dict[str, Any]] = []
@@ -215,7 +216,7 @@ def run_backtest_with_observer(
         try:
             exec_ctx = build_exec_context(_df_segment)
         except Exception as e:
-            print(f"[WARN] sig_idx={sig_idx} build_exec_context error: {e}")
+            slog.error("[WARN] sig_idx={sig_idx} build_exec_context error: {e}")
             exec_ctx = {}
 
         sig_close = _safe_float(df_smc.iloc[sig_idx]["close"])
@@ -269,16 +270,16 @@ def run_backtest_with_observer(
         enriched_rows.append(rec)
 
     candidates_annotated = pd.DataFrame(enriched_rows)
-    print(f"[V37 Gate] 通过={v37_passed_count}, 拦截={v37_blocked_count} (总候选={len(enriched_rows)})")
-    print(f"[Observer] 事件分布: {json.dumps(observer_event_stats, ensure_ascii=False)}")
+    slog.info("[V37 Gate] 通过={v37_passed_count}, 拦截={v37_blocked_count} (总候选={len(enriched_rows)})")
+    slog.info("[Observer] 事件分布: {json.dumps(observer_event_stats, ensure_ascii=False)}")
 
     # ---------- 筛选（V56.5 标准筛选；V37 Gate 只记录不拦截回测执行） ----------
     selected = select_v565_portfolio(candidates_annotated, cfg)
-    print(f"[筛选] selected={len(selected)}")
+    slog.info("[筛选] selected={len(selected)}")
 
     # ---------- 执行 ----------
     trades = execute_v565(df, selected, cfg)
-    print(f"[执行] trades={len(trades)}")
+    slog.info("[执行] trades={len(trades)}")
 
     # ---------- 将 Observer/V37 信息合并到 trades ----------
     if not trades.empty and not candidates_annotated.empty:
@@ -333,7 +334,7 @@ def run_backtest_with_observer(
         )
 
     elapsed = time.time() - t0
-    print(f"[完成] {elapsed:.1f}s")
+    slog.info("[完成] {elapsed:.1f}s")
     return trades, report
 
 
@@ -347,11 +348,11 @@ def main() -> int:
     trades, report = run_backtest_with_observer(args.exec_csv, args.out_dir, cfg)
 
     print("\n========== 回测汇总 ==========")
-    print(json.dumps(report["overall"], ensure_ascii=False, indent=2))
+    slog.info("overall")
     print("\n========== V37 Gate 统计 ==========")
-    print(json.dumps(report["v37_gate_stats"], ensure_ascii=False, indent=2))
+    slog.info("v37_gate_stats")
     print("\n========== Observer 事件分布 ==========")
-    print(json.dumps(report["observer_event_stats"], ensure_ascii=False, indent=2))
+    slog.info("observer_event_stats")
     print(f"\n输出文件: {Path(args.out_dir) / 'backtest_v56_5_with_observer.csv'}")
     return 0
 

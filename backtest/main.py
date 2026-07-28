@@ -12,6 +12,7 @@ import sys
 import os
 from pathlib import Path
 import importlib.util
+from utils.structured_logger import slog
 
 # 锁定项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -100,7 +101,7 @@ def main() -> None:
         max_rows=args.max_rows,
         min_score=args.min_score,
     )
-    print(f"\n[系统] 回测数据已保存: {trades_path}")
+    slog.info("\n[系统] 回测数据已保存: {trades_path}")
     print("\n===== 回测摘要 (V56.5) =====")
     print(summarize_backtest(trades_path))
 

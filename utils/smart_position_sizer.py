@@ -24,6 +24,7 @@ from typing import Optional, Dict, Any
 from collections import deque
 
 import numpy as np
+from utils.structured_logger import slog
 
 
 class SmartPositionSizer:
@@ -169,9 +170,9 @@ class SmartPositionSizer:
                 if risk_mult < 0.3:
                     # 风险过大，强烈降仓
                     risk_mult = max(0.1, risk_mult)
-                    print(f"[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 过高, 强制缩减至 {risk_mult*100:.0f}%")
+                    slog.info("[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 过高, 强制缩减至 {risk_mult*100:.0f}%")
                 elif risk_mult < 0.6:
-                    print(f"[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 偏高, 缩减至 {risk_mult*100:.0f}%")
+                    slog.info("[SmartSizer] 风险比例 {_risk_per_unit*100:.2f}% 偏高, 缩减至 {risk_mult*100:.0f}%")
 
         # ── 最终计算 ──
         raw_size = base * kelly_pct * grade_mult * env_mult * regime_mult * vol_mult * cons_loss_mult * score_mult * atr_mult * risk_mult
@@ -304,7 +305,7 @@ class SmartPositionSizer:
                 encoding="utf-8",
             )
         except Exception as e:
-            print(f"[SmartPositionSizer] save failed: {e}")
+            slog.error("[SmartPositionSizer] save failed: {e}")
 
 
 # 全局单例

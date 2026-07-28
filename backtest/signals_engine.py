@@ -5,6 +5,7 @@ from typing import Tuple
 import os
 import numpy as np
 import pandas as pd
+from utils.structured_logger import slog
 ENGINE_VERSION = "V36_MULTI_ENGINE_SIGNALS_20260612"
 
 def _bool_series(df: pd.DataFrame, name: str, default: bool = False) -> pd.Series:
@@ -80,7 +81,7 @@ def get_breakout_after_div_signals(df: pd.DataFrame) -> Tuple[pd.Series, pd.Seri
     short_breakout = short_breakout | (bear_div_recent & squeeze_context & (close < prior_low) & vol_ok & atr_ok & mom_short_ok)
     if os.environ.get("SMC_DEBUG_SIGNALS", "0") == "1":
         print("\n" + "=" * 55)
-        print("🕵️‍♂️ [V36 Breakout Engine Diagnostic / 突破引擎漏斗分析]")
+        slog.info("🕵️‍♂️ [V36 Breakout Engine Diagnostic / 突破引擎漏斗分析]")
         print(f" K线总数: {len(df)}")
         print(f" 1. 背离上下文数 (Bull/Bear <= {DIV_CONTEXT_BARS}): {int(bull_div_recent.sum())} / {int(bear_div_recent.sum())}")
         print(f" 2. Squeeze上下文数: {int(squeeze_context.sum())}")

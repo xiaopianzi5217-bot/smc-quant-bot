@@ -9,6 +9,7 @@ import traceback
 import copy
 import time
 from datetime import datetime
+from utils.structured_logger import slog
 
 POSITIONS_FILE = "state/managed_positions.json"
 BACKUP_DIR = "storage/position_backups"
@@ -40,7 +41,7 @@ class PositionManager:
                 if isinstance(data, dict):
                     self._positions = data
             except (json.JSONDecodeError, OSError) as exc:
-                print(f"[PositionManager] 加载持久化文件失败: {exc}，使用空字典")
+                slog.error("[PositionManager] 加载持久化文件失败: {exc}，使用空字典")
 
     def _save(self):
         """写入文件持久化（全面异常防护）"""
@@ -58,7 +59,7 @@ class PositionManager:
             os.replace(self._persist_path + ".tmp", self._persist_path)
             self._dirty = False
         except Exception as exc:
-            print(f"[PositionManager] 持久化写入失败: {exc}")
+            slog.error("[PositionManager] 持久化写入失败: {exc}")
             traceback.print_exc()
 
     # ── 新增：启动时恢复持仓 ──────────────────────────────
@@ -72,7 +73,7 @@ class PositionManager:
         with self._lock:
             symbols = list(self._positions.keys())
             if symbols:
-                print(f"[PositionManager] 从磁盘恢复持仓: {symbols}")
+                slog.info("[PositionManager] 从磁盘恢复持仓: {symbols}")
             return symbols
 
     def _save_at_exit(self):
@@ -87,7 +88,7 @@ class PositionManager:
     def _daily_snapshot(self):
         """每日一次持仓快照备份，首次启动时文件不存在则跳过"""
         if not os.path.exists(self._persist_path):
-            print("[PositionManager] 当前无持仓文件，跳过备份")
+            slog.warning("[PositionManager] 当前无持仓文件，跳过备份")
             return
         today = datetime.now().strftime("%Y-%m-%d")
         os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -95,9 +96,9 @@ class PositionManager:
         if not os.path.exists(backup_path):
             try:
                 shutil.copy2(self._persist_path, backup_path)
-                print(f"[PositionManager] 每日快照备份完成: {backup_path}")
+                slog.info("[PositionManager] 每日快照备份完成: {backup_path}")
             except Exception as e:
-                print(f"[PositionManager] 备份失败: {e}")
+                slog.error("[PositionManager] 备份失败: {e}")
 
     def _mark_dirty(self):
         self._dirty = True
@@ -117,7 +118,7 @@ class PositionManager:
                         if isinstance(k, str) and isinstance(v, (int, float)) and float(v) >= cutoff
                     }
             except (json.JSONDecodeError, OSError, ValueError) as exc:
-                print(f"[PositionManager] 加载已处理信号失败: {exc}，使用空记录")
+                slog.error("[PositionManager] 加载已处理信号失败: {exc}，使用空记录")
 
     def _save_processed_signals(self):
         """写入已处理信号指纹持久化文件。"""
@@ -133,7 +134,7 @@ class PositionManager:
             os.replace(self._processed_signals_path + ".tmp", self._processed_signals_path)
             self._processed_dirty = False
         except Exception as exc:
-            print(f"[PositionManager] 已处理信号持久化写入失败: {exc}")
+            slog.error("[PositionManager] 已处理信号持久化写入失败: {exc}")
             traceback.print_exc()
 
     def _mark_processed_dirty(self):

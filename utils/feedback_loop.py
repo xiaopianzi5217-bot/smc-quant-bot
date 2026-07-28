@@ -23,6 +23,7 @@ import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from utils.structured_logger import slog
 
 
 class CalibrationTable:
@@ -48,7 +49,7 @@ class CalibrationTable:
         try:
             self.save_path.write_text(json.dumps(dict(self.bins), indent=2), encoding="utf-8")
         except Exception as e:
-            print(f"[CalibrationTable] save failed: {e}")
+            slog.error("[CalibrationTable] save failed: {e}")
 
     def update(self, score: float, pnl_r: float):
         bin_key = int(score // 5) * 5
@@ -118,7 +119,7 @@ class RegimeFeatureStats:
         try:
             self.save_path.write_text(json.dumps(dict(self.data), indent=2), encoding="utf-8")
         except Exception as e:
-            print(f"[RegimeFeatureStats] save failed: {e}")
+            slog.error("[RegimeFeatureStats] save failed: {e}")
 
     def _time_decay_weight(self, last_ts: float) -> float:
         elapsed = time.time() - last_ts
@@ -206,7 +207,7 @@ class AdaptiveRejector:
         try:
             self.save_path.write_text(json.dumps(dict(self.clusters), indent=2), encoding="utf-8")
         except Exception as e:
-            print(f"[AdaptiveRejector] save failed: {e}")
+            slog.error("[AdaptiveRejector] save failed: {e}")
 
     def _make_cluster_key(self, regime: str, features: List[str], confidence: float) -> str:
         feat_tag = "_".join(sorted(features)) if features else "NONE"
@@ -286,7 +287,7 @@ class FeedbackLoop:
             try:
                 self.probability_engine.update(score=score, profit_r=pnl_r)
             except Exception as exc:
-                print(f"[FeedbackLoop] probability_engine.update exception: {exc}")
+                slog.error("[FeedbackLoop] probability_engine.update exception: {exc}")
 
     def evaluate_signal(self, regime: str, features: List[str],
                         score: float, raw_feature_scores: Dict[str, float],

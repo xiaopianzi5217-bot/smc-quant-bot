@@ -1,0 +1,4 @@
+oos_month,total_trades,win_rate,avg_win_r,avg_loss_r,avg_ev_r,total_return_r,max_drawdown_r,profit_factor,out_csv,train_start,train_end,oos_start,oos_end,train_samples,oos_samples
+2020-02,33,0.5152,0.9628,-1.0379,-0.0072,-0.2384,5.1681,0.9856,data\walk_forward\trades_window_2_202002.csv,2019-08-01,2020-02-01,2020-02-01,2020-03-01,2976,2784
+2020-03,43,0.5814,0.925,-1.0397,0.1026,4.4109,4.0981,1.2357,data\walk_forward\trades_window_3_202003.csv,2019-09-01,2020-03-01,2020-03-01,2020-04-01,5760,2976
+2020-04,25,0.56,0.9178,-1.0369,0.0577,1.4437,3.0669,1.1266,data\walk_forward\trades_window_4_202004.csv,2019-10-01,2020-04-01,2020-04-01,2020-05-01,8736,1844

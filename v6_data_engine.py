@@ -8,10 +8,12 @@ import json
 import time
 import hashlib
 import shutil
+import threading
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from utils.structured_logger import slog
 
 _ROOT = Path(__file__).parent.absolute()
 
@@ -21,6 +23,48 @@ DB_PATH = _ROOT / "data" / "v6_research.db"
 
 # 【根本修复】缓存标记：拉取成功/确认不存在后写入，避免每次启动重复尝试
 _DB_INIT_SENTINEL = _ROOT / "data" / ".db_initialized"
+
+# ── 🟢 节流推送（避免每次开平仓直接 push） ──
+_last_push_ts = 0.0
+_PUSH_MIN_INTERVAL = 120.0   # 最少 2 分钟推一次
+_pending_push = False
+_push_lock = threading.Lock()
+
+
+def request_push_database_to_hub():
+    """非阻塞：标记需要备份，由后台线程节流执行。"""
+    global _pending_push
+    with _push_lock:
+        _pending_push = True
+
+
+def _push_worker_loop():
+    global _last_push_ts, _pending_push
+    while True:
+        time.sleep(15)
+        with _push_lock:
+            need = _pending_push
+            _pending_push = False
+        if not need:
+            continue
+        if time.time() - _last_push_ts < _PUSH_MIN_INTERVAL:
+            with _push_lock:
+                _pending_push = True   # 稍后再试
+            continue
+        try:
+            push_database_to_hub()
+            _last_push_ts = time.time()
+        except Exception as e:
+            slog.error("[V6] throttled push failed: {e}")
+            with _push_lock:
+                _pending_push = True
+
+
+if IS_HF_SPACE:
+    t = threading.Thread(target=_push_worker_loop, daemon=True)
+    t.start()
+    slog.info("[V6 DataEngine] 节流推送后台线程已启动 (最小间隔 120s)")
+
 
 def _get_db_path():
     """Return a normalized pathlib.Path for the configured database path."""
@@ -65,18 +109,18 @@ def pull_database_from_hub():
     """【启动恢复】从 HF Dataset 下载历史最新的数据库，防止容器重置导致数据流断裂"""
     # 【根本修复】已拉取过（无论成功/确认不存在），跳过重复请求
     if _DB_INIT_SENTINEL.exists():
-        print("[V6 DataEngine] 已确认过云端状态，跳过拉取。")
+        slog.warning("[V6 DataEngine] 已确认过云端状态，跳过拉取。")
         return
 
     repo_id, token = _get_hf_config()
     if not repo_id or not token:
-        print("[V6 DataEngine] 未检测到云端灾备配置，跳过云端数据库拉取。")
+        slog.warning("[V6 DataEngine] 未检测到云端灾备配置，跳过云端数据库拉取。")
         _DB_INIT_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
         _DB_INIT_SENTINEL.write_text("no_cloud_config", encoding="utf-8")
         return
     try:
         from huggingface_hub import hf_hub_download
-        print(f"[V6 DataEngine] 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
+        slog.info("[V6 DataEngine] 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
         db_path = _get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         downloaded = hf_hub_download(
@@ -88,15 +132,15 @@ def pull_database_from_hub():
         shutil.copy(downloaded, str(db_path))
         # 拉取成功 -> 写标记
         _DB_INIT_SENTINEL.write_text("pulled_ok", encoding="utf-8")
-        print("[V6 DataEngine] 历史交易快照库同步恢复成功！")
+        slog.info("[V6 DataEngine] 历史交易快照库同步恢复成功！")
     except Exception as e:
         err_str = str(e)
         if "404" in err_str or "Entry Not Found" in err_str:
-            print("[V6 DataEngine] 云端无历史备份 (首次部署)，初始化全新本地库。")
+            slog.info("[V6 DataEngine] 云端无历史备份 (首次部署)，初始化全新本地库。")
             # 确认不存在 -> 写标记，下次不重复尝试
             _DB_INIT_SENTINEL.write_text("no_cloud_backup_404", encoding="utf-8")
         else:
-            print(f"[V6 DataEngine] io 云端数据库拉取异常: {e}")
+            slog.error("[V6 DataEngine] io 云端数据库拉取异常: {e}")
 
 def push_database_to_hub():
     """【实时备份】将本地最新写入的快照瞬间同步至云端私有仓库"""
@@ -118,9 +162,9 @@ def push_database_to_hub():
             repo_type="dataset",
             commit_message=f"🔄 Aisvbo 数据流实时增量备份 - {int(time.time())}"
         )
-        print(f"[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
+        slog.info("[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
     except Exception as e:
-        print(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
+        slog.error("[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 
 # ── 统一特征分类映射器 ──
 from state.feature_mapper import (
@@ -245,7 +289,7 @@ def init_v6_database():
     conn.commit()
     conn.close()
     expand_v6_table_for_smc()
-    print(f"[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
+    slog.info("[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
 
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     """拍摄高维环境特征快照"""
@@ -304,12 +348,12 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         ))
         conn.commit()
         conn.close()
-        print(f"[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
+        slog.info("[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
         
         if IS_HF_SPACE:
-            push_database_to_hub()
+            request_push_database_to_hub()
     except Exception as e:
-        print(f"[V6 DataEngine] 记录开单快照失败: {e}")
+        slog.error("[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0):
     """横向拼接真实结局标签"""
@@ -325,12 +369,12 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
         """, (exit_reason, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
         conn.commit()
         conn.close()
-        print(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
-        
+        slog.info("[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
+
         if IS_HF_SPACE:
-            push_database_to_hub()
+            request_push_database_to_hub()
     except Exception as e:
-        print(f"[V6 DataEngine] 拼接平仓标签失败: {e}")
+        slog.error("[V6 DataEngine] 拼接平仓标签失败: {e}")
 
 class DynamicFeatureOptimizer:
     """

@@ -13,6 +13,7 @@ from portfolio.portfolio_manager import PortfolioManager
 from journal.trade_logger import TradeLogger
 from analytics.filter_audit import FilterAuditLogger
 from risk.position_sizing import apply_grade_position_sizing
+from utils.structured_logger import slog
 
 try:
     from notifier.telegram import send_telegram
@@ -176,7 +177,7 @@ def run_once(cfg, executor, lifecycle, exchange):
                 try:
                     dispatch_observer_snapshot(snapshot, send_all=bool(tg_cfg.get("send_observer_all", False)))
                 except Exception as e:
-                    print(f"[{symbol}] Observer顺发消息触发异常: {e}")
+                    slog.error("[{symbol}] Observer顺发消息触发异常: {e}")
 
             decision = kernel.decide(
                 curr=curr,
@@ -208,7 +209,7 @@ def run_once(cfg, executor, lifecycle, exchange):
                     try:
                         dispatch_strategy_decision(snapshot, decision)
                     except Exception as e:
-                        print(f"[{symbol}] Strategy开单提醒触发异常: {e}")
+                        slog.error("[{symbol}] Strategy开单提醒触发异常: {e}")
                 result = executor.execute_decision(symbol, decision)
                 mark_strategy_approval(symbol, curr, decision, cfg, exec_ctx=exec_ctx)
             else:

@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 import os
+from utils.structured_logger import slog
 
 
 def load_trades(csv_path: str) -> pd.DataFrame:
@@ -128,7 +129,7 @@ def run_ev_cluster_diagnostic(trades_csv: str, output_dir: str = "outputs"):
     bad.to_csv(bad_path, index=False)
 
     print("\n===== EV CLUSTER DIAGNOSTIC =====")
-    print(f"Total clusters: {df['cluster'].nunique()}")
+    slog.info("Total clusters: {df['cluster'].nunique()}")
     print(f"Bad clusters: {len(bad)}")
     print(f"Saved: {report_path}")
     print(f"Saved: {bad_path}")

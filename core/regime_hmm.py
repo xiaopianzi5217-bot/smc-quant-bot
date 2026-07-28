@@ -19,6 +19,7 @@ import warnings
 from typing import Dict, Optional
 
 from hmmlearn import hmm
+from utils.structured_logger import slog
 
 warnings.filterwarnings("ignore")
 
@@ -55,16 +56,16 @@ class RegimeHMM:
         if os.path.exists(self.model_path):
             try:
                 self.model = joblib.load(self.model_path)
-                print(f"[RegimeHMM] [OK] 加载预训练模型: {self.model_path}")
+                slog.info("[RegimeHMM] [OK] 加载预训练模型: {self.model_path}")
             except Exception as e:
-                print(f"[RegimeHMM] [ERR] 模型加载失败: {e}, 创建新模型")
+                slog.error("[RegimeHMM] [ERR] 模型加载失败: {e}, 创建新模型")
                 self.model = hmm.GaussianHMM(
                     n_components=self.n_components,
                     covariance_type="diag",
                     n_iter=200,
                 )
         else:
-            print(f"[RegimeHMM] [!] 模型文件不存在: {self.model_path}, 创建新模型")
+            slog.info("[RegimeHMM] [!] 模型文件不存在: {self.model_path}, 创建新模型")
             self.model = hmm.GaussianHMM(
                 n_components=self.n_components,
                 covariance_type="diag",
@@ -83,11 +84,11 @@ class RegimeHMM:
                建议特征: [momentum, volatility]
         """
         if len(X) < self.n_components * 10:
-            print(f"[RegimeHMM] [WARN] 训练数据不足 (n={len(X)}), 建议至少 {self.n_components * 10} 条")
+            slog.warning("[RegimeHMM] [WARN] 训练数据不足 (n={len(X)}), 建议至少 {self.n_components * 10} 条")
 
         self.model.fit(X)
         joblib.dump(self.model, self.model_path)
-        print(f"[RegimeHMM] [OK] 模型训练完成, 已保存至: {self.model_path}")
+        slog.info("[RegimeHMM] [OK] 模型训练完成, 已保存至: {self.model_path}")
 
     # -------------------------
     # DETECT

@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+from utils.structured_logger import slog
 
 
 DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(86400 * 7)))
@@ -59,7 +60,7 @@ class SignalDeduper:
             self._sl_times = {k: float(v) for k, v in (data.get("sl_times") or {}).items()}
             self._cleanup_unlocked()
         except Exception as exc:
-            print(f"[SignalDeduper] load failed: {exc}")
+            slog.error("[SignalDeduper] load failed: {exc}")
 
     def _save(self) -> None:
         try:
@@ -74,7 +75,7 @@ class SignalDeduper:
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, self._path)
         except Exception as exc:
-            print(f"[SignalDeduper] save failed: {exc}")
+            slog.error("[SignalDeduper] save failed: {exc}")
 
     def _cleanup_unlocked(self) -> None:
         now = time.time()

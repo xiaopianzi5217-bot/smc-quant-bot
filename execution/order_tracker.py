@@ -4,6 +4,7 @@ import time
 import threading
 from typing import Dict, Optional
 from state.position_manager import position_manager
+from utils.structured_logger import slog
 
 class OrderTracker:
     """追踪交易所订单状态，更新持仓管理器"""
@@ -20,16 +21,16 @@ class OrderTracker:
                     price: Optional[float] = None,
                     order_type: str = 'limit') -> Optional[dict]:
         if self._exchange is None:
-            print("[OrderTracker] 未 attach exchange，无法下单")
+            slog.info("[OrderTracker] 未 attach exchange，无法下单")
             return None
         try:
             order = self._exchange.create_order(symbol, order_type, side, amount, price)
             with self._lock:
                 self._active_orders[order['id']] = order
-            print(f"[OrderTracker] 下单成功: {side} {amount} {symbol}")
+            slog.info("[OrderTracker] 下单成功: {side} {amount} {symbol}")
             return order
         except Exception as e:
-            print(f"[OrderTracker] 下单失败: {e}")
+            slog.error("[OrderTracker] 下单失败: {e}")
             return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -41,7 +42,7 @@ class OrderTracker:
                 self._active_orders.pop(order_id, None)
             return True
         except Exception as e:
-            print(f"[OrderTracker] 撤单失败: {e}")
+            slog.error("[OrderTracker] 撤单失败: {e}")
             return False
 
     def poll_open_orders(self):

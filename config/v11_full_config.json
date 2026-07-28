@@ -92,7 +92,9 @@
     "move_sl_to_be_after_tp1": true,
     "trail_after_tp1": true,
     "trail_atr_mult": 1.1,
-    "smart_sl_multiplier": 0.8
+    "smart_sl_multiplier": 0.8,
+    "slippage_buffer_pct": 0.0005,
+    "min_slippage_ticks": 1
   },
   "squeeze_filter": {
     "enabled": true,
@@ -120,20 +122,31 @@
     "min_edge": 5.0,
     "ev_threshold": 0.0
   },
-    "v565_gate": {
+  "v565_gate": {
     "enabled": true,
     "min_score": 55.0,
     "min_model_ev": -0.28,
-    "hard_block_hours": [4, 6, 7, 23]
+    "hard_block_hours": [
+      4,
+      6,
+      7,
+      23
+    ]
   },
-    "micro_guard": {
+  "micro_guard": {
     "enabled": false,
     "symbol": "BTCUSDT",
-    "obi_long": 0.20,
-    "obi_short": -0.20,
+    "obi_long": 0.2,
+    "obi_short": -0.2,
     "cvd_long": 5.0,
     "cvd_short": -5.0,
     "timeout_seconds": 60,
     "notes": "启用时需传入 feeder 实例，使用 shared_state 模式"
+  },
+  "circuit_breaker": {
+    "enabled": true,
+    "max_daily_loss_r": 3.0,
+    "max_consecutive_losses": 3,
+    "size_multiplier_on_recovery": 0.5
   }
 }

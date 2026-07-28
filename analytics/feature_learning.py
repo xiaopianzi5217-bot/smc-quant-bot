@@ -17,6 +17,7 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, Optional
+from utils.structured_logger import slog
 
 
 class FeatureLearningEngine:
@@ -63,7 +64,7 @@ class FeatureLearningEngine:
                     self.weights = data
                     return
             except Exception as e:
-                print(f"[FeatureLearningEngine] 加载失败: {e}")
+                slog.error("[FeatureLearningEngine] 加载失败: {e}")
         self.weights = self.default_weights.copy()
         self._save()
 
@@ -74,7 +75,7 @@ class FeatureLearningEngine:
                 encoding="utf-8"
             )
         except Exception as e:
-            print(f"[FeatureLearningEngine] 保存失败: {e}")
+            slog.error("[FeatureLearningEngine] 保存失败: {e}")
 
     # ------------------------------------------------------------------
     # 公开接口

@@ -20,6 +20,7 @@ OUTCOME 事件：
 
 用法：
     from analytics.event_schema import event_logger
+from utils.structured_logger import slog
     event_id = event_logger.log_event("TRADE", {...})
 """
 
@@ -75,9 +76,9 @@ class EventLogger:
                     json.dumps(event, ensure_ascii=False, default=self._json_default) + "\n"
                 )
         except OSError as e:
-            print(f"[EventLogger] 写入失败 (IO): {e}")
+            slog.error("[EventLogger] 写入失败 (IO): {e}")
         except Exception as e:
-            print(f"[EventLogger] 写入失败 (未知): {e}")
+            slog.error("[EventLogger] 写入失败 (未知): {e}")
 
         return event_id
 
@@ -94,7 +95,7 @@ class EventLogger:
         try:
             return pd.read_json(self.log_path, lines=True)
         except Exception as e:
-            print(f"[EventLogger] 读取训练集失败: {e}")
+            slog.error("[EventLogger] 读取训练集失败: {e}")
             return pd.DataFrame()
 
     def get_events_by_type(self, event_type: str) -> list:

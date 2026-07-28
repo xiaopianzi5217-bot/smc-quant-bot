@@ -2,6 +2,7 @@ import os
 import datetime
 import pandas as pd
 from collections import defaultdict
+from utils.structured_logger import slog
 
 class DiagnosticTracker:
     def __init__(self, version_name="V31机构评分版"):
@@ -49,15 +50,15 @@ class DiagnosticTracker:
         """打印最终的酷炫日志"""
         print(f"\n🧬 Runner Version: {self.version_name}")
         print(f"=======================================================")
-        print(f"🕵️‍♂️ [Breakout Engine Diagnostic / 突破引擎漏斗分析]")
+        slog.info("🕵️‍♂️ [Breakout Engine Diagnostic / 突破引擎漏斗分析]")
         print(f" K线总数: {self.total_klines}")
-        print(f" 1. 近期背离数 (Bull/Bear): {self.funnel['divergence']['bull']} / {self.funnel['divergence']['bear']}")
-        print(f" 2. 达到横盘挤压条件 (>= 8根): {self.funnel['squeeze']}")
-        print(f" 3. 价格突破20前高/前低数: {self.funnel['breakout']['high']} / {self.funnel['breakout']['low']}")
-        print(f" 4. 量能爆发满足数 (Vol Z > 1.15): {self.funnel['volume_z']}")
-        print(f" 5. 波动扩张满足数 (ATR > 1.05): {self.funnel['atr_expand']}")
-        print(f" 6. SQZMOM Strength+DMI满足数: {self.funnel['sqz_dmi']['long']} / {self.funnel['sqz_dmi']['short']}")
-        print(f" => 最终组合成功触发 (Long/Short): {self.funnel['combo_trigger']['long']} / {self.funnel['combo_trigger']['short']}")
+        slog.info(" 1. 近期背离数 (Bull/Bear): {self.funnel['divergence']['bull']} / {self.funnel['divergence']['bear']}")
+        slog.info(" 2. 达到横盘挤压条件 (>= 8根): {self.funnel['squeeze']}")
+        slog.info(" 3. 价格突破20前高/前低数: {self.funnel['breakout']['high']} / {self.funnel['breakout']['low']}")
+        slog.info(" 4. 量能爆发满足数 (Vol Z > 1.15): {self.funnel['volume_z']}")
+        slog.info(" 5. 波动扩张满足数 (ATR > 1.05): {self.funnel['atr_expand']}")
+        slog.info(" 6. SQZMOM Strength+DMI满足数: {self.funnel['sqz_dmi']['long']} / {self.funnel['sqz_dmi']['short']}")
+        slog.info(" => 最终组合成功触发 (Long/Short): {self.funnel['combo_trigger']['long']} / {self.funnel['combo_trigger']['short']}")
         print(f"=======================================================")
         
         print(f"\n=======================================================")
@@ -116,7 +117,7 @@ class DiagnosticTracker:
         self.score_history.append(score)
         
         # 打印诊断信息
-        print(f"  🔍 [DiagnosticTracker] score={score:.2f}")
+        slog.info("  🔍 [DiagnosticTracker] score={score:.2f}")
         
         # 原样返回分数，不做任何修改
         return score
@@ -124,7 +125,7 @@ class DiagnosticTracker:
     def export_reject_audit(self, filename: str = "reject_audit_v30.csv") -> str:
         """終極修復版：自動建立資料夾，防止因路徑不存在導致檔案消失"""
         if not self.reject_audit_list:
-            print("📄 [警告] 無任何拒絕記錄，跳過導出。")
+            slog.info("📄 [警告] 無任何拒絕記錄，跳過導出。")
             return ""
 
         try:

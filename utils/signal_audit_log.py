@@ -12,6 +12,7 @@
 
 使用方式：
   from utils.signal_audit_log import signal_audit_log
+from utils.structured_logger import slog
   signal_audit_log.record_open(signal_id, snapshot, future_close_prices)
   signal_audit_log.record_close(signal_id, final_pnl_r, max_forward_r, max_adverse_r, exit_reason)
 """
@@ -62,7 +63,7 @@ class SignalAuditLog:
             with open(self.open_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
         except Exception as e:
-            print(f"[SignalAuditLog] 写入开单记录失败: {e}")
+            slog.error("[SignalAuditLog] 写入开单记录失败: {e}")
 
         # 同时写入 closed 的 placeholder（便于统一分析）
         try:
@@ -80,7 +81,7 @@ class SignalAuditLog:
             with open(self.closed_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(closed_entry, ensure_ascii=False, default=str) + "\n")
         except Exception as e:
-            print(f"[SignalAuditLog] 写入 closed placeholder 失败: {e}")
+            slog.error("[SignalAuditLog] 写入 closed placeholder 失败: {e}")
 
     # ------------------------------------------------------------------
     #  平仓记录（更新 closed 文件中的对应行）
@@ -137,7 +138,7 @@ class SignalAuditLog:
                 self.closed_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 return True
         except Exception as e:
-            print(f"[SignalAuditLog] 更新平仓记录失败: {e}")
+            slog.error("[SignalAuditLog] 更新平仓记录失败: {e}")
         return False
 
     # ------------------------------------------------------------------

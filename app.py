@@ -4,6 +4,7 @@
 import asyncio
 import os
 import warnings
+from utils.structured_logger import slog
 
 # 强制 Python 时区为 Asia/Shanghai，解决日志时间与北京时间不同步的问题
 os.environ["TZ"] = "Asia/Shanghai"
@@ -469,9 +470,9 @@ def build_local_snapshot_and_decision(symbol):
             'current_sl': sl,
             'stage': 0
         }
-        print(f"[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
+        slog.info("[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
     else:
-        print(f"[{symbol}] V37 Gate 拦截: {reason}")
+        slog.info("[{symbol}] V37 Gate 拦截: {reason}")
 
     return snapshot, decision, source
 
@@ -500,7 +501,7 @@ def execution_layer_status(symbol):
 def background_monitor_worker():
     import requests
     import time
-    print("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损 5s轮询)...")
+    slog.info("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损 5s轮询)...")
     
     def _get_price(sym):
         try:
@@ -527,7 +528,7 @@ def background_monitor_worker():
                 try:
                     position_reconciler.periodic_check(min_interval_sec=100.0)
                 except Exception as _re:
-                    print(f"[Monitor] reconciler 异常: {_re}")
+                    slog.error("[Monitor] reconciler 异常: {_re}")
             # 1. 灾难自愈检测 (没必要每5秒查一次，每12次即60秒查一次即可)
             if loop_count % 12 == 0:
                 if not health_monitor.is_healthy():
@@ -538,7 +539,7 @@ def background_monitor_worker():
             # 2. 追踪止损检测
             _all_positions_for_trail = position_manager.get()
             if loop_count % 12 == 0 and not _all_positions_for_trail:
-                print("[Monitor DEBUG] 当前 position_manager 为空，没有活跃订单。")
+                slog.info("[Monitor DEBUG] 当前 position_manager 为空，没有活跃订单。")
             if not _all_positions_for_trail:
                 continue
                 
@@ -567,7 +568,7 @@ def background_monitor_worker():
                     try:
                         position_manager.update(sym, dict(pos))
                     except Exception as _pm_e:
-                        print(f"[Monitor] position_manager 回写失败: {_pm_e}")
+                        slog.error("[Monitor] position_manager 回写失败: {_pm_e}")
 
                 elif action_plan['action'] == 'TRAIL_ONLY' and abs(pos['current_sl'] - action_plan['new_sl']) > curr_price * 0.001:
                     pos['current_sl'] = action_plan['new_sl']
@@ -576,7 +577,7 @@ def background_monitor_worker():
                     try:
                         position_manager.update(sym, dict(pos))
                     except Exception as _pm_e:
-                        print(f"[Monitor] position_manager 回写失败: {_pm_e}")
+                        slog.error("[Monitor] position_manager 回写失败: {_pm_e}")
 
         except Exception as e:
             print(f"后台线程异常: {e}")
@@ -655,7 +656,7 @@ def _start_hf_auto_trader():
         import ccxt as _ccxt
         _ccxt  # noqa: 只是验证导入成功
     except Exception as exc:
-        print(f"[HF] ccxt 导入失败 (非致命): {exc}")
+        slog.error("[HF] ccxt 导入失败 (非致命): {exc}")
 
     try:
         import hf_auto_trader
@@ -666,15 +667,15 @@ def _start_hf_auto_trader():
         from v6_data_engine import init_v6_database
         try:
             init_v6_database()
-            print("[V6 DataEngine] trade_snapshots 数据库表已就绪")
+            slog.info("[V6 DataEngine] trade_snapshots 数据库表已就绪")
         except Exception as _db_e:
-            print(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
+            slog.error("[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
 
         async def _run_async_main():
             _feeder = None
             try:
                 if _feeder is not None:
-                    print("[Feeder] gather 启动 feeder + main_loop")
+                    slog.info("[Feeder] gather 启动 feeder + main_loop")
                     # 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消
                     results = await asyncio.gather(
                         _feeder.run(),
@@ -685,19 +686,19 @@ def _start_hf_auto_trader():
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
                             name = "_feeder.run()" if i == 0 else "hf_auto_trader.main_loop()"
-                            print(f"[Feeder] {name} 异常: {res}")
+                            slog.error("[Feeder] {name} 异常: {res}")
                             _tb.print_exc()
                 else:
                     await hf_auto_trader.main_loop()
             except Exception as e:
-                print(f"[hf_auto_trader] 主循环崩溃: {e}")
+                slog.info("[hf_auto_trader] 主循环崩溃: {e}")
                 _tb.print_exc()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_async_main())
     except Exception as e:
-        print(f"[HF] 自动扫描启动失败: {e}")
+        slog.error("[HF] 自动扫描启动失败: {e}")
         _tb.print_exc()
 
 
@@ -714,6 +715,6 @@ if __name__ == "__main__":
     # 线程启动是微秒级的，不阻塞 HF Space 健康检查（端口 7860 由 gradio 监听）
     _hf_thread = threading.Thread(target=_start_hf_auto_trader, daemon=True)
     _hf_thread.start()
-    print("[HF] 自动信号扫描线程已启动（不阻塞 Gradio 启动）")
+    slog.info("[HF] 自动信号扫描线程已启动（不阻塞 Gradio 启动）")
 
     demo.launch(server_name="0.0.0.0", server_port=7860)
