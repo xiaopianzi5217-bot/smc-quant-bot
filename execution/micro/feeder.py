@@ -138,8 +138,8 @@ class MicroFeeder:
                 wait = self._backoff_wait()
                 # 【新增】连续断连惩罚
                 wait = self._apply_consecutive_penalty(wait)
-                slog.info("[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), ")
-                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                slog.info(f"[MicroFeeder] WS 连接关闭 (code={e.code}, reason={e.reason}), "
+                          f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"CLOSE_{e.code}"
                 self._mark_stale()
                 await asyncio.sleep(wait)
@@ -148,8 +148,8 @@ class MicroFeeder:
                 self._retry_count += 1
                 wait = self._backoff_wait()
                 wait = self._apply_consecutive_penalty(wait)
-                slog.error("[MicroFeeder] 网络异常 ({type(e).__name__}), ")
-                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                slog.error(f"[MicroFeeder] 网络异常 ({type(e).__name__}), "
+                           f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"NET_{type(e).__name__}"
                 self._mark_stale()
                 await asyncio.sleep(wait)
@@ -166,8 +166,8 @@ class MicroFeeder:
                 wait = self._backoff_wait()
                 wait = self._apply_consecutive_penalty(wait)
                 err_name = type(e).__name__
-                slog.error("[MicroFeeder] 未知异常 ({err_name}): {e}, ")
-                      f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
+                slog.error(f"[MicroFeeder] 未知异常 ({err_name}): {e}, "
+                           f"等待 {wait:.0f}s 后重连 (第{self._retry_count}次)")
                 self.state["error_code"] = f"UNKNOWN_{err_name}"
                 self._mark_stale()
                 await asyncio.sleep(wait)
