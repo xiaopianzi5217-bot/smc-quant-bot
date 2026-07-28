@@ -310,16 +310,18 @@ _OBSERVER_TYPE_NAMES = {
     "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
 }
 _OBSERVER_DIR_EMOJI = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
-PRIORITY_COOLDOWN = {
-    "TRADE": 60,     # 交易信号：1分钟
-    "SYSTEM": 120,    # 系统消息：2分钟
-    "OBSERVER": 600,  # 观察消息：10分钟
-}
-SAFE_SEND_COOLDOWN = 600
+
+OBSERVER_EVENT_COOLDOWN = 180     # 同一类 Observer 事件最短间隔（秒）
+OBSERVER_BURST_MAX = 3            # 同一扫描窗口最多放行条数
+OBSERVER_BURST_WINDOW = 15        # 爆发窗口（秒）
+
+_LAST_SAFE_SEND_TIME: float = 0.0
+_OBSERVER_LAST_BY_KEY: dict = {}  # event_key -> ts
+_OBSERVER_BURST_TIMES: list = []  # 最近成功推送时间戳
 
 
 def safe_send(msg: str, priority: str = "AUTO") -> str:
-    global _LAST_SAFE_SEND_TIME
+    global _LAST_SAFE_SEND_TIME, _OBSERVER_BURST_TIMES
     now = time.time()
 
     def _auto_priority(message: str) -> str:
@@ -351,17 +353,32 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
     if priority in ("TRADE", "SYSTEM"):
         msg = msg + _ts_suffix
 
-    if priority == "TRADE" or priority == "SYSTEM":
+    if priority in ("TRADE", "SYSTEM"):
         print(f"[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
     else:
-        cd = PRIORITY_COOLDOWN.get(priority, 600)
-        if _LAST_SAFE_SEND_TIME == 0.0:
-            _LAST_SAFE_SEND_TIME = now
-        elif now - _LAST_SAFE_SEND_TIME < cd:
-            print(f"[safe_send] {priority} 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < {cd}s")
-            return "RATELIMITED_GLOBAL"
-        else:
-            _LAST_SAFE_SEND_TIME = now
+        # 1) 从消息里抽一个粗事件 key，避免同类刷屏
+        _key = "OBSERVER"
+        _mu = msg.upper()
+        for k in ("FVG LONG", "FVG SHORT", "SQUEEZE", "NEAR_LIQUIDITY", "NEAR_BSL", "NEAR_SSL",
+                  "CHOCH", "BOS", "ORDER BLOCK", "LIQUIDITY"):
+            if k in _mu:
+                _key = k
+                break
+
+        _last_same = _OBSERVER_LAST_BY_KEY.get(_key, 0.0)
+        if now - _last_same < OBSERVER_EVENT_COOLDOWN:
+            print(f"[safe_send] OBSERVER 同类限流 {_key} {now - _last_same:.0f}s < {OBSERVER_EVENT_COOLDOWN}s")
+            return "RATELIMITED_EVENT"
+
+        # 2) 短窗口爆发上限（同轮多事件可发，但不超过 BURST_MAX）
+        _OBSERVER_BURST_TIMES = [t for t in _OBSERVER_BURST_TIMES if now - t < OBSERVER_BURST_WINDOW]
+        if len(_OBSERVER_BURST_TIMES) >= OBSERVER_BURST_MAX:
+            print(f"[safe_send] OBSERVER 爆发限流 {len(_OBSERVER_BURST_TIMES)}/{OBSERVER_BURST_MAX} in {OBSERVER_BURST_WINDOW}s")
+            return "RATELIMITED_BURST"
+
+        _OBSERVER_LAST_BY_KEY[_key] = now
+        _OBSERVER_BURST_TIMES.append(now)
+        _LAST_SAFE_SEND_TIME = now
 
     try:
         print(f"[safe_send] 开始推送，消息长度: {len(msg)} 字符 priority={priority}")
