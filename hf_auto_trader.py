@@ -310,6 +310,11 @@ _OBSERVER_TYPE_NAMES = {
     "SQUEEZE_RELEASE": "SQZMOM 挤压释放",
 }
 _OBSERVER_DIR_EMOJI = {"Long": "📈 多头", "Short": "📉 空头", "N/A": "⚖️ 中性"}
+PRIORITY_COOLDOWN = {
+    "TRADE": 60,     # 交易信号：1分钟
+    "SYSTEM": 120,    # 系统消息：2分钟
+    "OBSERVER": 600,  # 观察消息：10分钟
+}
 SAFE_SEND_COOLDOWN = 600
 
 
@@ -340,7 +345,7 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
     if priority == "AUTO":
         priority = _auto_priority(msg)
 
-        # ===== 【修复推送重复】给 TRADE/SYSTEM 消息追加时间戳防止微信判重 =====
+    # ===== 【修复推送重复】给 TRADE/SYSTEM 消息追加时间戳防止微信判重 =====
     _now_dt = __import__("datetime").datetime.now()
     _ts_suffix = f" [{_now_dt.strftime('%H:%M:%S.%f')[:-3]}]"
     if priority in ("TRADE", "SYSTEM"):
@@ -349,10 +354,14 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
     if priority == "TRADE" or priority == "SYSTEM":
         print(f"[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
     else:
-        if now - _LAST_SAFE_SEND_TIME < SAFE_SEND_COOLDOWN:
-            print(f"[safe_send] 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < {SAFE_SEND_COOLDOWN}s")
+        cd = PRIORITY_COOLDOWN.get(priority, 600)
+        if _LAST_SAFE_SEND_TIME == 0.0:
+            _LAST_SAFE_SEND_TIME = now
+        elif now - _LAST_SAFE_SEND_TIME < cd:
+            print(f"[safe_send] {priority} 全局限流 {now - _LAST_SAFE_SEND_TIME:.0f}s < {cd}s")
             return "RATELIMITED_GLOBAL"
-        _LAST_SAFE_SEND_TIME = now
+        else:
+            _LAST_SAFE_SEND_TIME = now
 
     try:
         print(f"[safe_send] 开始推送，消息长度: {len(msg)} 字符 priority={priority}")
