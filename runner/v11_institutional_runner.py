@@ -452,30 +452,13 @@ def evaluate_symbol(symbol, cfg):
         decision["reason"] = "; ".join(portfolio_reasons) or "组合风控不允许开仓"
         decision["reason_cn"] = decision["reason"]
 
-    if decision.get("approved") and dispatch_strategy_decision and cfg.get("telegram", {}).get("send_approved", False):
-        try:
-            result = dispatch_strategy_decision(snapshot, decision)
-            slog.info(f"[{symbol}] Strategy 消息发送结果: {result}")
-            try:
-                from state.push_diary import push_logger as _pd2
-                _pd2.record(
-                    symbol=symbol, channel="telegram", msg_type="strategy_approved",
-                    direction=direction, score=l_score if direction == "Long" else s_score,
-                    ev=long_ev if direction == "Long" else short_ev, price=price,
-                    msg_preview=str(result)[:120] if result else "sent", status="sent",
-                )
-            except Exception as _pd2_err:
-                slog.error(f"[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
-        except Exception as e:
-            slog.error(f"[{symbol}] Strategy 消息发送异常: {e}")
-    elif decision.get("approved"):
-        slog.info(f"[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")
-    else:
-        slog.info(f"[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
+            # 推送逻辑已剥离到调用方（hf_auto_trader.py），在 V37 Gate 全部通过后才触发。
+    # 避免微信收到 Gate 通过但实际被风控拦截的假警报。
+    slog.info(f"[{symbol}] 决策结果: approved={decision.get('approved')}, reason={decision.get('reason', '未知原因')}")
 
-        slog.info("[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
-              f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
-              f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
+    slog.info(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
+             f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
+             f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
 
     try:
         from state.signal_diary import diary as _sd
