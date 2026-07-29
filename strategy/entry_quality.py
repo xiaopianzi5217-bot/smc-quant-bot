@@ -316,6 +316,20 @@ def grade_entry_quality(context: Optional[Dict[str, Any]] = None, **kwargs: Any)
     if same_div >= 3 and adx >= 42:
         risk_penalty += 8.0
         reasons.append("REPEAT_DIVERGENCE_PENALTY_-8")
+    # ---- Regime 方向一致性检查 ----
+    if direction == "long" and regime == "bear":
+        risk_penalty += 12.0
+        reasons.append("BEAR_LONG_CONFLICT_-12")
+    elif direction == "short" and regime == "bull":
+        risk_penalty += 12.0
+        reasons.append("BULL_SHORT_CONFLICT_-12")
+    # ---- Regime 方向一致性检查 ----
+    if direction == "long" and regime == "bear":
+        risk_penalty += 12.0
+        reasons.append("BEAR_LONG_CONFLICT_-12")
+    elif direction == "short" and regime == "bull":
+        risk_penalty += 12.0
+        reasons.append("BULL_SHORT_CONFLICT_-12")
     if too_extended:
         risk_penalty += 10.0
         reasons.append("TOO_EXTENDED_PENALTY_-10")

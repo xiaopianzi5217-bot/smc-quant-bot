@@ -275,6 +275,8 @@ def init_v6_database():
             sqz_volume_confirmed INTEGER DEFAULT 0,
             mode TEXT DEFAULT 'NORMAL',
             exit_reason TEXT DEFAULT 'OPEN',
+            exit_timestamp REAL DEFAULT NULL,
+            exit_price REAL DEFAULT NULL,
             pnl_r REAL DEFAULT NULL,
             max_forward_r REAL DEFAULT 0.0,
             max_adverse_r REAL DEFAULT 0.0
@@ -342,7 +344,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
             1.0 if bool(sqz_data.get("released", False)) else 0.0,
             int(sqz_data.get("duration", 0)),
             float(sqz_data.get("strength", 0.0)),
-            float(sqz_data.get("vol_ratio", 1.0)),
+            max(1e-8, max(1e-8, float(sqz_data.get("vol_ratio", 1.0)))),
             1.0 if bool(sqz_data.get("volume_confirmed", False)) else 0.0,
             _mode,
         ))
@@ -355,7 +357,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     except Exception as e:
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
-def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0):
+def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: float = None, exit_price: float = None):
     """横向拼接真实结局标签"""
     if not signal_id:
         return
@@ -364,9 +366,9 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE trade_snapshots 
-            SET exit_reason = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
+            SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
             WHERE signal_id = ?
-        """, (exit_reason, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
+        """, (exit_reason, exit_timestamp or int(time.time()), exit_price or 0.0, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
         conn.commit()
         conn.close()
         slog.info(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")

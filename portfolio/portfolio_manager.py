@@ -19,6 +19,7 @@ class Position:
     tp2: float
     tp3: float
     opened_at: str
+    signal_id: str = ""  # 开仓信号ID，用于平仓时更新数据库
     state: str = "OPEN"
     remaining_size: Optional[float] = None
     filled_qty: Optional[float] = None
@@ -113,7 +114,7 @@ class PortfolioManager:
             return False, "同方向持仓过多"
         return True, "允许开仓"
 
-    def add_position(self, symbol, direction, size, plan, order: Optional[Dict[str, Any]] = None):
+    def add_position(self, symbol, direction, size, plan, order: Optional[Dict[str, Any]] = None, signal_id: str = ""):
         order = order or {}
         avg_price = order.get("average") or order.get("avg_fill_price") or order.get("price") or plan.get("entry")
         filled = order.get("filled") or order.get("amount") or size
@@ -125,6 +126,7 @@ class PortfolioManager:
             filled_qty=float(filled),
             avg_fill_price=float(avg_price),
             entry=float(avg_price),
+            signal_id=signal_id or plan.get("signal_id", ""),
             sl=float(plan["sl"]),
             tp1=float(plan["tp1"]),
             tp2=float(plan["tp2"]),
@@ -152,11 +154,17 @@ class PortfolioManager:
         self.save_state()
         return p
 
-    def close_position(self, symbol):
+    def close_position(self, symbol, close_price: float = None):
         p = self.positions.get(symbol)
         if p:
             p.state = "CLOSED"
             p.remaining_size = 0.0
+            if close_price is not None and p.entry != 0:
+                try:
+                    direction_sign = 1.0 if p.direction == "Long" else -1.0
+                    p.realized_r = float((close_price - p.entry) / (p.entry - p.sl) * direction_sign)
+                except Exception:
+                    pass
             p.last_sync_at = self._now()
             self.save_state()
         return p
