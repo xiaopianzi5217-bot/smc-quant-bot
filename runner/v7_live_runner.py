@@ -177,7 +177,7 @@ def run_once(cfg, executor, lifecycle, exchange):
                 try:
                     dispatch_observer_snapshot(snapshot, send_all=bool(tg_cfg.get("send_observer_all", False)))
                 except Exception as e:
-                    slog.error("[{symbol}] Observer顺发消息触发异常: {e}")
+                    slog.error(f"[{symbol}] Observer顺发消息触发异常: {e}")
 
             decision = kernel.decide(
                 curr=curr,
@@ -209,7 +209,7 @@ def run_once(cfg, executor, lifecycle, exchange):
                     try:
                         dispatch_strategy_decision(snapshot, decision)
                     except Exception as e:
-                        slog.error("[{symbol}] Strategy开单提醒触发异常: {e}")
+                        slog.error(f"[{symbol}] Strategy开单提醒触发异常: {e}")
                 result = executor.execute_decision(symbol, decision)
                 mark_strategy_approval(symbol, curr, decision, cfg, exec_ctx=exec_ctx)
             else:

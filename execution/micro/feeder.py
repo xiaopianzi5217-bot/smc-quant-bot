@@ -76,7 +76,7 @@ class MicroFeeder:
             raise ImportError("websockets is required. Run: pip install websockets>=11.0.3")
 
     async def run(self):
-        slog.info("[MicroFeeder] 启动: {self.symbol}")
+        slog.info(f"[MicroFeeder] 启动: {self.symbol}")
         while self._retry_count < RECONNECT_MAX_ATTEMPTS:
             try:
                 async with websockets.connect(
@@ -86,7 +86,7 @@ class MicroFeeder:
                     close_timeout=3,
                     max_size=2**20,   # 1 MB 消息上限
                 ) as ws:
-                    slog.info("[MicroFeeder] Bitget WS 已连接: {self.symbol}")
+                    slog.info(f"[MicroFeeder] Bitget WS 已连接: {self.symbol}")
                     self._retry_count = 0
                     self.state["is_stale"] = True
                     self.state["error_code"] = ""
@@ -156,7 +156,7 @@ class MicroFeeder:
 
             except websockets.exceptions.InvalidStatus as e:
                 # Bitget 返回 HTTP 错误 —— 致命，不重试
-                slog.error("[MicroFeeder] 致命 HTTP 错误: {e.response.status_code}")
+                slog.error(f"[MicroFeeder] 致命 HTTP 错误: {e.response.status_code}")
                 self.state["error_code"] = f"HTTP_{e.response.status_code}"
                 await self._alert_fatal(f"Bitget WS 返回 HTTP {e.response.status_code}")
                 return
@@ -173,7 +173,7 @@ class MicroFeeder:
                 await asyncio.sleep(wait)
 
         # 超过最大重连次数
-        slog.info("[MicroFeeder] 已达到最大重连次数 ({RECONNECT_MAX_ATTEMPTS})，放弃")
+        slog.info(f"[MicroFeeder] 已达到最大重连次数 ({RECONNECT_MAX_ATTEMPTS})，放弃")
         self.state["error_code"] = "MAX_RETRY_EXCEEDED"
         self._cancel_heartbeat()
 
@@ -193,7 +193,7 @@ class MicroFeeder:
                 now = time.time()
                 # 如果超过 HEARTBEAT_TIMEOUT 没有收到任何数据
                 if now - self.state["ts"] > HEARTBEAT_TIMEOUT and self.state["ts"] > 0:
-                    slog.info("[MicroFeeder] 数据静默超时 ({now - self.state['ts']:.0f}s > {HEARTBEAT_TIMEOUT}s)")
+                    slog.info(f"[MicroFeeder] 数据静默超时 ({now - self.state['ts']:.0f}s > {HEARTBEAT_TIMEOUT}s)")
                     self.state["error_code"] = "DATA_SILENT_TIMEOUT"
         except asyncio.CancelledError:
             pass
@@ -239,7 +239,7 @@ class MicroFeeder:
         ]
         if len(self._consecutive_disconnect_log) >= CONSECUTIVE_THRESHOLD:
             extra = CONSECUTIVE_PENALTY
-            slog.info("[MicroFeeder] 连续断连 {len(self._consecutive_disconnect_log)}次/{(CONSECUTIVE_WINDOW/60):.0f}分钟，额外等待{extra:.0f}s")
+            slog.info(f"[MicroFeeder] 连续断连 {len(self._consecutive_disconnect_log)}次/{(CONSECUTIVE_WINDOW/60):.0f}分钟，额外等待{extra:.0f}s")
             return base_wait + extra
         return base_wait
 
@@ -254,7 +254,7 @@ class MicroFeeder:
 
     async def _alert_fatal(self, msg: str):
         """致命错误时发 Telegram 告警并终止"""
-        slog.error("[MicroFeeder] 致命错误: {msg}")
+        slog.error(f"[MicroFeeder] 致命错误: {msg}")
         self.state["is_stale"] = True
         self.state["error_code"] = "FATAL"
         try:
@@ -296,11 +296,11 @@ class MicroFeeder:
             event = data.get("event", "")
             if event == "subscribe":
                 channel = data.get("arg", {}).get("channel", "")
-                slog.info("[MicroFeeder] 订阅成功: {channel}")
+                slog.info(f"[MicroFeeder] 订阅成功: {channel}")
             elif event == "error":
                 code = data.get("code", "")
                 msg_text = data.get("msg", "")
-                slog.error("[MicroFeeder] 订阅错误: code={code} msg={msg_text}")
+                slog.error(f"[MicroFeeder] 订阅错误: code={code} msg={msg_text}")
                 self.state["error_code"] = f"SUB_{code}"
                 # code=40001（签名错误）或 code=429（限流）—— 致命
                 if code in ("40001", "429"):
@@ -343,7 +343,7 @@ class MicroFeeder:
 
             if not self._has_initial_depth:
                 self._has_initial_depth = True
-                slog.info("[MicroFeeder] 深度初始快照已接收: OBI={self.state['obi']:.4f}")
+                slog.info(f"[MicroFeeder] 深度初始快照已接收: OBI={self.state['obi']:.4f}")
 
     def _handle_trade(self, data_list: list):
         for trade in data_list:

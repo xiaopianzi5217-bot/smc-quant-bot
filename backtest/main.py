@@ -101,7 +101,7 @@ def main() -> None:
         max_rows=args.max_rows,
         min_score=args.min_score,
     )
-    slog.info("\n[系统] 回测数据已保存: {trades_path}")
+    slog.info(f"\n[系统] 回测数据已保存: {trades_path}")
     print("\n===== 回测摘要 (V56.5) =====")
     print(summarize_backtest(trades_path))
 

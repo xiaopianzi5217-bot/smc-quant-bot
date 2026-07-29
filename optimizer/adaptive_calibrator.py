@@ -186,10 +186,10 @@ def auto_calibrate(
                 best_params = {"threshold": th, "min_rr": rr_val}
                 best_result = result
     
-    slog.info("[自适应] 当前: threshold={current_threshold} min_rr={current_min_rr} ")
-          f"Sharpe={current_result['sharpe']} n={current_result['n']}")
-    slog.info("[自适应] 最优: threshold={best_params['threshold']} min_rr={best_params['min_rr']} ")
-          f"Sharpe={best_result['sharpe']} n={best_result['n']}")
+    slog.info(f"[自适应] 当前: threshold={current_threshold} min_rr={current_min_rr} "
+              f"Sharpe={current_result['sharpe']} n={current_result['n']}")
+    slog.info(f"[自适应] 最优: threshold={best_params['threshold']} min_rr={best_params['min_rr']} "
+              f"Sharpe={best_result['sharpe']} n={best_result['n']}")
     
     return {
         "threshold": best_params["threshold"],
@@ -301,8 +301,8 @@ def run_auto_calibrate(
 if __name__ == "__main__":
     result = run_auto_calibrate()
     print(f"\n=== 自适应调参结果 ===")
-    slog.info("score_threshold: {result['current_score']['n']}笔 → {result['optimized_score']['n']}笔")
+    slog.info(f"score_threshold: {result['current_score']['n']}笔 → {result['optimized_score']['n']}笔")
     print(f"当前: th={result.get('threshold','?')} min_rr={result.get('min_rr','?')}")
     if "improvement" in result:
         imp = result["improvement"]
-        slog.info("提升: Sharpe {imp['sharpe_delta']:+.4f} | WinRate {imp['win_rate_delta']:+.4f} | AvgR {imp['avg_r_delta']:+.4f}")
+        slog.info(f"提升: Sharpe {imp['sharpe_delta']:+.4f} | WinRate {imp['win_rate_delta']:+.4f} | AvgR {imp['avg_r_delta']:+.4f}")

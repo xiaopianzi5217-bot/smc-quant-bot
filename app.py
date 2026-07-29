@@ -470,9 +470,9 @@ def build_local_snapshot_and_decision(symbol):
             'current_sl': sl,
             'stage': 0
         }
-        slog.info("[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
+        slog.info(f"[{symbol}] V37 Gate 通过 | size_mult={size_mult} | 开单信号已推送")
     else:
-        slog.info("[{symbol}] V37 Gate 拦截: {reason}")
+        slog.info(f"[{symbol}] V37 Gate 拦截: {reason}")
 
     return snapshot, decision, source
 
@@ -528,7 +528,7 @@ def background_monitor_worker():
                 try:
                     position_reconciler.periodic_check(min_interval_sec=100.0)
                 except Exception as _re:
-                    slog.error("[Monitor] reconciler 异常: {_re}")
+                    slog.error(f"[Monitor] reconciler 异常: {_re}")
             # 1. 灾难自愈检测 (没必要每5秒查一次，每12次即60秒查一次即可)
             if loop_count % 12 == 0:
                 if not health_monitor.is_healthy():
@@ -568,7 +568,7 @@ def background_monitor_worker():
                     try:
                         position_manager.update(sym, dict(pos))
                     except Exception as _pm_e:
-                        slog.error("[Monitor] position_manager 回写失败: {_pm_e}")
+                        slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
                 elif action_plan['action'] == 'TRAIL_ONLY' and abs(pos['current_sl'] - action_plan['new_sl']) > curr_price * 0.001:
                     pos['current_sl'] = action_plan['new_sl']
@@ -577,7 +577,7 @@ def background_monitor_worker():
                     try:
                         position_manager.update(sym, dict(pos))
                     except Exception as _pm_e:
-                        slog.error("[Monitor] position_manager 回写失败: {_pm_e}")
+                        slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
         except Exception as e:
             print(f"后台线程异常: {e}")
@@ -656,7 +656,7 @@ def _start_hf_auto_trader():
         import ccxt as _ccxt
         _ccxt  # noqa: 只是验证导入成功
     except Exception as exc:
-        slog.error("[HF] ccxt 导入失败 (非致命): {exc}")
+        slog.error(f"[HF] ccxt 导入失败 (非致命): {exc}")
 
     try:
         import hf_auto_trader
@@ -669,7 +669,7 @@ def _start_hf_auto_trader():
             init_v6_database()
             slog.info("[V6 DataEngine] trade_snapshots 数据库表已就绪")
         except Exception as _db_e:
-            slog.error("[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
+            slog.error(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
 
         async def _run_async_main():
             _feeder = None
@@ -686,19 +686,19 @@ def _start_hf_auto_trader():
                     for i, res in enumerate(results):
                         if isinstance(res, Exception):
                             name = "_feeder.run()" if i == 0 else "hf_auto_trader.main_loop()"
-                            slog.error("[Feeder] {name} 异常: {res}")
+                            slog.error(f"[Feeder] {name} 异常: {res}")
                             _tb.print_exc()
                 else:
                     await hf_auto_trader.main_loop()
             except Exception as e:
-                slog.info("[hf_auto_trader] 主循环崩溃: {e}")
+                slog.info(f"[hf_auto_trader] 主循环崩溃: {e}")
                 _tb.print_exc()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run_async_main())
     except Exception as e:
-        slog.error("[HF] 自动扫描启动失败: {e}")
+        slog.error(f"[HF] 自动扫描启动失败: {e}")
         _tb.print_exc()
 
 

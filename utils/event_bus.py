@@ -22,7 +22,7 @@ def emit(event_name: str, *args: Any, **kwargs: Any) -> None:
         try:
             handler(*args, **kwargs)
         except Exception as exc:
-            slog.error("[EventBus] 事件处理器失败: {event_name} -> {exc}")
+            slog.error(f"[EventBus] 事件处理器失败: {event_name} -> {exc}")
 
 
 def clear(event_name: str | None = None) -> None:

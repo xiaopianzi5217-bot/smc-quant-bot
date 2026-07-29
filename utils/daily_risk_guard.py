@@ -66,16 +66,16 @@ class DailyRiskGuard:
             return True
 
         if self.daily_loss_r <= -3.0:
-            slog.info("[DailyRiskGuard] 拦截：单日亏损 {self.daily_loss_r:.2f}R <= -3R")
+            slog.info(f"[DailyRiskGuard] 拦截：单日亏损 {self.daily_loss_r:.2f}R <= -3R")
             return False
         if self.trade_count >= 6:
-            slog.info("[DailyRiskGuard] 拦截：当日已交易 {self.trade_count} 次 >= 6")
+            slog.info(f"[DailyRiskGuard] 拦截：当日已交易 {self.trade_count} 次 >= 6")
             return False
         if self.consecutive_loss >= 3:
-            slog.info("[DailyRiskGuard] 拦截：连续亏损 {self.consecutive_loss} 笔 >= 3")
+            slog.info(f"[DailyRiskGuard] 拦截：连续亏损 {self.consecutive_loss} 笔 >= 3")
             return False
         if self.max_drawdown >= 0.05:
-            slog.info("[DailyRiskGuard] 拦截：当日最大回撤 {self.max_drawdown:.2%} >= 5%")
+            slog.info(f"[DailyRiskGuard] 拦截：当日最大回撤 {self.max_drawdown:.2%} >= 5%")
             return False
         return True
 
@@ -116,4 +116,4 @@ class DailyRiskGuard:
             with open(self.save_path, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            slog.error("[DailyRiskGuard] 保存失败: {e}")
+            slog.error(f"[DailyRiskGuard] 保存失败: {e}")

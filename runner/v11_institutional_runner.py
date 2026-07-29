@@ -134,15 +134,15 @@ def evaluate_symbol(symbol, cfg):
         # 分别获取 exec 和 macro 数据，各自处理失败情况
         try:
             df_exec = add_all_indicators(fetch_live_ohlcv(symbol, cfg.get("exec_timeframe", "15m"), 320), wvf)
-            slog.info("[{symbol}] 使用真实数据 (exec)")
+            slog.info(f"[{symbol}] 使用真实数据 (exec)")
         except Exception as e:
-            slog.error("[{symbol}] exec 数据获取失败: {e}，回退到模拟数据")
+            slog.error(f"[{symbol}] exec 数据获取失败: {e}，回退到模拟数据")
             df_exec = add_all_indicators(make_sample_ohlcv(start=100.0), wvf)
         try:
             df_macro = add_all_indicators(fetch_live_ohlcv(symbol, cfg.get("macro_timeframe", "1h"), 320), wvf)
-            slog.info("[{symbol}] 使用真实数据 (macro)")
+            slog.info(f"[{symbol}] 使用真实数据 (macro)")
         except Exception as e:
-            slog.error("[{symbol}] macro 数据获取失败: {e}，回退到模拟数据")
+            slog.error(f"[{symbol}] macro 数据获取失败: {e}，回退到模拟数据")
             df_macro = add_all_indicators(make_sample_ohlcv(start=102.0), wvf)
     else:
         df_exec = add_all_indicators(make_sample_ohlcv(start=100.0), wvf)
@@ -320,20 +320,20 @@ def evaluate_symbol(symbol, cfg):
     )
 
     tg_cfg = cfg.get("telegram", {})
-    slog.info("[{symbol}] Telegram 配置: send_observer={tg_cfg.get('send_observer', False)}, send_approved={tg_cfg.get('send_approved', False)}")
+    slog.info(f"[{symbol}] Telegram 配置: send_observer={tg_cfg.get('send_observer', False)}, send_approved={tg_cfg.get('send_approved', False)}")
     observer_sent = False
     if dispatch_observer_snapshot and tg_cfg.get("send_observer", False):
         try:
             result = dispatch_observer_snapshot(snapshot, send_all=bool(tg_cfg.get("send_observer_all", False)))
-            slog.info("[{symbol}] Observer 消息发送结果: {result}")
+            slog.info(f"[{symbol}] Observer 消息发送结果: {result}")
             observer_sent = True
         except Exception as e:
-            slog.error("[{symbol}] Observer顺发消息触发异常: {e}")
+            slog.error(f"[{symbol}] Observer顺发消息触发异常: {e}")
     else:
         if not dispatch_observer_snapshot:
-            slog.error("[{symbol}] dispatch_observer_snapshot 不可用 (导入失败)")
+            slog.error(f"[{symbol}] dispatch_observer_snapshot 不可用 (导入失败)")
         if not tg_cfg.get("send_observer", False):
-            slog.warning("[{symbol}] send_observer 配置为 False，跳过 Observer 消息")
+            slog.warning(f"[{symbol}] send_observer 配置为 False，跳过 Observer 消息")
 
     # 记录 Observer 推送日记
     try:
@@ -346,7 +346,7 @@ def evaluate_symbol(symbol, cfg):
             reason="" if observer_sent else ("dispatch_unavailable" if not dispatch_observer_snapshot else "no_structural_change"),
                 )
     except Exception as _pd_err:
-        slog.error("[{symbol}] PushDiary observer 记录失败: {_pd_err}")
+        slog.error(f"[{symbol}] PushDiary observer 记录失败: {_pd_err}")
 
             # ===== V56.5 质量门：前置过滤假信号（在 V9 决策之前拦截弱信号） =====
     # 如果门禁启用且信号未通过，直接 return HOLD，不走 V9 决策流程
@@ -366,7 +366,7 @@ def evaluate_symbol(symbol, cfg):
         }
         _gate_passed, _gate_reason, _gate_meta = v565_quality_gate(_gate_row, _v565_cfg)
         if not _gate_passed:
-            slog.info("[{symbol}] V56.5 质量门拦截: {_gate_reason} (score={_score_for_gate:.1f}, ev={_ev_for_gate:.4f})")
+            slog.info(f"[{symbol}] V56.5 质量门拦截: {_gate_reason} (score={_score_for_gate:.1f}, ev={_ev_for_gate:.4f})")
             decision = {
                 "symbol": symbol, "approved": False, "decision_approved": False, "is_approved": False,
                 "action": "HOLD", "side": "NONE", "state": "V565_GATE_BLOCKED",
@@ -455,7 +455,7 @@ def evaluate_symbol(symbol, cfg):
     if decision.get("approved") and dispatch_strategy_decision and cfg.get("telegram", {}).get("send_approved", False):
         try:
             result = dispatch_strategy_decision(snapshot, decision)
-            slog.info("[{symbol}] Strategy 消息发送结果: {result}")
+            slog.info(f"[{symbol}] Strategy 消息发送结果: {result}")
             try:
                 from state.push_diary import push_logger as _pd2
                 _pd2.record(
@@ -465,13 +465,13 @@ def evaluate_symbol(symbol, cfg):
                     msg_preview=str(result)[:120] if result else "sent", status="sent",
                 )
             except Exception as _pd2_err:
-                slog.error("[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
+                slog.error(f"[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
         except Exception as e:
-            slog.error("[{symbol}] Strategy 消息发送异常: {e}")
+            slog.error(f"[{symbol}] Strategy 消息发送异常: {e}")
     elif decision.get("approved"):
-        slog.info("[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")
+        slog.info(f"[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")
     else:
-        slog.info("[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
+        slog.info(f"[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
 
         slog.info("[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
               f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
@@ -501,7 +501,7 @@ def evaluate_symbol(symbol, cfg):
             long_score_raw=l_score, short_score_raw=s_score,
         )
     except Exception as _sd_err:
-        slog.error("[{symbol}] SignalDiary 记录失败: {_sd_err}")
+        slog.error(f"[{symbol}] SignalDiary 记录失败: {_sd_err}")
 
     marked = mark_strategy_approval({
         "symbol": symbol, "curr": curr, "macro_ctx": macro_ctx,
@@ -530,7 +530,7 @@ def evaluate_symbol(symbol, cfg):
                 "hour": __import__("datetime").datetime.now().hour,
             })
         except Exception as _fs_err:
-            slog.error("[{symbol}] FeatureStore 写入失败: {_fs_err}")
+            slog.error(f"[{symbol}] FeatureStore 写入失败: {_fs_err}")
 
         try:
             from state.trade_journal import journal as _tj
@@ -542,7 +542,7 @@ def evaluate_symbol(symbol, cfg):
                 note=f"adx={round(float(curr.get('adx',0)),1)} atr={round(atr,1)} vol_ratio={round(volume_ratio,2)}",
             )
         except Exception as _tj_err:
-            slog.error("[{symbol}] TradeJournal 写入失败: {_tj_err}")
+            slog.error(f"[{symbol}] TradeJournal 写入失败: {_tj_err}")
 
         try:
             from strategy.intelligence_engine import ev_learner
@@ -622,9 +622,9 @@ def _trigger_adaptive_calibrate():
             from optimizer.adaptive_calibrator import run_auto_calibrate
             result = run_auto_calibrate()
             if result.get("note") == "CALIBRATED":
-                slog.info("[自适应] 参数已优化: threshold={result['threshold']}, min_rr={result['min_rr']}")
+                slog.info(f"[自适应] 参数已优化: threshold={result['threshold']}, min_rr={result['min_rr']}")
         except Exception as e:
-            slog.error("[自适应] 调参异常: {e}")
+            slog.error(f"[自适应] 调参异常: {e}")
 
 
 def _append_csv_log(results, cfg):
@@ -687,7 +687,7 @@ def _append_csv_log(results, cfg):
                 "reason": r.get("reason", ""),
             }
             writer.writerow(row)
-    slog.info("  [CSV] 日志已追加: {log_path} ({len(results)} 条)")
+    slog.info(f"  [CSV] 日志已追加: {log_path} ({len(results)} 条)")
 
 
 def main():

@@ -64,7 +64,7 @@ class FeatureLearningEngine:
                     self.weights = data
                     return
             except Exception as e:
-                slog.error("[FeatureLearningEngine] 加载失败: {e}")
+                slog.error(f"[FeatureLearningEngine] 加载失败: {e}")
         self.weights = self.default_weights.copy()
         self._save()
 
@@ -75,7 +75,7 @@ class FeatureLearningEngine:
                 encoding="utf-8"
             )
         except Exception as e:
-            slog.error("[FeatureLearningEngine] 保存失败: {e}")
+            slog.error(f"[FeatureLearningEngine] 保存失败: {e}")
 
     # ------------------------------------------------------------------
     # 公开接口

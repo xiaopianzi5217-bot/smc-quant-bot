@@ -85,7 +85,7 @@ class RejectAudit:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
-            slog.error("[RejectAudit] 写入日志失败: {e}")
+            slog.error(f"[RejectAudit] 写入日志失败: {e}")
 
     # ──────────────── 查询 / 统计 ────────────────
 

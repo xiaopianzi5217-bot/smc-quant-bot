@@ -13,7 +13,7 @@ def send_telegram(message: str) -> bool:
         try:
             resp = requests.post(f"{base}/bot{TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": str(message), "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=8)
             if resp.status_code == 200 and resp.json().get("ok"): return True
-            slog.error("[TG] send failed: {resp.status_code} {resp.text[:200]}")
+            slog.error(f"[TG] send failed: {resp.status_code} {resp.text[:200]}")
         except Exception as exc: print(f"[TG] send error via {base}: {exc}")
     return False
 

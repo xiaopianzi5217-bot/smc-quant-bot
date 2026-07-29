@@ -159,9 +159,9 @@ if _bucket_ev_path.exists():
     try:
         _buckets = json.loads(_bucket_ev_path.read_text(encoding="utf-8"))
         _V56_ENGINE.load_history_buckets(_buckets)
-        slog.info("[V56_5_Engine] 加载回测 bucket_ev 成功 ({len(_buckets)} 个分桶), 来自 {_bucket_ev_path}")
+        slog.info(f"[V56_5_Engine] 加载回测 bucket_ev 成功 ({len(_buckets)} 个分桶), 来自 {_bucket_ev_path}")
     except Exception as e:
-        slog.error("[V56_5_Engine] 加载 bucket_ev 失败: {e}")
+        slog.error(f"[V56_5_Engine] 加载 bucket_ev 失败: {e}")
 
 def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: float, future_df: 'pd.DataFrame | None',
                     max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
@@ -271,11 +271,11 @@ def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: 
 
 def _check_cooldown(symbol):
     if signal_deduper.is_sl_cooled(symbol):
-        slog.warning("[{symbol}] cooling skip (deduper SL)")
+        slog.warning(f"[{symbol}] cooling skip (deduper SL)")
         return False
     last = _last_stop_loss_time.get(symbol, 0)
     if time.time() - last < STOP_LOSS_COOLDOWN:
-        slog.warning("[{symbol}] cooling skip")
+        slog.warning(f"[{symbol}] cooling skip")
         return False
     return True
 
@@ -361,7 +361,7 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
         msg = msg + _ts_suffix
 
     if priority in ("TRADE", "SYSTEM"):
-        slog.info("[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
+        slog.info(f"[safe_send] {priority} 消息直发，无限流: {msg[:80]}")
     else:
         # 1) 从消息里抽一个粗事件 key，避免同类刷屏
         _key = "OBSERVER"
@@ -374,13 +374,13 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
 
         _last_same = _OBSERVER_LAST_BY_KEY.get(_key, 0.0)
         if now - _last_same < OBSERVER_EVENT_COOLDOWN:
-            slog.warning("[safe_send] OBSERVER 同类限流 {_key} {now - _last_same:.0f}s < {OBSERVER_EVENT_COOLDOWN}s")
+            slog.warning(f"[safe_send] OBSERVER 同类限流 {_key} {now - _last_same:.0f}s < {OBSERVER_EVENT_COOLDOWN}s")
             return "RATELIMITED_EVENT"
 
         # 2) 短窗口爆发上限（同轮多事件可发，但不超过 BURST_MAX）
         _OBSERVER_BURST_TIMES = [t for t in _OBSERVER_BURST_TIMES if now - t < OBSERVER_BURST_WINDOW]
         if len(_OBSERVER_BURST_TIMES) >= OBSERVER_BURST_MAX:
-            slog.info("[safe_send] OBSERVER 爆发限流 {len(_OBSERVER_BURST_TIMES)}/{OBSERVER_BURST_MAX} in {OBSERVER_BURST_WINDOW}s")
+            slog.info(f"[safe_send] OBSERVER 爆发限流 {len(_OBSERVER_BURST_TIMES)}/{OBSERVER_BURST_MAX} in {OBSERVER_BURST_WINDOW}s")
             return "RATELIMITED_BURST"
 
         _OBSERVER_LAST_BY_KEY[_key] = now
@@ -388,12 +388,12 @@ def safe_send(msg: str, priority: str = "AUTO") -> str:
         _LAST_SAFE_SEND_TIME = now
 
     try:
-        slog.info("[safe_send] 开始推送，消息长度: {len(msg)} 字符 priority={priority}")
+        slog.info(f"[safe_send] 开始推送，消息长度: {len(msg)} 字符 priority={priority}")
         result = send_telegram(msg)
-        slog.info("[safe_send] 推送完成: {result[:100] if result else 'None'}")
+        slog.info(f"[safe_send] 推送完成: {result[:100] if result else 'None'}")
         return result
     except Exception as e:
-        slog.error("[safe_send] 推送异常: {e}")
+        slog.error(f"[safe_send] 推送异常: {e}")
         traceback.print_exc()
         return traceback.format_exc()
 
@@ -491,7 +491,7 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320) -> 
         if attempt < 2:
             await asyncio.sleep(1.5)
             
-    slog.error("[{symbol}] 3次重试均失败")
+    slog.error(f"[{symbol}] 3次重试均失败")
     return None
 
 async def scan_and_decide(symbol: str) -> dict | None:
@@ -503,7 +503,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     
     df_exec = exec_result
     if df_exec is None or len(df_exec) < 100:
-        slog.warning("[{symbol}] 数据不足，跳过")
+        slog.warning(f"[{symbol}] 数据不足，跳过")
         get_reject_audit().log(
             symbol, "DATA_INSUFFICIENT_EXEC",
             score=0.0, ev=0.0, regime="unknown",
@@ -514,13 +514,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
     # 诊断：确认真实行情是否在更新（避免静默卡在固定历史数据）
     try:
         _last_ts = df_exec["datetime"].iloc[-1] if "datetime" in df_exec.columns else df_exec.index[-1]
-        slog.info("[{symbol}] 最新K线时间: {_last_ts} | bars={len(df_exec)}")
+        slog.info(f"[{symbol}] 最新K线时间: {_last_ts} | bars={len(df_exec)}")
     except Exception:
-        slog.info("[{symbol}] 最新K线时间: (无法解析) | bars={len(df_exec)}")
+        slog.info(f"[{symbol}] 最新K线时间: (无法解析) | bars={len(df_exec)}")
 
     df_macro = macro_result
     if df_macro is None or len(df_macro) < 50:
-        slog.info("[{symbol}] ⚠️ macro 数据不足，临时使用 sample OHLCV（仅兜底，不应用于正式评估）")
+        slog.info(f"[{symbol}] ⚠️ macro 数据不足，临时使用 sample OHLCV（仅兜底，不应用于正式评估）")
         df_macro = make_sample_ohlcv(start=102.0)
 
     # ===== V56.5 唯一决策管线（使用预加载回测 bucket_ev 的 Engine）=====
@@ -529,7 +529,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
 
     df_v56 = add_v56_indicators(load_ohlcv(df_exec))
     if df_v56 is None or len(df_v56) < 260:
-        slog.info("[{symbol}] V56 指标计算后数据不足")
+        slog.info(f"[{symbol}] V56 指标计算后数据不足")
         get_reject_audit().log(
             symbol, "DATA_INSUFFICIENT_V56",
             score=0.0, ev=0.0, regime="unknown",
@@ -542,7 +542,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     from analytics.daily_report import daily_report
     daily_report.record_candidate()
     if candidates is None or candidates.empty:
-        slog.info("[{symbol}] V56.5 引擎无候选信号")
+        slog.info(f"[{symbol}] V56.5 引擎无候选信号")
         get_reject_audit().log(
             symbol, "NO_CANDIDATES",
             score=0.0, ev=0.0, regime="unknown",
@@ -563,7 +563,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
             f"last_idx={last_idx} | 窗口阈值: idx>={recent_threshold} (lookback={LOOKBACK_CANDLES})"
         )
         candidates = candidates[candidates["idx"] >= recent_threshold].copy()
-        slog.info("[{symbol}] 🔍 正在扫描候选信号... 限制窗口至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
+        slog.info(f"[{symbol}] 🔍 正在扫描候选信号... 限制窗口至最新 {LOOKBACK_CANDLES} 根K线: idx>={recent_threshold}")
         if candidates.empty:
             print(
                 f"[{symbol}] 仅历史信号存在，跳过本轮扫描 "
@@ -588,27 +588,27 @@ async def scan_and_decide(symbol: str) -> dict | None:
         for _, signal in candidates.iterrows():
             sig_id = _candidate_signal_id(signal)
             if sig_id in seen_signal_ids or _is_signal_processed(sig_id):
-                slog.warning("[{symbol}] 信号 {sig_id} 之前已执行过，跳过排重。")
+                slog.warning(f"[{symbol}] 信号 {sig_id} 之前已执行过，跳过排重。")
                 continue
             seen_signal_ids.add(sig_id)
             deduped_rows.append(signal)
 
         candidates = pd.DataFrame(deduped_rows, columns=candidates.columns) if deduped_rows else pd.DataFrame(columns=candidates.columns)
         if candidates.empty:
-            slog.warning("[{symbol}] 排重后无有效候选信号，跳过本轮扫描")
+            slog.warning(f"[{symbol}] 排重后无有效候选信号，跳过本轮扫描")
             get_reject_audit().log(
                 symbol, "DEDUPED_EMPTY",
                 score=0.0, ev=0.0, regime="unknown",
             )
             return None
 
-    slog.info("[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
+    slog.info(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
 
     # 检查是否有 bucket_ev 列
     if "bucket_ev" in candidates.columns:
         _has_bucket = (candidates["bucket_ev"] != candidates["model_ev"]).sum()
         if _has_bucket > 0:
-            slog.info("[{symbol}] bucket_ev 生效: {_has_bucket}/{len(candidates)} 个信号使用历史分桶 EV")
+            slog.info(f"[{symbol}] bucket_ev 生效: {_has_bucket}/{len(candidates)} 个信号使用历史分桶 EV")
     
     # 注入 exec_ctx 的 SMC 结构信息（原 V37 的 build_exec_context）
     df_exec = add_all_indicators(df_exec, STRATEGY_PARAMS["wvf_std_mult"])
@@ -621,7 +621,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     trades = _V56_ENGINE.select_trades(candidates)
     
     if trades is None or trades.empty:
-        slog.info("[{symbol}] V56.5 选择后无交易")
+        slog.info(f"[{symbol}] V56.5 选择后无交易")
         # ── Observer-only 返回：即使无交易，也推送结构事件 ──
         curr = df_exec.iloc[-1]
         regime_name = str(get_htf_regime_filter().analyze(df_macro).get("regime", "UNKNOWN")).upper().strip()
@@ -661,14 +661,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
             "_is_observer_only": True,
         }
     else:
-        slog.info("[{symbol}] V56.5 执行后产生 {len(trades)} 笔交易")
+        slog.info(f"[{symbol}] V56.5 执行后产生 {len(trades)} 笔交易")
     
     # 取最高 score 的交易作为本次推送
     best = trades.sort_values("score", ascending=False).iloc[0]
     
     direction = best.get("direction", None)
     if not direction:
-        slog.info("[{symbol}] 无有效方向")
+        slog.info(f"[{symbol}] 无有效方向")
         get_reject_audit().log(
             symbol, "NO_DIRECTION",
             score=float(best.get("score", 0)), ev=float(best.get("model_ev", 0)),
@@ -710,7 +710,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         if _adx_check < 18:
             # mud + 极低ADX：原则上不交易
             if not _strong_exception:
-                slog.warning("[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 无强共振例外, 跳过")
+                slog.warning(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 无强共振例外, 跳过")
                 get_reject_audit().log(
                     symbol, "MUD_HARD_BLOCK",
                     score=score, ev=ev, regime=_regime_raw,
@@ -722,17 +722,17 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 return None
             else:
                 # 有强共振例外 → 大幅降仓标记
-                slog.info("[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 有强共振例外, 标记降仓")
+                slog.info(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 18, 有强共振例外, 标记降仓")
                 _mud_cut_override = 0.3  # 仓位降至 30%
         elif _adx_check < 25:
-            slog.info("[{symbol}] Mud regime + ADX={_adx_check:.1f} < 25, 中等风险, 标记降仓")
+            slog.info(f"[{symbol}] Mud regime + ADX={_adx_check:.1f} < 25, 中等风险, 标记降仓")
             _mud_cut_override = 0.5
         else:
-            slog.info("[{symbol}] Mud regime 但 ADX={_adx_check:.1f} >= 25, 允许交易")
+            slog.info(f"[{symbol}] Mud regime 但 ADX={_adx_check:.1f} >= 25, 允许交易")
 
     # ===== 【安全校验】重算后的 SL 方向合理性 =====
     if direction == "Long" and sl > entry_price:
-        slog.error("[{symbol}] SL方向异常(重算后): Long SL({sl:.2f}) > 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
+        slog.error(f"[{symbol}] SL方向异常(重算后): Long SL({sl:.2f}) > 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
         get_reject_audit().log(
             symbol, "SL_DIRECTION_INVALID",
             score=score, ev=ev, regime=_regime_raw,
@@ -741,7 +741,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         )
         return None
     if direction == "Short" and sl < entry_price:
-        slog.error("[{symbol}] SL方向异常(重算后): Short SL({sl:.2f}) < 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
+        slog.error(f"[{symbol}] SL方向异常(重算后): Short SL({sl:.2f}) < 入场({entry_price:.2f}), atr={_atr_val:.2f} 异常小, 跳过")
         get_reject_audit().log(
             symbol, "SL_DIRECTION_INVALID",
             score=score, ev=ev, regime=_regime_raw,
@@ -785,10 +785,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 direction=direction or "", setup_type=str(best.get("setup_type","")),
                 extra={"candle_color": _candle_color, "adx": _candle_adx, "has_bot_div": _has_bot_div, "sqz_white_long": _sqz_white_long, "has_fe_bottom": _has_fe_bottom},
             )
-            slog.warning("[{symbol}] 方向不一致: Long 但 K线红色(看跌) ADX={_candle_adx:.1f}(强趋势), 无底部反转信号, 跳过")
+            slog.warning(f"[{symbol}] 方向不一致: Long 但 K线红色(看跌) ADX={_candle_adx:.1f}(强趋势), 无底部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
-            slog.info("[{symbol}] 方向风险: Long 但 K线红色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
+            slog.info(f"[{symbol}] 方向风险: Long 但 K线红色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
             score *= 0.7  # 红K+强趋势下做多评分打7折
         # 蓝色K线(看涨) + ADX>=25 = 强上涨趋势，此时做空需要顶背离/白线反转/FE摸顶之一
     if direction == "Short" and ("蓝" in _candle_color or "blue" in _candle_color.lower() or "bull" in _candle_color.lower()):
@@ -799,10 +799,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 direction=direction or "", setup_type=str(best.get("setup_type","")),
                 extra={"candle_color": _candle_color, "adx": _candle_adx, "has_top_div": _has_top_div, "sqz_white_short": _sqz_white_short, "has_fe_top": _has_fe_top},
             )
-            slog.warning("[{symbol}] 方向不一致: Short 但 K线蓝色(看涨) ADX={_candle_adx:.1f}(强趋势), 无顶部反转信号, 跳过")
+            slog.warning(f"[{symbol}] 方向不一致: Short 但 K线蓝色(看涨) ADX={_candle_adx:.1f}(强趋势), 无顶部反转信号, 跳过")
             return None
         elif _candle_adx >= 30:
-            slog.info("[{symbol}] 方向风险: Short 但 K线蓝色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
+            slog.info(f"[{symbol}] 方向风险: Short 但 K线蓝色 ADX={_candle_adx:.1f}(强趋势), 继续但降低评分")
             score *= 0.7
     
     slog.info(f"[{symbol}] V56.5 选定: {direction} score={score:.1f} ev={ev:.4f} setup={best.get('setup_type','?')} price={entry_price:.2f}")
@@ -817,13 +817,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _htf_state = get_htf_regime_filter().analyze(df_macro)
     result_htf_blocked = False
     if direction == "Long" and not _htf_state["allow_long"]:
-        slog.info("[{symbol}] HTF Regime 拦截 Long: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
+        slog.info(f"[{symbol}] HTF Regime 拦截 Long: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
         result_htf_blocked = True
     elif direction == "Short" and not _htf_state["allow_short"]:
-        slog.info("[{symbol}] HTF Regime 拦截 Short: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
+        slog.info(f"[{symbol}] HTF Regime 拦截 Short: 1H 方向={_htf_state['regime']} (EMA50={_htf_state.get('ema_fast')}, EMA200={_htf_state.get('ema_slow')})")
         result_htf_blocked = True
     else:
-        slog.info("[{symbol}] HTF Regime 通过: 1H={_htf_state['regime']}, allow_long={_htf_state['allow_long']}, allow_short={_htf_state['allow_short']}")
+        slog.info(f"[{symbol}] HTF Regime 通过: 1H={_htf_state['regime']}, allow_long={_htf_state['allow_long']}, allow_short={_htf_state['allow_short']}")
 
         # ===== 【特征收集 - 用于优化4/5】构建特征字典 =====
     # 【修复20260726】注入 regime 信息，让 feature_penalty 能做 regime-aware 惩罚
@@ -857,7 +857,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         # ===== 【优化5 - Statistical EV】混合历史EV =====
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
     if _blended_ev != ev:
-        slog.info("[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
+        slog.info(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
     # ===== 【闭环】ProbabilityCalibrator 校准评分 -> EV + Confidence (含regime校准+样本置信) =====
     _calibrated_prob = _calibrator.get_prob(score)
     _calibrated_prob = round(_calibrated_prob, 4)
@@ -884,10 +884,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
         slog.info(f"[{symbol}] ML引擎: P(win)={_ml_prob:.3f} EV={_ml_ev:.4f} conf={_ml_conf:.3f} score={_ml_score:.1f}")
         # 如果 ML 概率 < 0.45，标记低置信度
         if _ml_prob < 0.45:
-            slog.info("[{symbol}] ML引擎 低概率: {_ml_prob:.3f} < 0.45, 标记降仓")
+            slog.info(f"[{symbol}] ML引擎 低概率: {_ml_prob:.3f} < 0.45, 标记降仓")
             _mud_cut_override = min(_mud_cut_override, 0.5)
     else:
-        slog.info("[{symbol}] ML引擎: 降级模式(人工权重) score={_ml_score:.1f}")
+        slog.info(f"[{symbol}] ML引擎: 降级模式(人工权重) score={_ml_score:.1f}")
 
     # ===== 【闭环】FeedbackLoop 信号评估 =====
     _fb_features, _fb_raw_scores = _feedback.get_signal_features(
@@ -1171,7 +1171,7 @@ def _new_observer_events(symbol: str, events: list) -> list:
             # 对于连续状态类型，记录本次推送时间为周期性汇总的起点
             if ev_type in _CONTINUOUS_TYPES:
                 periodic_last[ev_type] = now
-            slog.info("[{symbol}] Observer 事件触发: {key} (首次)")
+            slog.info(f"[{symbol}] Observer 事件触发: {key} (首次)")
         else:
             # 事件持续存在
             # 如果是一类事件：仅首次推送过就不再重复（除非消失后重新出现）
@@ -1183,7 +1183,7 @@ def _new_observer_events(symbol: str, events: list) -> list:
                     # 推送标记丢失但 active 还在，补推一次
                     pushed[key] = True
                     new_events.append(ev)
-                    slog.info("[{symbol}] Observer 事件补推: {key}")
+                    slog.info(f"[{symbol}] Observer 事件补推: {key}")
             elif ev_type in _CONTINUOUS_TYPES:
                 # 连续状态类型：每 OBSERVER_PERIODIC_INTERVAL 秒汇总一次
                 if pushed.get(key, False):
@@ -1192,7 +1192,7 @@ def _new_observer_events(symbol: str, events: list) -> list:
                         ev["is_periodic_summary"] = True
                         new_events.append(ev)
                         periodic_last[ev_type] = now
-                        slog.info("[{symbol}] Observer 状态持续汇总: {key} ({OBSERVER_PERIODIC_INTERVAL//60}min)")
+                        slog.info(f"[{symbol}] Observer 状态持续汇总: {key} ({OBSERVER_PERIODIC_INTERVAL//60}min)")
                 else:
                     # 推送标记丢失但 active 还在
                     pushed[key] = True
@@ -1209,7 +1209,7 @@ def _new_observer_events(symbol: str, events: list) -> list:
             was_active = active.pop(key, False)
             pushed.pop(key, None)
             if was_active:
-                slog.info("[{symbol}] Observer 事件消失: {key}")
+                slog.info(f"[{symbol}] Observer 事件消失: {key}")
 
     # 4) 对于未激活的事件（不在 current_keys），确保推送标记也清除
     for key in list(pushed.keys()):
@@ -1282,7 +1282,7 @@ def _push_observer_event(
             msg += f"  SSL: {ssl_level:.1f}"
 
     safe_send(msg, priority="OBSERVER")
-    slog.info("[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
+    slog.info(f"[{symbol}] Observer 推送: {ev['type']} {ev.get('dir','')}")
 # Strategy 信号推送与去重
 # ============================================================
 
@@ -1411,7 +1411,7 @@ async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
         await asyncio.to_thread(emit, "record_open_snapshot", result, kelly_size=kelly_size)
         # TODO: add live HF hub push here if needed.
     except Exception as exc:
-        slog.error("[async_record_snapshot_and_push] 异步记录异常: {exc}")
+        slog.error(f"[async_record_snapshot_and_push] 异步记录异常: {exc}")
 
 
 def evaluate_signal_v6_routing(result: dict) -> dict:
@@ -1449,7 +1449,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     score = result["v6_final_score"]
 
     if route == "ABSOLUTE_DROP":
-        slog.info("[V6 分级路由 - DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
+        slog.info(f"[V6 分级路由 - DROP] {symbol} {level} 信号 ({score}分) 直接丢弃")
         try:
             event_logger.log_event("REJECT", {
                 "symbol": symbol,
@@ -1474,7 +1474,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
-        slog.info("[V6 分级路由 - 科研观察] {symbol} {level} 信号 ({score}分) | 实盘静默, 拍摄特征快照入云端铁盒")
+        slog.info(f"[V6 分级路由 - 科研观察] {symbol} {level} 信号 ({score}分) | 实盘静默, 拍摄特征快照入云端铁盒")
         try:
             event_logger.log_event("REJECT", {
                 "symbol": symbol,
@@ -1502,7 +1502,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         result["size"] = trade_size
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
-    slog.info("[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
+    slog.info(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
     try:
         event_logger.log_event("LIVE_TRADE", {
             "symbol": symbol,
@@ -1547,7 +1547,7 @@ def check_and_open(result: dict | None) -> bool:
     # ===== 资金曲线熔断器检查 =====
     if not _breaker.can_open():
         _snap = _breaker.snapshot()
-        slog.info("[check_and_open] 熔断器禁止开单: {_snap}")
+        slog.info(f"[check_and_open] 熔断器禁止开单: {_snap}")
         return False
 
     if not result:
@@ -1564,7 +1564,7 @@ def check_and_open(result: dict | None) -> bool:
                 if _e > 0 and abs(_e - _s) / _e > 0.001:
                     _total_risk_r += abs(_e - _s) / _e
         if _total_risk_r > 0.03:  # 总风险 > 3%（≈ 3R）
-            slog.warning("[RiskGuard] 总风险 {_total_risk_r:.4f} > 0.03, 拒绝开单")
+            slog.warning(f"[RiskGuard] 总风险 {_total_risk_r:.4f} > 0.03, 拒绝开单")
             return False
     except Exception:
         pass
@@ -1574,12 +1574,12 @@ def check_and_open(result: dict | None) -> bool:
 
     # ---- 止损冷却 ----
     if not _check_cooldown(symbol):
-        slog.warning("[{symbol}] GATE-2 cooling skip")
+        slog.warning(f"[{symbol}] GATE-2 cooling skip")
         return False
 
     approved = result.get("approved", False)
     if not approved or not direction:
-        slog.warning("[{symbol}] GATE-3 approved={approved} direction={direction} 拒绝")
+        slog.warning(f"[{symbol}] GATE-3 approved={approved} direction={direction} 拒绝")
         return False
     
     # ===== 提取优化模块字段 =====
@@ -1589,7 +1589,7 @@ def check_and_open(result: dict | None) -> bool:
     
         # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
     if htf_blocked:
-        slog.info("[{symbol}] GATE-4 HTF Regime 拦截 {direction}, 但强信号(score={result.get('score',0):.1f} ev={blended_ev:.4f}) 允许继续")
+        slog.info(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}, 但强信号(score={result.get('score',0):.1f} ev={blended_ev:.4f}) 允许继续")
         # ⚠️ TEMP: 绕过 HTF 拦截以验证开单流程
     
     # ===== 【优化5 - Statistical EV】使用 blended_ev 替代原始 ev =====
@@ -1604,20 +1604,20 @@ def check_and_open(result: dict | None) -> bool:
         _sqz_adj = 12.0
         if int(sqz_data.get("duration", 0)) >= 15:
             _sqz_adj += 8.0
-            slog.info("⚡ [{symbol}] [SQZMOM蓄能爆发] 连续蓄势 {sqz_data['duration']} 根 K 线，追加爆发分！")
+            slog.info(f"⚡ [{symbol}] [SQZMOM蓄能爆发] 连续蓄势 {sqz_data['duration']} 根 K 线，追加爆发分！")
         if not bool(sqz_data.get("volume_confirmed", False)):
             _sqz_adj -= 10.0
-            slog.info("⚠️ [{symbol}] [SQZMOM量能背离] 缩量释放 (放量比:{sqz_data.get('vol_ratio', 0):.2f})，触发软扣分。")
+            slog.info(f"⚠️ [{symbol}] [SQZMOM量能背离] 缩量释放 (放量比:{sqz_data.get('vol_ratio', 0):.2f})，触发软扣分。")
         score += _sqz_adj
         result["_sqz_score_adj"] = round(_sqz_adj, 2)
         result["_sqz_data"] = sqz_data
         result["score"] = score
-        slog.info("[{symbol}] SQZMOM release adjust: duration={sqz_data.get('duration')} strength={sqz_data.get('strength')} vol_ratio={sqz_data.get('vol_ratio')} confirmed={sqz_data.get('volume_confirmed')} adj={_sqz_adj:+.1f}")
+        slog.info(f"[{symbol}] SQZMOM release adjust: duration={sqz_data.get('duration')} strength={sqz_data.get('strength')} vol_ratio={sqz_data.get('vol_ratio')} confirmed={sqz_data.get('volume_confirmed')} adj={_sqz_adj:+.1f}")
 
     # ===== 【V21 FeatureLearningEngine】权重调整分数 =====
     _fl_score = result.get("_feature_learning_score", 0.0)
     if _fl_score > 0 and _fl_score != score:
-        slog.info("[{symbol}] FeatureLearning: score={score:.1f} -> {_fl_score:.1f}")
+        slog.info(f"[{symbol}] FeatureLearning: score={score:.1f} -> {_fl_score:.1f}")
         score = _fl_score
 
         # ===== 【V6 四级分级路由】替代老式 ScoreGrade =====
@@ -1627,7 +1627,7 @@ def check_and_open(result: dict | None) -> bool:
     _overlap_penalty = calculate_feature_overlap(features)
     result["feature_penalty"] = _overlap_penalty
     _adjusted_score = apply_feature_penalty(score, features)
-    slog.info("[{symbol}] FeaturePenalty: 原始score={score:.1f} -> 调整后={_adjusted_score:.1f} (penalty={_overlap_penalty})")
+    slog.info(f"[{symbol}] FeaturePenalty: 原始score={score:.1f} -> 调整后={_adjusted_score:.1f} (penalty={_overlap_penalty})")
     score = _adjusted_score
     result["score"] = score
     result["v6_final_score"] = score
@@ -1657,18 +1657,18 @@ def check_and_open(result: dict | None) -> bool:
     )
     _ev_threshold = get_statistical_ev_gate().dynamic_ev_threshold(_regime, 0.5, _volatility)
     if not _ev_gate_passed:
-        slog.warning("[{symbol}] StatisticalEVGate 拒绝: ev={ev:.4f} < threshold={_ev_threshold} (regime={_regime}, vol={_vol_state})")
+        slog.warning(f"[{symbol}] StatisticalEVGate 拒绝: ev={ev:.4f} < threshold={_ev_threshold} (regime={_regime}, vol={_vol_state})")
         return False
     else:
-        slog.info("[{symbol}] StatisticalEVGate 通过: ev={ev:.4f} >= threshold={_ev_threshold}")
+        slog.info(f"[{symbol}] StatisticalEVGate 通过: ev={ev:.4f} >= threshold={_ev_threshold}")
     
     # ---- 原有低阈值检查（已由 StatisticalEVGate 覆盖，保留为安全兜底）----
     if ev < MIN_EV_FOR_PUSH:
-        slog.warning("[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
+        slog.warning(f"[{symbol}] EV={ev:.4f}<{MIN_EV_FOR_PUSH} skip")
         return False
 
     if score < MIN_SCORE_FOR_PUSH:
-        slog.warning("[{symbol}] score={score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
+        slog.warning(f"[{symbol}] score={score:.1f}<{MIN_SCORE_FOR_PUSH} skip")
         return False
 
     entry = result["entry"]
@@ -1686,7 +1686,7 @@ def check_and_open(result: dict | None) -> bool:
     funding = result.get("funding_rate")
     if funding is not None and abs(funding) > 0.0005:
         if (direction == "Long" and funding > 0.0003) or (direction == "Short" and funding < -0.0003):
-            slog.warning("[{symbol}] funding {funding:.6f} adverse for {direction}, skip")
+            slog.warning(f"[{symbol}] funding {funding:.6f} adverse for {direction}, skip")
             return False
 
     long_score = result.get("long_score", 0)
@@ -1706,13 +1706,13 @@ def check_and_open(result: dict | None) -> bool:
     gap_passed = abs(long_score - short_score) >= _dynamic_gap
 
     if not gap_passed:
-        slog.warning("[{symbol}] Gap 不满足, skip. ")
+        slog.warning(f"[{symbol}] Gap 不满足, skip. ")
         return False
 
     _reason = safe_get_str(result, "reason", default="?")
     # 统一冷却：开仓前先查 deduper
     if signal_deduper.is_symbol_cooled(symbol, direction, _reason):
-        slog.warning("[RiskGuard] 同类信号冷却 {symbol}_{direction}_{_reason} (deduper)")
+        slog.warning(f"[RiskGuard] 同类信号冷却 {symbol}_{direction}_{_reason} (deduper)")
         return False
     # 兼容旧内存冷却字典
     _sig_cool_key = f"{symbol}_{direction}_{_reason}"
@@ -1720,12 +1720,12 @@ def check_and_open(result: dict | None) -> bool:
     if _sig_cool_key in _last_signal_time:
         _elapsed = time.time() - _last_signal_time[_sig_cool_key]
         if _elapsed < _SIGNAL_COOLDOWN_SECS:
-            slog.warning("[RiskGuard] 同类信号冷却 {_sig_cool_key} ({_elapsed:.0f}s < {_SIGNAL_COOLDOWN_SECS}s)")
+            slog.warning(f"[RiskGuard] 同类信号冷却 {_sig_cool_key} ({_elapsed:.0f}s < {_SIGNAL_COOLDOWN_SECS}s)")
             return False
 
     sig_id = _signal_id(result)
     if _is_signal_processed(sig_id):
-        slog.info("[{symbol}] signal {sig_id} already processed")
+        slog.info(f"[{symbol}] signal {sig_id} already processed")
         return False
 
     # 通过去重后立刻记冷却，防止并发双开
@@ -1733,7 +1733,7 @@ def check_and_open(result: dict | None) -> bool:
     _last_signal_time[_sig_cool_key] = time.time()
         
     if position_manager.exists(symbol):
-        slog.info("[{symbol}] already has position")
+        slog.info(f"[{symbol}] already has position")
         return False
     
     # ===== 【修复20260704】趋势位置检查：防止开在趋势末尾 =====
@@ -1748,20 +1748,20 @@ def check_and_open(result: dict | None) -> bool:
         drop_from_high = (swing_high - entry_price) / max(atr_val, 1)
         slog.info(f"[{symbol}] Short: swing_high={swing_high:.1f} price={entry_price:.1f} drop={drop_from_high:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
         if drop_from_high > TREND_END_PULLBACK_ATR:
-            slog.info("[{symbol}] 价格已从高位下跌 {drop_from_high:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Short")
+            slog.info(f"[{symbol}] 价格已从高位下跌 {drop_from_high:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Short")
             return False
     elif direction == "Long" and swing_low > 0 and swing_low < entry_price:
         rise_from_low = (entry_price - swing_low) / max(atr_val, 1)
         slog.info(f"[{symbol}] Long: swing_low={swing_low:.1f} price={entry_price:.1f} rise={rise_from_low:.1f}atr (limit={TREND_END_PULLBACK_ATR}atr)")
         if rise_from_low > TREND_END_PULLBACK_ATR:
-            slog.info("[{symbol}] 价格已从低点上涨 {rise_from_low:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Long")
+            slog.info(f"[{symbol}] 价格已从低点上涨 {rise_from_low:.1f}ATR > {TREND_END_PULLBACK_ATR}ATR，趋势末端不开Long")
             return False
 
         # ===== 【修复20260715】RR 软校验：RR < 1.0 仅降仓，不拒单 =====
     # V56.5 estimated_rr 来自信号bar的原始估算，SL纠正后实际RR可能不同
     actual_rr = result.get("rr", 0) or 0
     if actual_rr < 1.0:
-        slog.info("[{symbol}] RR={actual_rr:.2f} < 1.0, 降仓处理 (size*=0.5)")
+        slog.info(f"[{symbol}] RR={actual_rr:.2f} < 1.0, 降仓处理 (size*=0.5)")
         result["size"] = result.get("size", 0.05) * 0.5
         
         # ===== V37 Final Gate（V56.5 管线的最终闸门）=====
@@ -1793,10 +1793,10 @@ def check_and_open(result: dict | None) -> bool:
     }
     _v37_passed, _v37_reason, _v37_size_mult = v37_final_gate(_v37_decision, _v37_ctx)
     if not _v37_passed:
-        slog.info("[{symbol}] V37 Gate 拦截: {_v37_reason}")
+        slog.info(f"[{symbol}] V37 Gate 拦截: {_v37_reason}")
         return False
     else:
-                slog.info("[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
+                slog.info(f"[{symbol}] V37 Gate 通过 ({_v37_reason}), size_mult={_v37_size_mult}")
 
         # ===== 【SmartPositionSizer】智能仓位计算 =====
     _calib = _fb_res.get("calibration", {})
@@ -1830,13 +1830,13 @@ def check_and_open(result: dict | None) -> bool:
     if _mud_cut < 1.0:
         _size_result["final_size"] *= _mud_cut
         _size_result["final_size"] = max(0.005, _size_result["final_size"])
-        slog.info("[{symbol}] Mud regime: 仓位额外缩减至 {_mud_cut*100:.0f}% -> final_size={_size_result['final_size']:.4f}")
+        slog.info(f"[{symbol}] Mud regime: 仓位额外缩减至 {_mud_cut*100:.0f}% -> final_size={_size_result['final_size']:.4f}")
 
     slog.info(f"[{symbol}] SmartSizer: final_size={_size_result['final_size']:.4f} (Kelly={_size_result['kelly_pct']:.3f} grade={_size_result['grade_mult']:.2f} env={_size_result['env_mult']:.2f} regime={_size_result['regime_mult']:.2f} vol={_size_result['vol_mult']:.2f} cons_loss={_size_result['cons_loss_mult']:.2f} score_mult={_size_result['score_mult']:.2f})")
 
     # ===== 【新增20260723】DailyRiskGuard 日风险检查 =====
     if not _risk_guard.can_trade():
-        slog.info("[{symbol}] DailyRiskGuard 拦截: 日内风控限制")
+        slog.info(f"[{symbol}] DailyRiskGuard 拦截: 日内风控限制")
         return False
 
     # ===== 【闭环】旧 Weighter 仅用于统计学习跟踪（不再影响评分决策） =====
@@ -1855,7 +1855,7 @@ def check_and_open(result: dict | None) -> bool:
         _raw_feature_scores["DIVERGENCE"] = score * 0.12
     if _raw_feature_scores:
         _weighted_score = _weighter.get_weighted_score(_raw_feature_scores)
-        slog.info("[{symbol}] AdaptiveWeighter: 统计跟踪 (不影响评分) raw={_raw_feature_scores} weighted={_weighted_score:.2f}")
+        slog.info(f"[{symbol}] AdaptiveWeighter: 统计跟踪 (不影响评分) raw={_raw_feature_scores} weighted={_weighted_score:.2f}")
         result["weighted_score"] = _weighted_score
 
     # 获取 signal_tier 用于调试消息和日志
@@ -1918,7 +1918,7 @@ def check_and_open(result: dict | None) -> bool:
         f"多头: {lp_s:.1f}分  空头: {sp_s:.1f}分  分差: {sg:.1f}分",
     ])
     safe_send(msg, priority="TRADE")
-    slog.info("[{symbol}] Strategy open before update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
+    slog.info(f"[{symbol}] Strategy open before update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
     position_manager.update(symbol, {
         "direction": direction,
         "entry": entry,
@@ -1978,8 +1978,8 @@ def check_and_open(result: dict | None) -> bool:
 
     emit("record_open_snapshot", result, kelly_size=result.get("size", 0.05))
 
-    slog.info("[{symbol}] Strategy open after update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
-    slog.info("[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
+    slog.info(f"[{symbol}] Strategy open after update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
+    slog.info(f"[{symbol}] Strategy open pushed (EV={ev:.4f}, score={score:.1f})")
 
     # ===== 【新增20260723】SignalTracker 记录开单 =====
     try:
@@ -2008,7 +2008,7 @@ def check_and_open(result: dict | None) -> bool:
             if _tracker_signal_id and _fb_raw_scores:
                 _feature_learner.record_features(signal_id=_tracker_signal_id, features=_fb_raw_scores)
     except Exception as _tracker_e:
-        slog.error("[SignalTracker] 记录开单失败: {_tracker_e}")
+        slog.error(f"[SignalTracker] 记录开单失败: {_tracker_e}")
     
     # ===== 【开单日志写入】 =====
     # 1. TradeJournal（日志审计）
@@ -2035,7 +2035,7 @@ def check_and_open(result: dict | None) -> bool:
                 _pos_data["order_id"] = _order_id
                 position_manager.update(symbol, _pos_data)
     except Exception as tj_err:
-        slog.error("[TradeJournal] 写入失败: {tj_err}")
+        slog.error(f"[TradeJournal] 写入失败: {tj_err}")
     
     # 2. FeatureStore（信号特征分析）
     try:
@@ -2079,7 +2079,7 @@ def check_and_open(result: dict | None) -> bool:
         }
         feature_store.save_trade(trade_features)
     except Exception as feat_e:
-        slog.error("[Feature] save trade error: {feat_e}")
+        slog.error(f"[Feature] save trade error: {feat_e}")
 
     # ===== 【修复20260721】信号后验验证日志 =====
     try:
@@ -2139,7 +2139,7 @@ def check_and_open(result: dict | None) -> bool:
                 _pos_data2["audit_exit"] = _er
                 position_manager.update(symbol, _pos_data2)
     except Exception as _audit_e:
-                slog.error("[SignalAuditLog] 后验记录异常: {_audit_e}")
+                slog.error(f"[SignalAuditLog] 后验记录异常: {_audit_e}")
         
     # ⚡ DailyReport：记录交易
     from analytics.daily_report import daily_report
@@ -2196,7 +2196,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         elif action_plan["action"] == "HOLD":
             pass
     except Exception as e:
-        slog.error("[check_trailing] {symbol} 异常: {e}")
+        slog.error(f"[check_trailing] {symbol} 异常: {e}")
 
 
 def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str = "SL"):
@@ -2213,7 +2213,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         else:
             pnl_r = (entry - current_price) / risk
     
-    slog.info("[{symbol}] 止损触发: {reason} direction={direction} entry={entry:.2f} price={current_price:.2f} pnl_r={pnl_r:.2f}")
+    slog.info(f"[{symbol}] 止损触发: {reason} direction={direction} entry={entry:.2f} price={current_price:.2f} pnl_r={pnl_r:.2f}")
     safe_send(f"止损: {symbol} {direction} {reason} pnl_r={pnl_r:.2f} price={current_price:.2f}", priority="TRADE")
     
     position_manager.close(symbol, pnl_r=pnl_r, exit_reason=reason, exit_price=current_price)
@@ -2250,14 +2250,14 @@ async def main_loop():
                 _report = position_reconciler.startup_recover(do_exchange=True)
                 _recovered = _report.recovered_symbols
             except Exception as _rec2:
-                slog.error("[main_loop] reconciler 恢复失败，回退磁盘恢复: {_rec2}")
+                slog.error(f"[main_loop] reconciler 恢复失败，回退磁盘恢复: {_rec2}")
                 _recovered = position_manager.recover_from_disk()
             if _recovered:
                 safe_send(f"🔁 重启持仓恢复: {len(_recovered)} 个持仓已还原", priority="SYSTEM")
-                slog.info("[main_loop] 持仓恢复完成: {len(_recovered)} 个")
+                slog.info(f"[main_loop] 持仓恢复完成: {len(_recovered)} 个")
             _RECOVERED_POSITIONS = True
     except Exception as _rec_e:
-        slog.error("[main_loop] 持仓恢复异常: {_rec_e}")
+        slog.error(f"[main_loop] 持仓恢复异常: {_rec_e}")
 
     _scan_interval = SCAN_INTERVAL  # 300秒
     _trail_interval = 10            # 追踪止损检查频率（秒）
@@ -2273,7 +2273,7 @@ async def main_loop():
             # ---- 1. 信号扫描 ----
             if now - _last_scan_time >= _scan_interval:
                 _last_scan_time = now
-                slog.info("\n[main_loop] === 信号扫描 #{_loop_count} ===")
+                slog.info(f"\n[main_loop] === 信号扫描 #{_loop_count} ===")
                 for _symbol in SYMBOLS:
                     try:
                         result = await scan_and_decide(_symbol)
@@ -2321,7 +2321,7 @@ async def main_loop():
                         # 标准交易信号：通过 check_and_open 处理
                         _opened = await asyncio.to_thread(check_and_open, result)
                         if _opened:
-                            slog.info("[main_loop] {_symbol} 开单成功")
+                            slog.info(f"[main_loop] {_symbol} 开单成功")
                         else:
                             # 即使未开单也推送 Observer 事件
                             _obs_events = _detect_observer_events(
@@ -2357,7 +2357,7 @@ async def main_loop():
                                         funding_rate=result.get("funding_rate"),
                                     )
                     except Exception as _scan_e:
-                        slog.error("[main_loop] {_symbol} 扫描异常: {_scan_e}")
+                        slog.error(f"[main_loop] {_symbol} 扫描异常: {_scan_e}")
                         traceback.print_exc()
 
             # ---- 2. 追踪止损检查 ----
@@ -2372,14 +2372,14 @@ async def main_loop():
                                 continue
                             check_trailing(_sym, _pos, _price)
                         except Exception as _pos_e:
-                            slog.error("[main_loop] {_sym} 追踪止损异常: {_pos_e}")
+                            slog.error(f"[main_loop] {_sym} 追踪止损异常: {_pos_e}")
 
             # ---- 定期对账 ----
             try:
                 position_reconciler.periodic_check(min_interval_sec=120.0)
             except Exception as _rec_e:
                 if _loop_count % 30 == 0:
-                    slog.error("[main_loop] reconciler 巡查异常: {_rec_e}")
+                    slog.error(f"[main_loop] reconciler 巡查异常: {_rec_e}")
 
             # ---- 3. 日终面板推送 ----
             _now_dt = __import__("datetime").datetime.now()
@@ -2390,7 +2390,7 @@ async def main_loop():
                         safe_send(f"📋 日终面板\n{_panel_msg}", priority="SYSTEM")
                         _panel_today_sent[0] = True
                     except Exception as _panel_e:
-                        slog.error("[main_loop] 日终面板推送异常: {_panel_e}")
+                        slog.error(f"[main_loop] 日终面板推送异常: {_panel_e}")
             elif _now_dt.hour == 0 and _now_dt.minute < 5:
                 _panel_today_sent[0] = False
 
@@ -2401,7 +2401,7 @@ async def main_loop():
             slog.info("[main_loop] 主循环已取消")
             break
         except Exception as _loop_e:
-            slog.error("[main_loop] 主循环异常: {_loop_e}")
+            slog.error(f"[main_loop] 主循环异常: {_loop_e}")
             traceback.print_exc()
             await asyncio.sleep(5)
 

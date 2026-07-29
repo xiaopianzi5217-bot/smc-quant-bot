@@ -186,12 +186,12 @@ def run_backtest_with_observer(
         "atr", "adx", "rsi",
     ]
 
-    slog.info("[数据] df={len(df)} bars, df_smc={len(df_smc)} bars")
+    slog.info(f"[数据] df={len(df)} bars, df_smc={len(df_smc)} bars")
 
     # ---------- 候选信号 ----------
     broad = generate_v56_candidates(df, None)
     candidates = enrich_v565_candidates(broad, cfg)
-    slog.info("[候选] broad={len(broad)}, enriched={len(candidates)}")
+    slog.info(f"[候选] broad={len(broad)}, enriched={len(candidates)}")
 
     # ---------- 对每个候选信号注入 Observer + V37 Gate ----------
     enriched_rows: List[Dict[str, Any]] = []
@@ -216,7 +216,7 @@ def run_backtest_with_observer(
         try:
             exec_ctx = build_exec_context(_df_segment)
         except Exception as e:
-            slog.error("[WARN] sig_idx={sig_idx} build_exec_context error: {e}")
+            slog.error(f"[WARN] sig_idx={sig_idx} build_exec_context error: {e}")
             exec_ctx = {}
 
         sig_close = _safe_float(df_smc.iloc[sig_idx]["close"])
@@ -270,16 +270,16 @@ def run_backtest_with_observer(
         enriched_rows.append(rec)
 
     candidates_annotated = pd.DataFrame(enriched_rows)
-    slog.info("[V37 Gate] 通过={v37_passed_count}, 拦截={v37_blocked_count} (总候选={len(enriched_rows)})")
-    slog.info("[Observer] 事件分布: {json.dumps(observer_event_stats, ensure_ascii=False)}")
+    slog.info(f"[V37 Gate] 通过={v37_passed_count}, 拦截={v37_blocked_count} (总候选={len(enriched_rows)})")
+    slog.info(f"[Observer] 事件分布: {json.dumps(observer_event_stats, ensure_ascii=False)}")
 
     # ---------- 筛选（V56.5 标准筛选；V37 Gate 只记录不拦截回测执行） ----------
     selected = select_v565_portfolio(candidates_annotated, cfg)
-    slog.info("[筛选] selected={len(selected)}")
+    slog.info(f"[筛选] selected={len(selected)}")
 
     # ---------- 执行 ----------
     trades = execute_v565(df, selected, cfg)
-    slog.info("[执行] trades={len(trades)}")
+    slog.info(f"[执行] trades={len(trades)}")
 
     # ---------- 将 Observer/V37 信息合并到 trades ----------
     if not trades.empty and not candidates_annotated.empty:
@@ -334,7 +334,7 @@ def run_backtest_with_observer(
         )
 
     elapsed = time.time() - t0
-    slog.info("[完成] {elapsed:.1f}s")
+    slog.info(f"[完成] {elapsed:.1f}s")
     return trades, report
 
 

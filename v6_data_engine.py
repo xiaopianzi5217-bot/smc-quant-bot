@@ -55,7 +55,7 @@ def _push_worker_loop():
             push_database_to_hub()
             _last_push_ts = time.time()
         except Exception as e:
-            slog.error("[V6] throttled push failed: {e}")
+            slog.error(f"[V6] throttled push failed: {e}")
             with _push_lock:
                 _pending_push = True
 
@@ -120,7 +120,7 @@ def pull_database_from_hub():
         return
     try:
         from huggingface_hub import hf_hub_download
-        slog.info("[V6 DataEngine] 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
+        slog.info(f"[V6 DataEngine] 正在从云端数据集 [{repo_id}] 拉取最新历史数据库...")
         db_path = _get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         downloaded = hf_hub_download(
@@ -140,7 +140,7 @@ def pull_database_from_hub():
             # 确认不存在 -> 写标记，下次不重复尝试
             _DB_INIT_SENTINEL.write_text("no_cloud_backup_404", encoding="utf-8")
         else:
-            slog.error("[V6 DataEngine] io 云端数据库拉取异常: {e}")
+            slog.error(f"[V6 DataEngine] io 云端数据库拉取异常: {e}")
 
 def push_database_to_hub():
     """【实时备份】将本地最新写入的快照瞬间同步至云端私有仓库"""
@@ -164,7 +164,7 @@ def push_database_to_hub():
         )
         slog.info("[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
     except Exception as e:
-        slog.error("[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
+        slog.error(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 
 # ── 统一特征分类映射器 ──
 from state.feature_mapper import (
@@ -289,7 +289,7 @@ def init_v6_database():
     conn.commit()
     conn.close()
     expand_v6_table_for_smc()
-    slog.info("[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
+    slog.info(f"[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
 
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     """拍摄高维环境特征快照"""
@@ -348,12 +348,12 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         ))
         conn.commit()
         conn.close()
-        slog.info("[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
+        slog.info(f"[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
         
         if IS_HF_SPACE:
             request_push_database_to_hub()
     except Exception as e:
-        slog.error("[V6 DataEngine] 记录开单快照失败: {e}")
+        slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0):
     """横向拼接真实结局标签"""
@@ -369,12 +369,12 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
         """, (exit_reason, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
         conn.commit()
         conn.close()
-        slog.info("[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
+        slog.info(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
 
         if IS_HF_SPACE:
             request_push_database_to_hub()
     except Exception as e:
-        slog.error("[V6 DataEngine] 拼接平仓标签失败: {e}")
+        slog.error(f"[V6 DataEngine] 拼接平仓标签失败: {e}")
 
 class DynamicFeatureOptimizer:
     """

@@ -23,20 +23,20 @@ trades, report = run_v565_stable_backtest("data/BTCUSDT_15M_365d.csv", output_di
 elapsed = time.time() - t0
 
 print(f"\n===== 回测完成 ({elapsed:.1f}s) =====")
-slog.info("总交易数: {report['overall']['trades']}")
-slog.info("胜率: {report['overall']['win_rate']*100:.1f}%")
-slog.info("PF: {report['overall']['pf']:.2f}")
-slog.info("总PnL(R): {report['overall']['pnl']:.2f}")
-slog.info("平均R: {report['overall']['avg_r']:.4f}")
-slog.info("最大回撤R: {report['overall']['max_dd_r']:.2f}")
-slog.info("TP1接触率: {report['overall']['tp1_touch_rate']*100:.1f}%")
-slog.info("TP2接触率: {report['overall']['tp2_touch_rate']*100:.1f}%")
-slog.info("TP3接触率: {report['overall']['tp3_touch_rate']*100:.1f}%")
+slog.info(f"总交易数: {report['overall']['trades']}")
+slog.info(f"胜率: {report['overall']['win_rate']*100:.1f}%")
+slog.info(f"PF: {report['overall']['pf']:.2f}")
+slog.info(f"总PnL(R): {report['overall']['pnl']:.2f}")
+slog.info(f"平均R: {report['overall']['avg_r']:.4f}")
+slog.info(f"最大回撤R: {report['overall']['max_dd_r']:.2f}")
+slog.info(f"TP1接触率: {report['overall']['tp1_touch_rate']*100:.1f}%")
+slog.info(f"TP2接触率: {report['overall']['tp2_touch_rate']*100:.1f}%")
+slog.info(f"TP3接触率: {report['overall']['tp3_touch_rate']*100:.1f}%")
 
 # 打印前 20 笔交易看方向分布
 print("\n===== 前 20 笔交易方向分布 =====")
 for i, (_, row) in enumerate(trades.head(20).iterrows()):
-    slog.info("  {i+1}. {row['direction']:>5s} | score={row['score']:.1f} | ev={row['expected_value']:.4f} | pnl_r={row['pnl_r']:+.2f} | exit={row['exit_reason']}")
+    slog.info(f"  {i+1}. {row['direction']:>5s} | score={row['score']:.1f} | ev={row['expected_value']:.4f} | pnl_r={row['pnl_r']:+.2f} | exit={row['exit_reason']}")
 
 # 方向统计
 dir_counts = trades["direction"].value_counts()

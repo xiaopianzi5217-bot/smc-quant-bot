@@ -93,7 +93,7 @@ class PositionReconciler:
             dry = not _is_live_ready()
             return ExchangeAdapter(exchange_name="bitget", dry_run=dry)
         except Exception as exc:
-            slog.error("[Reconciler] adapter init failed: {exc}")
+            slog.error(f"[Reconciler] adapter init failed: {exc}")
             return None
 
     def _notify_msg(self, msg: str) -> None:
@@ -266,9 +266,9 @@ class PositionReconciler:
         }
         try:
             position_manager.update(symbol, pos)
-            slog.info("[Reconciler] imported exchange position: {symbol} {pos['direction']}")
+            slog.info(f"[Reconciler] imported exchange position: {symbol} {pos['direction']}")
         except Exception as exc:
-            slog.error("[Reconciler] import failed {symbol}: {exc}")
+            slog.error(f"[Reconciler] import failed {symbol}: {exc}")
 
     def periodic_check(self, min_interval_sec: float = 60.0) -> Optional[ReconcileReport]:
         now = time.time()

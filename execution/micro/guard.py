@@ -152,5 +152,5 @@ class MicroExecutionGuard:
             )
             time.sleep(POLL_INTERVAL)
 
-        slog.info("[MicroGuard] ❌ 微观确认超时 ({timeout_seconds}s)，拦截")
+        slog.info(f"[MicroGuard] ❌ 微观确认超时 ({timeout_seconds}s)，拦截")
         return False

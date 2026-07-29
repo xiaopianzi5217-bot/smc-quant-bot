@@ -233,7 +233,7 @@ class SmartPositionSizerV2:
                 encoding="utf-8",
             )
         except Exception as e:
-            slog.error("[SmartPositionSizerV2] save failed: {e}")
+            slog.error(f"[SmartPositionSizerV2] save failed: {e}")
 
 
 _sizer_v2: Optional[SmartPositionSizerV2] = None

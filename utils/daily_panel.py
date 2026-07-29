@@ -70,7 +70,7 @@ class DailyPanel:
                 encoding="utf-8"
             )
         except Exception as e:
-            slog.error("[DailyPanel] save failed: {e}")
+            slog.error(f"[DailyPanel] save failed: {e}")
 
     def _load_history(self) -> dict:
         if self.history_path.exists():
@@ -87,7 +87,7 @@ class DailyPanel:
                 encoding="utf-8"
             )
         except Exception as e:
-            slog.error("[DailyPanel] save_history failed: {e}")
+            slog.error(f"[DailyPanel] save_history failed: {e}")
 
     # ------------------------------------------------------------------
     # 日期工具
@@ -306,12 +306,12 @@ class DailyPanel:
         if msg:
             try:
                 send_func(msg)
-                slog.info("[DailyPanel] 报告已推送: {today}")
+                slog.info(f"[DailyPanel] 报告已推送: {today}")
                 if today_report_sent:
                     today_report_sent[0] = True
                 return True
             except Exception as e:
-                slog.error("[DailyPanel] 推送失败: {e}")
+                slog.error(f"[DailyPanel] 推送失败: {e}")
         return False
 
 

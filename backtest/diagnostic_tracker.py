@@ -52,13 +52,13 @@ class DiagnosticTracker:
         print(f"=======================================================")
         slog.info("🕵️‍♂️ [Breakout Engine Diagnostic / 突破引擎漏斗分析]")
         print(f" K线总数: {self.total_klines}")
-        slog.info(" 1. 近期背离数 (Bull/Bear): {self.funnel['divergence']['bull']} / {self.funnel['divergence']['bear']}")
-        slog.info(" 2. 达到横盘挤压条件 (>= 8根): {self.funnel['squeeze']}")
-        slog.info(" 3. 价格突破20前高/前低数: {self.funnel['breakout']['high']} / {self.funnel['breakout']['low']}")
-        slog.info(" 4. 量能爆发满足数 (Vol Z > 1.15): {self.funnel['volume_z']}")
-        slog.info(" 5. 波动扩张满足数 (ATR > 1.05): {self.funnel['atr_expand']}")
-        slog.info(" 6. SQZMOM Strength+DMI满足数: {self.funnel['sqz_dmi']['long']} / {self.funnel['sqz_dmi']['short']}")
-        slog.info(" => 最终组合成功触发 (Long/Short): {self.funnel['combo_trigger']['long']} / {self.funnel['combo_trigger']['short']}")
+        slog.info(f" 1. 近期背离数 (Bull/Bear): {self.funnel['divergence']['bull']} / {self.funnel['divergence']['bear']}")
+        slog.info(f" 2. 达到横盘挤压条件 (>= 8根): {self.funnel['squeeze']}")
+        slog.info(f" 3. 价格突破20前高/前低数: {self.funnel['breakout']['high']} / {self.funnel['breakout']['low']}")
+        slog.info(f" 4. 量能爆发满足数 (Vol Z > 1.15): {self.funnel['volume_z']}")
+        slog.info(f" 5. 波动扩张满足数 (ATR > 1.05): {self.funnel['atr_expand']}")
+        slog.info(f" 6. SQZMOM Strength+DMI满足数: {self.funnel['sqz_dmi']['long']} / {self.funnel['sqz_dmi']['short']}")
+        slog.info(f" => 最终组合成功触发 (Long/Short): {self.funnel['combo_trigger']['long']} / {self.funnel['combo_trigger']['short']}")
         print(f"=======================================================")
         
         print(f"\n=======================================================")
@@ -117,7 +117,7 @@ class DiagnosticTracker:
         self.score_history.append(score)
         
         # 打印诊断信息
-        slog.info("  🔍 [DiagnosticTracker] score={score:.2f}")
+        slog.info(f"  🔍 [DiagnosticTracker] score={score:.2f}")
         
         # 原样返回分数，不做任何修改
         return score

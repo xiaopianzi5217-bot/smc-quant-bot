@@ -16,9 +16,9 @@ from utils.structured_logger import slog
     # 开单前评估
     result = kernel.evaluate(signal, ctx, exec_ctx)
     if result["action"] == "REJECT":
-        slog.warning("拒绝原因: {result['reason']}")
+        slog.warning(f"拒绝原因: {result['reason']}")
     else:
-        slog.info("开单, 可信度: {result['confidence']}")
+        slog.info(f"开单, 可信度: {result['confidence']}")
 
     # 平仓后归因
     kernel.attribute_close(trade, feature, realized_r)

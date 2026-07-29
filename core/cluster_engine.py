@@ -41,7 +41,7 @@ class ClusterEngine:
             path: CSV 文件路径
         """
         if not os.path.exists(path):
-            slog.warning("[ClusterEngine] [!] 文件不存在: {path}, 跳过加载")
+            slog.warning(f"[ClusterEngine] [!] 文件不存在: {path}, 跳过加载")
             self._loaded = False
             return
 
@@ -50,7 +50,7 @@ class ClusterEngine:
             df = pd.read_csv(path)
 
             if "cluster" not in df.columns or "label" not in df.columns:
-                slog.info("[ClusterEngine] [!] CSV 缺少 cluster 或 label 列: {path}")
+                slog.info(f"[ClusterEngine] [!] CSV 缺少 cluster 或 label 列: {path}")
                 self._loaded = False
                 return
 
@@ -61,12 +61,12 @@ class ClusterEngine:
             self.fragile_clusters = set(fragile)
             self._loaded = True
 
-            slog.info("[ClusterEngine] [OK] 加载 {len(df)} 条静态规则")
+            slog.info(f"[ClusterEngine] [OK] 加载 {len(df)} 条静态规则")
             print(f"   - BAD: {len(self.bad_clusters)} 个簇")
             print(f"   - FRAGILE: {len(self.fragile_clusters)} 个簇")
 
         except Exception as e:
-            slog.error("[ClusterEngine] [ERR] 加载失败: {e}")
+            slog.error(f"[ClusterEngine] [ERR] 加载失败: {e}")
             self._loaded = False
 
     def filter(self, signal: Dict) -> Dict:

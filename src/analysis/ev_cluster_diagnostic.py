@@ -129,7 +129,7 @@ def run_ev_cluster_diagnostic(trades_csv: str, output_dir: str = "outputs"):
     bad.to_csv(bad_path, index=False)
 
     print("\n===== EV CLUSTER DIAGNOSTIC =====")
-    slog.info("Total clusters: {df['cluster'].nunique()}")
+    slog.info(f"Total clusters: {df['cluster'].nunique()}")
     print(f"Bad clusters: {len(bad)}")
     print(f"Saved: {report_path}")
     print(f"Saved: {bad_path}")

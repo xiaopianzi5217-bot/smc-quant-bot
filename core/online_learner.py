@@ -56,7 +56,7 @@ class OnlineEVLearner:
                 with open(self.memory_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except (json.JSONDecodeError, IOError):
-                slog.info("[OnlineEVLearner] [!] 记忆文件损坏, 重置: {self.memory_file}")
+                slog.info(f"[OnlineEVLearner] [!] 记忆文件损坏, 重置: {self.memory_file}")
                 return {}
         return {}
 

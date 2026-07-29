@@ -81,7 +81,7 @@ class SignalTracker:
             with open(self.log_file, "a") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as e:
-            slog.error("[SignalTracker] 写入失败: {e}")
+            slog.error(f"[SignalTracker] 写入失败: {e}")
         return signal_id
 
     def update_outcome(self, signal_id: str, final_r: float,
@@ -106,4 +106,4 @@ class SignalTracker:
             with open(self.log_file, "a") as f:
                 f.write(json.dumps(outcome, ensure_ascii=False) + "\n")
         except Exception as e:
-            slog.error("[SignalTracker] 结果写入失败: {e}")
+            slog.error(f"[SignalTracker] 结果写入失败: {e}")

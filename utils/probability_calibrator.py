@@ -38,7 +38,7 @@ class ProbabilityEngine:
                     for k, v in raw.items():
                         self.table[k] = v
             except Exception as exc:
-                slog.error("[ProbabilityEngine] 加载失败: {exc}")
+                slog.error(f"[ProbabilityEngine] 加载失败: {exc}")
 
     def save(self):
         try:
@@ -46,7 +46,7 @@ class ProbabilityEngine:
             with open(self.path, "w") as f:
                 json.dump(dict(self.table), f, indent=2)
         except Exception as exc:
-            slog.error("[ProbabilityEngine] 保存失败: {exc}")
+            slog.error(f"[ProbabilityEngine] 保存失败: {exc}")
 
     # ------------------------------------------------------------------
     # 核心逻辑
