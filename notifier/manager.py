@@ -17,17 +17,20 @@ from notifier.layers import (
 
 
 def dispatch_observer_snapshot(snapshot, send_all=False):
-    """Observer channel: market-structure changes only; never approves trades."""
+    """Observer channel: market-structure changes only; never approves trades.
+    [DISABLED] Observer 顺发信号已注释，不发送 Telegram。只返回原因用于日志。"""
     reasons = observer_event_reasons(snapshot)
     if not send_all and not reasons:
         return "跳过：Observer 层没有结构变化"
-    return send_telegram(
-        format_signal_message(
-            snapshot,
-            message_type="OBSERVER",
-            layer_reasons=reasons,
-        )
-    )
+    # 顺发信号暂时注释 —— 只发开单和平仓信号
+    # return send_telegram(
+    #     format_signal_message(
+    #         snapshot,
+    #         message_type="OBSERVER",
+    #         layer_reasons=reasons,
+    #     )
+    # )
+    return f"[OBSERVER DISABLED] 顺发信号已注释，触发原因: {reasons}"
 
 
 def dispatch_strategy_decision(snapshot, decision):
