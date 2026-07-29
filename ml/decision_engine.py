@@ -1,255 +1,633 @@
 # -*- coding: utf-8 -*-
-"""ML Decision Engine — 替代人工权重/阈值的决策管线。
-
-原理：
-  1. FeaturePipeline 提取实时特征向量
-  2. ProbabilityEngine 推理 → P(win)
-  3. EV = P(win) * avg_win_r - (1-P(win)) * avg_loss_r
-  4. Decision 基于 EV + confidence
-
-对比：
-  旧：smc_quality*0.3 + momentum*0.2 + structure*0.2 + regime_adjust = score
-  新：Features → LightGBM → P(win) → EV = 清理权重版
-
-Fallback：
-  模型未训练时，降级到人工权重（不改变现有行为）
-"""
-from __future__ import annotations
-
-import logging
-from typing import Any, Dict, Optional, Tuple
-
+"""V11 institutional runner built on the V9 execution/decision stack."""
 import pandas as pd
+import traceback
 
-from ml.feature_pipeline import get_feature_pipeline
-from ml.probability_engine import get_probability_engine
+from decision.v9_decision_kernel import V9DecisionKernel
+from monitoring.runtime_report import write_json_report
+from ops.env_config import load_runtime_config
+from risk.global_risk import GlobalRiskGuard
+from risk.portfolio_state import PortfolioStateManager
+from indicators.basic import add_all_indicators
+from strategy.smc import build_macro_context, build_exec_context
+from strategy.scoring import adaptive_signal_score
+from strategy.risk import calculate_dynamic_tp_sl
+from strategy.trade_filters import mark_strategy_approval, check_strategy_filters
+from notifier.observer.risk_plan import build_rr_plan
+from notifier.observer.signal_collector import build_signal_snapshot
+from strategy.intelligence_engine import estimate_expected_value
+from strategy.v565_quality_gate import v565_quality_gate
+from config import SYMBOL_STRATEGY
+from utils.symbols import load_symbol_strategy
+from utils.ctx_builder import _enrich_common_fields, build_directional_contexts
+from analytics.filter_audit import FilterAuditLogger
+from utils.time_utils import now_bj, series_ms_to_bj
+from utils.ohlcv_cache import ohlcv_cache
+from utils.structured_logger import slog
+try:
+    import ccxt  # type: ignore
+except ModuleNotFoundError:  # optional dependency for live data only
+        "granularity": gran,
+        "limit": str(limit),
+        "productType": "UMCBL",
+    }
+    resp = _req.get(url, params=params, timeout=15)
+    data = resp.json()
+    
+    if data.get("code") != "00000":
+        raise Exception(f"Bitget API error: code={data.get('code')} msg={data.get('msg')}")
+    
+    candles = data.get("data", [])
+    if not candles or len(candles) < 50:
+        raise Exception(f"Bitget returned too few candles: {len(candles)}")
+    
+    rows = []
+    for c in candles:
+        ts = int(c[0]) // 1000
+        o, h, l, cl, v = float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])
+        rows.append([ts, o, h, l, cl, v])
+    
+    df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df["datetime"] = series_ms_to_bj(df["timestamp"] * 1000)
+    
+    # 存入缓存（增量合并）
+    existing = ohlcv_cache.get_raw(symbol, timeframe)
+    if existing is not None:
+        df = ohlcv_cache.append(symbol, timeframe, df) or df
+    else:
+        ohlcv_cache.put(symbol, timeframe, df)
+    
+    slog.info("成功获取 OHLCV", symbol=symbol, timeframe=timeframe, rows=len(candles), latest_price=candles[-1][4])
+    return df
 
-logger = logging.getLogger("MLDecisionEngine")
 
-# 人工权重降级参数（仅在模型未训练时使用）
-_FALLBACK_WEIGHTS = {
-    "smc_quality": 0.25,
-    "fvg_strength": 0.10,
-    "ob_strength": 0.15,
-    "volume_ratio": 0.05,
-    "atr_pct": 0.05,
-    "regime": 0.10,
-    "sqzmom_state": 0.10,
-    "adx": 0.10,
-    "rsi": 0.05,
-    "entry_hour": 0.05,
-}
+def _enrich_volume_context(df_exec, curr, exec_ctx):
+    avg_vol = df_exec["volume"].rolling(20).mean().iloc[-1]
+    volume_ratio = float(curr["volume"] / avg_vol) if avg_vol == avg_vol and avg_vol > 0 else 0.0
+    exec_ctx["avg_volume_20"] = float(avg_vol) if avg_vol == avg_vol else 0.0
+    exec_ctx["volume_ratio"] = volume_ratio
+    exec_ctx["volume_confirmed"] = bool(volume_ratio > 1.5)
+    return volume_ratio
 
 
-class MLDecisionEngine:
-    """ML 决策引擎 — 两条管线并行。
+def evaluate_symbol(symbol, cfg):
+    params = cfg.get("strategy_params", {})
+    wvf = params.get("wvf_std_mult", 2.0)
 
-    主管线（模型已训练）：
-      Features → ML → P(win) → EV → Decision
+    # 根据 data_mode 决定使用真实数据还是模拟数据
+    data_mode = str(cfg.get("data_mode", "sample_data")).lower()
+    if data_mode == "live":
+        # 分别获取 exec 和 macro 数据，各自处理失败情况
+        try:
+            df_exec = add_all_indicators(fetch_live_ohlcv(symbol, cfg.get("exec_timeframe", "15m"), 320), wvf)
+            slog.info(f"[{symbol}] 使用真实数据 (exec)")
+        except Exception as e:
+            slog.error(f"[{symbol}] exec 数据获取失败: {e}，回退到模拟数据")
+            df_exec = add_all_indicators(make_sample_ohlcv(start=100.0), wvf)
+        try:
+            df_macro = add_all_indicators(fetch_live_ohlcv(symbol, cfg.get("macro_timeframe", "1h"), 320), wvf)
+            slog.info(f"[{symbol}] 使用真实数据 (macro)")
+        except Exception as e:
+            slog.error(f"[{symbol}] macro 数据获取失败: {e}，回退到模拟数据")
+            df_macro = add_all_indicators(make_sample_ohlcv(start=102.0), wvf)
+    else:
+        df_exec = add_all_indicators(make_sample_ohlcv(start=100.0), wvf)
+        df_macro = add_all_indicators(make_sample_ohlcv(start=102.0), wvf)
 
-    降级管线（模型未训练）：
-      Features → 人工权重 → Score → EV → Decision
-    """
+    curr = df_exec.iloc[-1]
+    price = float(curr["close"])
+    atr = float(curr.get("ATRr_14", curr.get("atr", 0)) or 0)
+    
+    macro_ctx = build_macro_context(df_macro)
+    exec_ctx = build_exec_context(df_exec)
+    
+    # --- OB 距离判断逻辑 ---
+    if atr > 0:
+        bull_ob = exec_ctx.get("bullish_ob")
+        if bull_ob and isinstance(bull_ob, (list, tuple)) and len(bull_ob) >= 2:
+            try:
+                ob_max, ob_min = max(float(bull_ob[0]), float(bull_ob[1])), min(float(bull_ob[0]), float(bull_ob[1]))
+                if (ob_min - atr) <= price <= (ob_max + atr):
+                    exec_ctx["near_bullish_ob"] = True
+            except Exception: pass
+        
+        bear_ob = exec_ctx.get("bearish_ob")
+        if bear_ob and isinstance(bear_ob, (list, tuple)) and len(bear_ob) >= 2:
+            try:
+                ob_max, ob_min = max(float(bear_ob[0]), float(bear_ob[1])), min(float(bear_ob[0]), float(bear_ob[1]))
+                if (ob_min - atr) <= price <= (ob_max + atr):
+                    exec_ctx["near_bearish_ob"] = True
+            except Exception: pass
+    # ---------------------------------
+    
+    exec_ctx["symbol"] = symbol
 
-    def __init__(self):
-        self._feature_pipeline = get_feature_pipeline()
-        self._probability_engine = get_probability_engine()
-        self._fallback_active = not self._probability_engine.is_ready()
+    volume_ratio = _enrich_volume_context(df_exec, curr, exec_ctx)
+    is_vol = bool(volume_ratio > 1.5)
 
-        if self._fallback_active:
-            logger.info("ML 决策引擎: 降级到人工权重模式")
+    # 获取资金费率（Binance 公开 API，免 Key）
+    try:
+        import requests as _req_fr
+        fr_resp = _req_fr.get(
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+            params={"symbol": "BTCUSDT"},
+            timeout=10,
+        )
+        if fr_resp.status_code == 200:
+            fr_val = float(fr_resp.json().get("lastFundingRate", 0))
+            exec_ctx["funding_rate"] = round(fr_val * 100, 4)  # 转成百分比
         else:
-            logger.info("ML 决策引擎: 主管线已就绪")
+            exec_ctx["funding_rate"] = 0.0
+    except Exception:
+                exec_ctx["funding_rate"] = 0.0
 
-    # ════════════════════════════════════════════════════════════
-    # 公共方法
-    # ════════════════════════════════════════════════════════════
+    # ===== 补充评分系统所需字段 + 构建多空评分上下文 =====
+    # 使用共享 ctx_builder 工具 (消除 ~70 行重复代码)
+    _enrich_common_fields(exec_ctx, curr, macro_ctx)
+    long_ctx, short_ctx = build_directional_contexts(exec_ctx, curr)
+    l_score, l_thresh, l_reasons = adaptive_signal_score(long_ctx, macro_ctx, "Long", is_vol)
+    s_score, s_thresh, s_reasons = adaptive_signal_score(short_ctx, macro_ctx, "Short", is_vol)
 
-    def evaluate(self, exec_ctx: dict, curr_row: dict,
-                 regime: str, features_dict: dict,
-                 direction: str) -> Tuple[float, float, float, bool]:
-        """评估交易机会。
+    # ===== 【修复20260625】HTF 方向强制对齐 =====
+    # 问题：决策方向只靠 long_score >= short_score 比较，
+    # 没有考虑 1H 级别 allowed_direction 的方向限制，
+    # 导致经常开反方向（1H 看空但 15M 开多）
+        #
+    # 修复：加权投票融合 HTF + 15M 评分
+    htf_allowed = str(macro_ctx.get("allowed_direction", "Both")).strip()
+    htf_suggest = macro_ctx.get("htf_suggest", "")
+    
+    # 【修复20260701】科学方向融合：HTF 投票 vs 15M 评分
+    # - HTF 权重取决于 ADX(趋势强度): ADX 18=>0.6, 30=>0.75, 45=>0.9
+    # - 15M 权重取决于 score_edge: edge 10=>0.5, 20=>0.7, 30=>0.9
+    # - 分歧投票总分>0.3=>Long, <-0.3=>Short, 中间=>允许双方向但让评分优先
+    htf_adx = float(exec_ctx.get("adx", macro_ctx.get("ADX_14", macro_ctx.get("adx", 0))))
+    htf_weight = min(0.9, max(0.3, htf_adx / 45.0)) if htf_adx >= 18 else max(0.1, htf_adx / 40.0)
+    
+    score_edge = abs(l_score - s_score)
+    m15_weight = min(0.9, max(0.3, score_edge / 30.0))
+    
+        # HTF 投票：Short=-1, Long=+1, Both=0
+    htf_vote = -1 if htf_allowed == "Short" else (1 if htf_allowed == "Long" else 0)
+    # 15M 投票：基于评分差异
+    dir_by_score = "Long" if l_score >= s_score else "Short"
+    m15_vote = 1 if dir_by_score == "Long" else -1
+    
+    # 【修复20260715】当 HTF=Both 且评分接近时，允许双方向
+    # 原问题：htf_vote=0 时 total_vote 完全由 m15_vote 决定，
+    # 导致评分相差很小(edge<5)也硬选短方向，造成 36/37 偏空
+    small_edge = score_edge < 5.0
+    if htf_allowed == "Both" and small_edge:
+        # 评分接近又无 HTF 方向，让下游决策层自然选择
+        direction = dir_by_score  # 还是选评分高的，但标记为弱信号
+        exec_ctx["htf_fusion"] = f"WeakBoth({direction},edge={score_edge:.1f})"
+    else:
+        # 加权总分
+        total_vote = htf_vote * htf_weight + m15_vote * m15_weight
+        
+        if total_vote > 0.3:
+            direction = "Long"
+            exec_ctx["htf_fusion"] = f"Long(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
+        elif total_vote < -0.3:
+            direction = "Short"
+            exec_ctx["htf_fusion"] = f"Short(total_vote={total_vote:.2f},htf_w={htf_weight:.2f},m15_w={m15_weight:.2f})"
+        else:
+            if htf_allowed != "Both" and abs(htf_vote * htf_weight - m15_vote * m15_weight) < 0.15:
+                direction = dir_by_score
+                exec_ctx["htf_fusion"] = f"DisagreeMin({direction},vote={total_vote:.2f})"
+            else:
+                direction = dir_by_score
+                exec_ctx["htf_fusion"] = f"DisagreeStrong({direction},vote={total_vote:.2f})"
+    
+    # 记录方向对齐信息
+    exec_ctx["htf_allowed"] = htf_allowed
+    exec_ctx["htf_forced_direction"] = direction
+    sym_strategy = load_symbol_strategy(symbol, SYMBOL_STRATEGY)
+    min_rr = sym_strategy.get("min_rr", cfg.get("risk", {}).get("min_rr", 2.0))
+    sl, tp1, tp2, tp3, rr = calculate_dynamic_tp_sl(
+        direction, curr, df_exec, exec_ctx, min_rr, sym_strategy
+    )
 
-        Args:
-            exec_ctx:     build_exec_context 输出
-            curr_row:     df_exec.iloc[-1] 的字典
-            regime:       "TREND" / "CHOP" / "TRANSITION"
-            features_dict: scan_and_decide 中的 _features 字典
-            direction:    "Long" / "Short"
+    # ===== 【修复20260716】EV 传入真实评分数据和系统实际 RR =====
+    # 之前问题：
+    # 1. smc/sqzmom 从 reasons 字符串手动解析，可能失败返回 0
+    # 2. breakout/raw_base 写死为 0
+    # 3. estimated_rr 用 EV 引擎自估（≈0.9~1.2），和系统实际 RR（1.50）脱节
+    # 修复：从 l_reasons/s_reasons 元数据中直接读取 + 传入系统实际 RR
+    _long_sig = {
+        "score_raw": l_score, "score": l_score,
+        "smc": float(l_reasons.get("smc", 0)) if isinstance(l_reasons, dict) else 0,
+        "sqzmom": float(l_reasons.get("sqzmom", 0)) if isinstance(l_reasons, dict) else 0,
+        "breakout": float(l_reasons.get("breakout", l_reasons.get("breakout_score", 0))) if isinstance(l_reasons, dict) else 0,
+        "raw_base": float(l_reasons.get("raw_base", 0)) if isinstance(l_reasons, dict) else 0,
+        "base_trigger_passed": l_score >= l_thresh,
+        "fallback_active": bool(l_reasons.get("fallback_active", False)) if isinstance(l_reasons, dict) else False,
+        "direction": "Long", "ev_grade": "C_EV",
+        "entry_meta": long_ctx,
+        "estimated_rr": rr,  # 传入系统实际 RR（来自 calculate_dynamic_tp_sl）
+    }
+    _short_sig = {
+        "score_raw": s_score, "score": s_score,
+        "smc": float(s_reasons.get("smc", 0)) if isinstance(s_reasons, dict) else 0,
+        "sqzmom": float(s_reasons.get("sqzmom", 0)) if isinstance(s_reasons, dict) else 0,
+        "breakout": float(s_reasons.get("breakout", s_reasons.get("breakout_score", 0))) if isinstance(s_reasons, dict) else 0,
+        "raw_base": float(s_reasons.get("raw_base", 0)) if isinstance(s_reasons, dict) else 0,
+        "base_trigger_passed": s_score >= s_thresh,
+        "fallback_active": bool(s_reasons.get("fallback_active", False)) if isinstance(s_reasons, dict) else False,
+        "direction": "Short", "ev_grade": "C_EV",
+        "entry_meta": short_ctx,
+        "estimated_rr": rr,  # 传入系统实际 RR
+    }
 
-        Returns:
-            (score, ev, confidence, is_ml_based)
-            score:          兼容旧格式的评分 (0-100)
-            ev:             Expected Value
-            confidence:     置信度 (0-1)
-            is_ml_based:    True=ML, False=Fallback
-        """
-        if self._fallback_active:
-            return self._fallback_evaluate(
-                exec_ctx, curr_row, regime, features_dict, direction
-            )
+    _regime_str = str(macro_ctx.get("regime", ""))
+    _vol_str = str(macro_ctx.get("vol_state", ""))
+    _long_ev_result = estimate_expected_value(_long_sig, _regime_str, _vol_str, long_ctx)
+    _short_ev_result = estimate_expected_value(_short_sig, _regime_str, _vol_str, short_ctx)
+    long_ev = _long_ev_result.get("expected_value", 0.0)
+    short_ev = _short_ev_result.get("expected_value", 0.0)
+    # ==================================================
+
+    rr_plan = build_rr_plan(direction, price, sl, tp1, tp2, tp3)
+    snapshot = build_signal_snapshot(
+        symbol=symbol,
+        df=df_exec,
+        macro_ctx=macro_ctx,
+        exec_ctx=exec_ctx,
+        long_score=l_score,
+        long_threshold=l_thresh,
+        long_reasons=l_reasons,
+        short_score=s_score,
+        short_threshold=s_thresh,
+        short_reasons=s_reasons,
+        rr_plan=rr_plan,
+        funding_rate=exec_ctx.get("funding_rate"),
+        long_ev=long_ev,
+        short_ev=short_ev,
+    )
+
+    tg_cfg = cfg.get("telegram", {})
+    slog.info(f"[{symbol}] Telegram 配置: send_observer={tg_cfg.get('send_observer', False)}, send_approved={tg_cfg.get('send_approved', False)}")
+    observer_sent = False
+    if dispatch_observer_snapshot and tg_cfg.get("send_observer", False):
+        try:
+            result = dispatch_observer_snapshot(snapshot, send_all=bool(tg_cfg.get("send_observer_all", False)))
+            slog.info(f"[{symbol}] Observer 消息发送结果: {result}")
+            observer_sent = True
+        except Exception as e:
+            slog.error(f"[{symbol}] Observer顺发消息触发异常: {e}")
+    else:
+        if not dispatch_observer_snapshot:
+            slog.error(f"[{symbol}] dispatch_observer_snapshot 不可用 (导入失败)")
+        if not tg_cfg.get("send_observer", False):
+            slog.warning(f"[{symbol}] send_observer 配置为 False，跳过 Observer 消息")
+
+    # 记录 Observer 推送日记
+    try:
+        from state.push_diary import push_logger as _pd
+        _pd.record(
+            symbol=symbol, channel="telegram", msg_type="observer",
+            direction="", score=l_score, ev=long_ev, price=price,
+            msg_preview=f"observer|symbol={symbol}|score={l_score:.1f}/{s_score:.1f}"[:120],
+            status="sent" if observer_sent else "skipped",
+            reason="" if observer_sent else ("dispatch_unavailable" if not dispatch_observer_snapshot else "no_structural_change"),
+                )
+    except Exception as _pd_err:
+        slog.error(f"[{symbol}] PushDiary observer 记录失败: {_pd_err}")
+
+            # ===== V56.5 质量门：前置过滤假信号（在 V9 决策之前拦截弱信号） =====
+    # 如果门禁启用且信号未通过，直接 return HOLD，不走 V9 决策流程
+    _v565_cfg = cfg.get("v565_gate", {})
+    if _v565_cfg.get("enabled", True):
+        _score_for_gate = l_score if direction == "Long" else s_score
+        _ev_for_gate = long_ev if direction == "Long" else short_ev
+        _gate_row = {
+            "score": _score_for_gate,
+            "hour": int(curr.get("hour", -1)),
+            "regime": str(macro_ctx.get("regime", "mixed")),
+            "model_ev": _ev_for_gate,
+            "setup_type": str(exec_ctx.get("setup_type", "V37_CORE")),
+            "trend_strength": float(curr.get("trend_strength", 0)),
+            "mitigation_strength": float(exec_ctx.get("mitigation_strength", 0)),
+            "liquidity_sweep_confirmed": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
+        }
+        _gate_passed, _gate_reason, _gate_meta = v565_quality_gate(_gate_row, _v565_cfg)
+        if not _gate_passed:
+            slog.info(f"[{symbol}] V56.5 质量门拦截: {_gate_reason} (score={_score_for_gate:.1f}, ev={_ev_for_gate:.4f})")
+            decision = {
+                "symbol": symbol, "approved": False, "decision_approved": False, "is_approved": False,
+                "action": "HOLD", "side": "NONE", "state": "V565_GATE_BLOCKED",
+                "state_name": "V56.5质量门拦截", "reason": _gate_reason,
+                "reason_cn": _gate_reason, "long_score": l_score, "short_score": s_score,
+                "direction": direction, "price": price,
+                "long_ev": long_ev, "short_ev": short_ev,
+            }
+            marked = {
+                "symbol": symbol, "approved": False, "state": "V565_GATE_BLOCKED",
+                "state_name": "V56.5质量门拦截", "reason": _gate_reason,
+                "decision": decision,
+            }
+            return {
+                "symbol": symbol, "approved": False, "state": "V565_GATE_BLOCKED",
+                "reason": _gate_reason, "decision": decision,
+            }
+
+# ===== V9 决策（入口统一，不再区分 V56.5 gate 是否启用） =====
+    kernel = V9DecisionKernel(params=cfg)
+    decision = kernel.decide(
+        curr=curr,
+        macro_ctx=macro_ctx,
+        exec_ctx=exec_ctx,
+        long_score=l_score,
+        long_threshold=l_thresh,
+        long_reasons=l_reasons,
+        short_score=s_score,
+        short_threshold=s_thresh,
+        short_reasons=s_reasons,
+        symbol=symbol,
+        cfg=cfg,
+        min_rr=cfg.get("risk", {}).get("min_rr", 2.0),
+        rr=rr,
+        direction=direction,
+        entry=price,
+        sl=sl,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        long_ev=long_ev,
+        short_ev=short_ev,
+    )
+
+    # 【修复20260701】将风险计划注入 decision 字典
+    decision["risk_plan"] = rr_plan
+    decision["entry"] = price
+    decision["entry_price"] = price
+    decision["stop_loss"] = sl
+    decision["take_profit_1"] = tp1
+    decision["take_profit_2"] = tp2
+    decision["take_profit_3"] = tp3
+    decision["rr_calculated"] = rr
+    decision["htf_allowed"] = htf_allowed
+    decision["exec_ctx"] = dict(exec_ctx)
+    decision["exec_ctx"]["htf_allowed"] = htf_allowed
+
+    # Strategy filters are post-decision guards: they may only downgrade/block
+    # an already approved decision. They must never turn HOLD into approved.
+    if decision.get("approved"):
+        filter_result = check_strategy_filters({
+            "symbol": symbol, "curr": curr, "macro_ctx": macro_ctx,
+            "exec_ctx": exec_ctx, "decision": decision, "cfg": cfg,
+        })
+        decision["strategy_filters"] = filter_result
+        if not filter_result.get("approved", filter_result.get("allowed", False)):
+            decision["approved"] = False
+            decision["decision_approved"] = False
+            decision["is_approved"] = False
+            decision["state"] = "STRATEGY_FILTER_BLOCKED"
+            decision["state_name"] = "策略过滤拦截"
+            decision["reason"] = filter_result.get("reason") or "Strategy filter blocked"
+            decision["reason_cn"] = decision["reason"]
+
+    guard = GlobalRiskGuard(cfg)
+    portfolio_state = PortfolioStateManager().load()
+    portfolio_check = guard.check(portfolio_state)
+    if decision.get("approved") and not portfolio_check.get("allowed"):
+        portfolio_reasons = portfolio_check.get("reasons") or []
+        decision["approved"] = False
+        decision["state"] = "PORTFOLIO_BLOCKED"
+        decision["state_name"] = "组合风控拦截"
+        decision["reason"] = "; ".join(portfolio_reasons) or "组合风控不允许开仓"
+        decision["reason_cn"] = decision["reason"]
+
+
+
+                    # 推送逻辑已剥离到调用方（hf_auto_trader.py），在 V37 Gate 全部通过后才触发。
+    # 避免微信收到 Gate 通过但实际被风控拦截的假警报。
+    # 标记待推送，由调用方在确认开单成功后统一发送
+    if decision.get("approved"):
+        decision["pending_notify"] = True
+        decision["snapshot"] = snapshot
+
+    slog.info(f"[{symbol}] 决策结果: approved={decision.get('approved')}, reason={decision.get('reason', '未知原因')}")
+
+    slog.info(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
+             f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
+             f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
+
+    try:
+        from state.signal_diary import diary as _sd
+        _sd.record(
+            symbol=symbol, direction=direction,
+            approved=bool(decision.get("approved")),
+            state=decision.get("state", "HOLD"),
+            reason=decision.get("reason", ""),
+            long_score=l_score, short_score=s_score,
+            long_ev=long_ev, short_ev=short_ev,
+            price=price, sl=sl, tp1=tp1, rr=rr,
+            regime=str(macro_ctx.get("regime", "")),
+            htf_allowed=htf_allowed, volume_ratio=volume_ratio,
+            adx=float(curr.get('adx',0)), atr_pct=float(curr.get('atr_pct',0)),
+            squeeze=str(curr.get('squeeze','')),
+            has_bot_div=bool(curr.get('has_bot_div', False)),
+            has_top_div=bool(curr.get('has_top_div', False)),
+            is_ssl_swept=bool(curr.get('is_ssl_swept', False)),
+            is_bsl_swept=bool(curr.get('is_bsl_swept', False)),
+            score_reasons=str(l_reasons) if direction == "Long" else str(s_reasons),
+            ev_reasons=long_ev if direction == "Long" else short_ev,
+            funding_rate=float(exec_ctx.get("funding_rate", 0)),
+            long_score_raw=l_score, short_score_raw=s_score,
+        )
+    except Exception as _sd_err:
+        slog.error(f"[{symbol}] SignalDiary 记录失败: {_sd_err}")
+
+    marked = mark_strategy_approval({
+        "symbol": symbol, "curr": curr, "macro_ctx": macro_ctx,
+        "exec_ctx": exec_ctx, "decision": decision, "cfg": cfg,
+    })
+    if marked is None:
+        marked = {"symbol": symbol, "approved": False, "state": "MARK_APPROVAL_ERROR",
+                  "state_name": "MARK_APPROVAL_ERROR", "reason": "mark_strategy_approval returned None"}
+    if not decision.get("approved"):
+        marked["approved"] = False
+    FilterAuditLogger().record(symbol, curr, marked)
+
+    if marked.get("approved"):
+        try:
+            from feature_store import feature_store as _fs
+            _fs.save_trade({
+                "symbol": symbol, "direction": direction, "entry": price,
+                "sl": sl, "tp1": tp1, "rr": rr, "ev": 0.0,
+                "score": l_score if direction == "Long" else s_score,
+                "regime": exec_ctx.get("regime", ""), "regime2": "",
+                "book": decision.get("book", ""), "adx": exec_ctx.get("adx", 0),
+                "atr": atr, "div_count": 0, "signal_age": 0,
+                "mfe": 0.0, "mae": 0.0, "max_r": 0.0, "max_r_before_stop": 0.0,
+                "exit_reason": "OPEN", "pnl_r": None,
+                "weekday": __import__("datetime").datetime.now().weekday(),
+                "hour": __import__("datetime").datetime.now().hour,
+            })
+        except Exception as _fs_err:
+            slog.error(f"[{symbol}] FeatureStore 写入失败: {_fs_err}")
 
         try:
-            return self._ml_evaluate(
-                exec_ctx, curr_row, regime, features_dict, direction
+            from state.trade_journal import journal as _tj
+            _tj.open_trade(
+                symbol=symbol, direction=direction, open_price=price,
+                sl=sl, tp1=tp1, tp2=tp2 if tp2 else 0, tp3=tp3 if tp3 else 0,
+                rr=rr, score=l_score if direction == "Long" else s_score,
+                regime=str(exec_ctx.get("regime", "")),
+                note=f"adx={round(float(curr.get('adx',0)),1)} atr={round(atr,1)} vol_ratio={round(volume_ratio,2)}",
             )
+        except Exception as _tj_err:
+            slog.error(f"[{symbol}] TradeJournal 写入失败: {_tj_err}")
+
+        try:
+            from strategy.intelligence_engine import ev_learner
+            if hasattr(_tj, "journal") or True:
+                pass
+        except Exception:
+            pass
+
+    return {
+        "symbol": symbol,
+        "approved": bool(marked.get("approved")),
+        "state": marked.get("state") or marked.get("state_name"),
+        "reason": marked.get("reason") or marked.get("reason_cn"),
+        "decision": marked,
+    }
+
+
+def run_once(cfg=None):
+    cfg = cfg or load_config()
+    symbols = cfg.get("symbols", ["BTC/USDT", "ETH/USDT"])
+    blacklist = cfg.get("symbol_blacklist", [])
+    symbols = [s for s in symbols if s not in blacklist]
+    results = []
+    for symbol in symbols:
+        try:
+            results.append(evaluate_symbol(symbol, cfg))
         except Exception as e:
-            logger.error(f"ML 评估失败，降级到人工权重: {e}")
-            self._fallback_active = True
-            return self._fallback_evaluate(
-                exec_ctx, curr_row, regime, features_dict, direction
-            )
+            # 【这里是核心绝杀修改】
+            # 把完整的异常堆栈当做字符串，直接塞给前端的 JSON！
+            err_stack = traceback.format_exc()
+            results.append({
+                "symbol": symbol,
+                "approved": False,
+                "state": "ERROR",
+                "reason": err_stack,
+            })
+        write_json_report("latest_v11_run.json", results)
+    # 【修复20260625】追加 CSV 数据日志（只追加，不覆盖）
+    _append_csv_log(results, cfg)
 
-    def dynamic_threshold(self, regime: str, vol_state: str,
-                          hour: int) -> Tuple[float, float]:
-        """动态阈值计算（替代硬编码的 MIN_SCORE/EV）。
+    # 🧠 自适应调参：每 120 次扫描检查一次（约每小时检查是否需优化）
+    try:
+        _trigger_adaptive_calibrate()
+    except Exception:
+        pass
 
-        Args:
-            regime:     "TREND" / "CHOP" / "TRANSITION"
-            vol_state:  "high_vol" / "normal" / "low_vol"
-            hour:       当前小时 (0-23)
-
-        Returns:
-            (min_prob, min_ev)
-        """
-        if self._fallback_active:
-            return self._fallback_threshold(regime, vol_state)
-
-        return self._ml_threshold(regime, vol_state, hour)
-
-    def retrain_if_needed(self, force: bool = False) -> bool:
-        """检查是否有新数据，尝试重训模型。
-
-        Args:
-            force: 是否强制重训
-
-        Returns:
-            True 训练成功
-        """
-        # 首次训练（模型未训练时），包含回测数据
-        include_bt = not self._probability_engine.is_ready()
-        df = self._feature_pipeline.build_training_set(min_samples=30,
-                                                        include_backtest=include_bt)
-        if df is None:
-            logger.info("无新训练数据")
-            return False
-
-        if force or len(df) > self._probability_engine.get_train_info().get("train_count", 0) * 1.2:
-            success = self._probability_engine.train(df, force=True)
-            if success:
-                self._fallback_active = False
-            return success
-
-        return False
-
-    def is_ml_active(self) -> bool:
-        return not self._fallback_active
-
-    # ════════════════════════════════════════════════════════════
-    # ML 主管线
-    # ════════════════════════════════════════════════════════════
-
-    def _ml_evaluate(self, exec_ctx, curr, regime, feats, direction):
-        """ML 管线评估。"""
-        # 1. 提取特征
-        live_df = self._feature_pipeline.get_live_features(
-            exec_ctx, curr, regime, feats
-        )
-
-        # 2. ML 推理 P(win)
-        prob = self._probability_engine.predict(live_df)[0]
-
-        # 3. 方向调整
-        if direction == "Short":
-            prob = 1.0 - prob  # ML 预测多头概率，空头反转
-
-        # 4. EV
-        should_trade, confidence = self._probability_engine.get_decision(prob)
-        ev = self._probability_engine.expected_value(prob)
-
-        # 5. 兼容 score（概率 → 0-100 分）
-        score = prob * 100
-
-        logger.debug(f"ML 评估: direction={direction} prob={prob:.3f} ev={ev:.4f} "
-                     f"confidence={confidence:.3f}")
-        return score, ev, confidence, True
-
-    # ════════════════════════════════════════════════════════════
-    # Fallback 人工权重
-    # ════════════════════════════════════════════════════════════
-
-    def _fallback_evaluate(self, exec_ctx, curr, regime, feats, direction):
-        """人工权重降级评估。"""
-        # 提取特征数值
-        _exec_lq = float(exec_ctx.get("long_quality", 0))
-        _exec_sq = float(exec_ctx.get("short_quality", 0))
-
-        smc_quality = float(feats.get("structure_break", False))
-        fvg = float(bool(exec_ctx.get("bullish_fvg") or exec_ctx.get("bearish_fvg")))
-        ob = float(bool(exec_ctx.get("bullish_ob") or exec_ctx.get("bearish_ob")))
-        vol_ratio = float(curr.get("volume_ratio", 1)) if hasattr(curr, 'get') else 1.0
-        atr_pct = (
-            float(curr.get("ATRr_14", exec_ctx.get("atr", 0))) / max(float(curr.get("close", 1)), 1e-8)
-            if hasattr(curr, 'get') else 0.02
-        )
-        adx_val = float(exec_ctx.get("adx", curr.get("adx", 0))) if hasattr(curr, 'get') else 0
-        sqz_state = 1.0 if "squeeze" in str(exec_ctx.get("squeeze", "")).lower() else 0.0
-
-        # 人工评分
-        score = (
-            smc_quality * 25 +
-            fvg * 10 +
-            ob * 15 +
-            min(vol_ratio, 2.0) * 5 +
-            min(atr_pct * 100, 5) * 5 +
-            (1 if adx_val > 25 else 0.5 if adx_val > 18 else 0) * 10 +
-            sqz_state * 10 +
-            (15 if regime in ("TREND", "trend") else 10)
-        )
-        score = min(100, score)
-
-        if _exec_lq > 0 or _exec_sq > 0:
-            score = max(_exec_lq, _exec_sq) if direction == "Long" else max(_exec_sq, _exec_lq)
-
-        ev = (score / 100) * 0.06 - 0.02
-        confidence = (score - 35) / 65 if score > 35 else 0.1
-
-        return score, ev, min(confidence, 1.0), False
-
-    def _fallback_threshold(self, regime: str, vol_state: str) -> Tuple[float, float]:
-        """人工阈值降级。"""
-        _r = regime.upper() if regime else "UNKNOWN"
-        _v = vol_state.lower() if vol_state else "normal"
-
-        if "chop" in _r or "range" in _r:
-            return 0.50, 0.02
-        if "crisis" in _r or "risk" in _r:
-            return 0.60, 0.04
-        if "high" in _v:
-            return 0.55, 0.03
-        return 0.45, 0.01
-
-    def _ml_threshold(self, regime: str, vol_state: str,
-                      hour: int) -> Tuple[float, float]:
-        """ML 动态阈值。"""
-        # 模型本身的概率校准已经考虑 regime/vol，这里仅设最低安全线
-        _v = vol_state.lower() if vol_state else "normal"
-        _r = regime.upper() if regime else "UNKNOWN"
-
-        # 低流动时段（亚洲盘）提阈值
-        _night = 0.55 if hour in range(0, 7) else 0.50
-        _high_vol = 0.55 if "high" in _v else 0.50
-        _choppy = 0.55 if "chop" in _r or "range" in _r else 0.48
-
-        return max(_night, _high_vol, _choppy), 0.0
+    return results
 
 
-# 全局单例
-_decision_engine: Optional[MLDecisionEngine] = None
+def _trigger_adaptive_calibrate():
+    """按需触发自适应调参"""
+    import os, json
+    from pathlib import Path
+
+    count_file = Path("state/scan_counter.json")
+    count_file.parent.mkdir(parents=True, exist_ok=True)
+
+    counter = 0
+    try:
+        if count_file.exists():
+            with open(count_file) as f:
+                data = json.load(f)
+                counter = data.get("count", 0)
+    except Exception:
+        counter = 0
+
+    counter += 1
+    try:
+        with open(count_file, "w") as f:
+            json.dump({"count": counter}, f)
+    except Exception:
+        pass
+
+    # 每 120 次扫描检查一次（约 1.5 小时）
+    if counter % 120 == 0:
+        try:
+            from optimizer.adaptive_calibrator import run_auto_calibrate
+            result = run_auto_calibrate()
+            if result.get("note") == "CALIBRATED":
+                slog.info(f"[自适应] 参数已优化: threshold={result['threshold']}, min_rr={result['min_rr']}")
+        except Exception as e:
+            slog.error(f"[自适应] 调参异常: {e}")
 
 
-def get_ml_decision() -> MLDecisionEngine:
-    global _decision_engine
-    if _decision_engine is None:
-        _decision_engine = MLDecisionEngine()
-    return _decision_engine
+def _append_csv_log(results, cfg):
+    """将每次扫描结果追加到 CSV 日志文件（含表头自动创建）"""
+    import os, csv
+    from datetime import datetime
+    
+    log_dir = cfg.get("log_dir", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "v11_scan_log.csv")
+    
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fieldnames = [
+        "timestamp", "symbol", "direction", "approved", "long_score", "short_score",
+        "edge", "entry", "sl", "tp1", "rr",
+        "regime", "adx", "atr_pct", "volume_ratio",
+        "bsl_level", "ssl_level", "is_bsl_swept", "is_ssl_swept",
+        "bearish_ob", "bullish_ob", "bearish_fvg", "bullish_fvg",
+        "has_bot_div", "has_top_div", "squeeze",
+        "htf_allowed", "state", "reason"
+    ]
+    
+    file_exists = os.path.isfile(log_path)
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists or os.path.getsize(log_path) == 0:
+            writer.writeheader()
+        
+        for r in results:
+            dec = r.get("decision", {})
+            row = {
+                "timestamp": now_str,
+                "symbol": r.get("symbol", ""),
+                "direction": dec.get("direction", ""),
+                "approved": r.get("approved", False),
+                "long_score": dec.get("long_score", 0),
+                "short_score": dec.get("short_score", 0),
+                "edge": abs(float(dec.get("long_score", 0)) - float(dec.get("short_score", 0))),
+                "entry": dec.get("price", dec.get("entry", 0)),
+                "sl": dec.get("risk_plan", {}).get("sl", 0),
+                "tp1": dec.get("risk_plan", {}).get("tp1", 0),
+                "rr": dec.get("rr", 0),
+                "regime": dec.get("regime", dec.get("exec_ctx", {}) if isinstance(dec.get("regime", ""), str) else ""),
+                "adx": dec.get("exec_ctx", {}).get("adx", 0) if isinstance(dec.get("exec_ctx"), dict) else 0,
+                "atr_pct": dec.get("exec_ctx", {}).get("atr_pct", 0) if isinstance(dec.get("exec_ctx"), dict) else 0,
+                "volume_ratio": dec.get("exec_ctx", {}).get("volume_ratio", 0) if isinstance(dec.get("exec_ctx"), dict) else 0,
+                "bsl_level": dec.get("exec_ctx", {}).get("bsl_level", 0) if isinstance(dec.get("exec_ctx"), dict) else 0,
+                "ssl_level": dec.get("exec_ctx", {}).get("ssl_level", 0) if isinstance(dec.get("exec_ctx"), dict) else 0,
+                "is_bsl_swept": dec.get("exec_ctx", {}).get("is_bsl_swept", False) if isinstance(dec.get("exec_ctx"), dict) else False,
+                "is_ssl_swept": dec.get("exec_ctx", {}).get("is_ssl_swept", False) if isinstance(dec.get("exec_ctx"), dict) else False,
+                "bearish_ob": dec.get("exec_ctx", {}).get("bearish_ob", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "bullish_ob": dec.get("exec_ctx", {}).get("bullish_ob", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "bearish_fvg": dec.get("exec_ctx", {}).get("bearish_fvg", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "bullish_fvg": dec.get("exec_ctx", {}).get("bullish_fvg", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "has_bot_div": dec.get("exec_ctx", {}).get("has_bot_div", False) if isinstance(dec.get("exec_ctx"), dict) else False,
+                "has_top_div": dec.get("exec_ctx", {}).get("has_top_div", False) if isinstance(dec.get("exec_ctx"), dict) else False,
+                "squeeze": dec.get("exec_ctx", {}).get("squeeze", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "htf_allowed": dec.get("exec_ctx", {}).get("htf_allowed", "") if isinstance(dec.get("exec_ctx"), dict) else "",
+                "state": r.get("state", ""),
+                "reason": r.get("reason", ""),
+            }
+            writer.writerow(row)
+    slog.info(f"  [CSV] 日志已追加: {log_path} ({len(results)} 条)")
+
+
+def main():
+    results = run_once()
+    for item in results:
+        print(item)
+    return results

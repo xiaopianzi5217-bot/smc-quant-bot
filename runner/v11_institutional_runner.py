@@ -452,8 +452,13 @@ def evaluate_symbol(symbol, cfg):
         decision["reason"] = "; ".join(portfolio_reasons) or "组合风控不允许开仓"
         decision["reason_cn"] = decision["reason"]
 
-            # 推送逻辑已剥离到调用方（hf_auto_trader.py），在 V37 Gate 全部通过后才触发。
+                    # 推送逻辑已剥离到调用方（hf_auto_trader.py），在 V37 Gate 全部通过后才触发。
     # 避免微信收到 Gate 通过但实际被风控拦截的假警报。
+    # 标记待推送，由调用方在确认开单成功后统一发送
+    if decision.get("approved"):
+        decision["pending_notify"] = True
+        decision["snapshot"] = snapshot
+
     slog.info(f"[{symbol}] 决策结果: approved={decision.get('approved')}, reason={decision.get('reason', '未知原因')}")
 
     slog.info(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
