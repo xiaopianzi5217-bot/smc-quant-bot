@@ -26,7 +26,7 @@ class TradeLifecycleManager:
         except Exception:
             return 0.0
 
-    def _record_close_to_db(self, p, exit_reason, close_price):
+    def _record_outcome(self, p, exit_reason, close_price):
         """平仓时更新数据库 pnl_r / exit_reason"""
         if not p or not p.signal_id:
             return
@@ -83,7 +83,7 @@ class TradeLifecycleManager:
             self._safe_close(symbol, direction, close_size)
             self.portfolio.reduce_position(symbol, close_size)
             self.portfolio.close_position(symbol, close_price=price)
-            self._record_close_to_db(p, "SL", price)
+            self._record_outcome(p, "SL", price)
             self.portfolio.mark_loss_cooldown(symbol, self.cfg["execution"].get("cooldown_minutes_after_loss", 30))
             self.logger.log("STOP_LOSS", symbol=symbol, direction=direction, price=price, size=close_size, raw=p.to_dict())
             event = {"type": "SL_HIT", "symbol": symbol, "message": "止损触发，已关闭剩余持仓", "raw": p.to_dict()}
@@ -125,7 +125,7 @@ class TradeLifecycleManager:
             self.portfolio.reduce_position(symbol, close_size)
             p.tp3_done = True
             self.portfolio.close_position(symbol, close_price=price)
-            self._record_close_to_db(p, "TP_FULL", price)
+            self._record_outcome(p, "TP_FULL", price)
             actions.append(f"TP3 已触发，关闭剩余仓位 {close_size}，交易完成")
             self.logger.log("TP3", symbol=symbol, direction=direction, price=price, size=close_size, raw=p.to_dict())
 
@@ -135,7 +135,7 @@ class TradeLifecycleManager:
         if actions:
             msg = "\n".join(actions)
             exit_reason_db = "TP_FULL" if p.tp3_done else ("TP_CLOSED" if p.state == "CLOSED" else "TP_PARTIAL")
-            self._record_close_to_db(p, exit_reason_db, price)
+            self._record_outcome(p, exit_reason_db, price)
             event_type = "POSITION_CLOSED" if p.tp3_done or p.state == "CLOSED" else "POSITION_REDUCED"
             event = {"type": event_type, "symbol": symbol, "message": msg, "raw": p.to_dict()}
             if dispatch_execution_event:
