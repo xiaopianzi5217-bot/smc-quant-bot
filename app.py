@@ -430,8 +430,8 @@ def build_local_snapshot_and_decision(symbol):
         **exec_ctx
     })
     if passed and decision.get("approved"):
-        # ===== 顺发：Observer 结构事件 =====
-                # 【已注释 202607】Observer 详细报告推送（系统打分不走决策，起不到指导作用）
+                # ===== 顺发：Observer 结构事件 =====
+        # 【已注释 202607】Observer 详细报告推送（系统打分不走决策，起不到指导作用）
         # if observer_events:
         #     try:
         #         dispatch_observer_snapshot(snapshot, send_all=True)
@@ -439,10 +439,9 @@ def build_local_snapshot_and_decision(symbol):
         #     except Exception as exc:
         #         print(f"[{symbol}] Observer 顺发异常: {exc}")
 
-                # ===== 开单信号由 live_engine.py 成交后推送，避免假警报 =====
+        # ===== 开单信号由 live_engine.py 成交后推送，避免假警报 =====
         # 过早推送（下单前）会导致微信收到 Gate 通过但可能被风控拦截的假警报
         # 真正的推送位于: execution/live_engine.py execute_decision() -> dispatch_execution_event("POSITION_OPENED")
-
 
         # ===== 写入全局持仓 =====
         position_manager.update(symbol, {
