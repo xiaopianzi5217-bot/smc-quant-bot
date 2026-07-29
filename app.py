@@ -14,12 +14,12 @@ try:
 except Exception:
     pass
 
+# 压制 asyncio / Gradio 退出时 "Invalid file descriptor: -1" 警告
 warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", message=".*Invalid file descriptor.*")
 
-try:
-    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-except Exception:
-    pass
+# 不在主线程预创建事件循环（Gradio 内部自建事件循环，预创建会在退出时冲突）
+# 事件循环策略和循环创建推迟到子线程中进行
 
 def ensure_thread_event_loop():
     try:
@@ -439,17 +439,10 @@ def build_local_snapshot_and_decision(symbol):
         #     except Exception as exc:
         #         print(f"[{symbol}] Observer 顺发异常: {exc}")
 
-        # ===== 顺发：开单信号推送 (Telegram) =====
-        _emoji = "📈" if direction == "Long" else "📉"
-        _msg = (
-            f"{_emoji} [{symbol}] V37 Gate 通过\n"
-            f"方向: {direction} | 入场: {float(curr['close']):.2f}\n"
-            f"止损: {sl:.2f} | TP1: {tp1:.2f} TP2: {tp2:.2f} TP3: {tp3:.2f}\n"
-            f"RR: {rr:.2f} | 评分: L{l_score:.1f} S{s_score:.1f}\n"
-            f"size_mult: {size_mult} | Gate: {reason}\n"
-            f"形态: {exec_ctx.get('setup_type','?')} | 大级别: {macro_ctx.get('allowed_direction','?')}"
-        )
-        safe_send_telegram(_msg)
+                # ===== 开单信号由 live_engine.py 成交后推送，避免假警报 =====
+        # 过早推送（下单前）会导致微信收到 Gate 通过但可能被风控拦截的假警报
+        # 真正的推送位于: execution/live_engine.py execute_decision() -> dispatch_execution_event("POSITION_OPENED")
+
 
         # ===== 写入全局持仓 =====
         position_manager.update(symbol, {
