@@ -878,11 +878,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         features_dict=_features,
         direction=direction,
     )
+    # 统一成 0~1 概率，供快照 / 后续 Fusion 使用
+    _ml_prob = float(_ml_score) / 100.0 if _ml_score is not None else 0.5
     if _ml_active:
-        # ML 主管线评估
-        _ml_prob = _ml_score / 100.0
-        slog.info(f"[{symbol}] ML引擎: P(win)={_ml_prob:.3f} EV={_ml_ev:.4f} conf={_ml_conf:.3f} score={_ml_score:.1f}")
-        # 如果 ML 概率 < 0.45，标记低置信度
+        slog.info(
+            f"[{symbol}] ML引擎: P(win)={_ml_prob:.3f} EV={_ml_ev:.4f} "
+            f"conf={_ml_conf:.3f} score={_ml_score:.1f}"
+        )
         if _ml_prob < 0.45:
             slog.info(f"[{symbol}] ML引擎 低概率: {_ml_prob:.3f} < 0.45, 标记降仓")
             _mud_cut_override = min(_mud_cut_override, 0.5)
@@ -999,9 +1001,20 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "_feedback_result": _fb_result,  # 【闭环】全文决策统计
         "_feedback_ev": _fb_result["ev"],  # 【闭环】FeedbackLoop EV
         "_feature_learning_score": _fl_final_score,  # 【V21】FeatureLearning 调整后分数
-        "confidence": _fb_result["confidence"],  # 【闭环】置信度
+        #"confidence": _fb_result["confidence"],  # 【闭环】置信度
         "confidence": _calibrated_prob,  # 【闭环】校准后的信心分数
         "grade_result": None,  # check_and_open 中填充
+        # ===== 数据闭环：ML / 规则分写入快照 =====
+        "ml_active": bool(_ml_active),
+        "ml_score": float(_ml_score) if _ml_score is not None else 0.0,
+        "ml_prob": float(_ml_prob),
+        "ml_ev": float(_ml_ev) if _ml_ev is not None else 0.0,
+        "ml_conf": float(_ml_conf) if _ml_conf is not None else 0.0,
+        # v6_data_engine.record_open_snapshot 读取这些键
+        "p_win_raw": float(_ml_prob),
+        "p_win_calibrated": float(_ml_prob) if _ml_active else float(_calibrated_prob),
+        "model_ev": float(_ml_ev) if (_ml_active and _ml_ev is not None) else float(_blended_ev),
+        "rule_score": float(score),
         "feature_penalty": 0.0,  # check_and_open 中填充
     }
 
@@ -1919,6 +1932,11 @@ def check_and_open(result: dict | None) -> bool:
     ])
     safe_send(msg, priority="TRADE")
     slog.info(f"[{symbol}] Strategy open before update: exists={position_manager.exists(symbol)} current={position_manager.get(symbol)}")
+    # 【修复 signal_id 一致性】使用 check_and_open_v6_with_routing 生成的 V6_XXX_TIMESTAMP 格式
+    _db_signal_id = result.get("signal_id", "")
+    if not _db_signal_id:
+        _db_signal_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
+        result["signal_id"] = _db_signal_id
     position_manager.update(symbol, {
         "direction": direction,
         "entry": entry,
@@ -1933,14 +1951,13 @@ def check_and_open(result: dict | None) -> bool:
         "open_confidence": result.get("confidence", 0.5),  # 【闭环】
         "open_regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
         "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
+        "signal_id": _db_signal_id,
+        "atr": float(result.get("atr") or 0.0),
+        "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
+        "ml_active": bool(result.get("ml_active", False)),
     })
 
         # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
-    # 【修复 signal_id 一致性】使用 check_and_open_v6_with_routing 生成的 V6_XXX_TIMESTAMP 格式
-    _db_signal_id = result.get("signal_id", "")
-    if not _db_signal_id:
-        _db_signal_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
-        result["signal_id"] = _db_signal_id
 
     # ===== V2 智能仓位计算器 + 熔断器乘数 =====
     try:
@@ -2200,11 +2217,12 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
 
 
 def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str = "SL"):
-    """触发止损：记录日志、推送通知、清除持仓"""
-    direction = pos["direction"]
-    entry = pos["entry"]
-    sl = pos.get("current_sl", pos.get("sl", 0))
-    
+    """触发止损/平仓：日志、推送、V6 outcome 回写、清持仓。"""
+    direction = pos.get("direction", "Long")
+    entry = float(pos.get("entry") or 0.0)
+    sl = float(pos.get("current_sl") or pos.get("sl") or 0.0)
+    signal_id = pos.get("signal_id") or ""
+
     pnl_r = 0.0
     risk = abs(entry - sl) if sl and entry else 0.0
     if risk > 0:
@@ -2212,197 +2230,62 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
             pnl_r = (current_price - entry) / risk
         else:
             pnl_r = (entry - current_price) / risk
-    
-    slog.info(f"[{symbol}] 止损触发: {reason} direction={direction} entry={entry:.2f} price={current_price:.2f} pnl_r={pnl_r:.2f}")
-    safe_send(f"止损: {symbol} {direction} {reason} pnl_r={pnl_r:.2f} price={current_price:.2f}", priority="TRADE")
-    
-    position_manager.close(symbol, pnl_r=pnl_r, exit_reason=reason, exit_price=current_price)
-    
-    # 记录到资金曲线熔断器 + V2 仓位管理器
-    _breaker.record_trade(pnl_r)
-    _sizer_v2.record_outcome(pnl_r)
-    
-    # 更新止损冷却
+
+    max_fwd = float(pos.get("audit_forward") or 0.0)
+    max_adv = float(pos.get("audit_adverse") or 0.0)
+
+    slog.info(
+        f"[{symbol}] 平仓触发: {reason} direction={direction} "
+        f"entry={entry:.2f} price={current_price:.2f} pnl_r={pnl_r:.2f} signal_id={signal_id}"
+    )
+    safe_send(
+        f"平仓: {symbol} {direction} {reason} pnl_r={pnl_r:.2f} price={current_price:.2f}",
+        priority="TRADE",
+    )
+
+    # ===== 数据闭环：回写 trade_snapshots.pnl_r / exit_reason =====
+    if signal_id:
+        try:
+            emit(
+                "record_close_outcome",
+                signal_id=signal_id,
+                pnl_r=float(pnl_r),
+                exit_reason=str(reason or "SL"),
+                max_fwd=max_fwd,
+                max_adv=max_adv,
+                exit_timestamp=time.time(),
+                exit_price=float(current_price),
+            )
+            slog.info(f"[{symbol}] V6 outcome 已回写: {signal_id} {pnl_r:+.2f}R reason={reason}")
+        except Exception as _oc_e:
+            slog.error(f"[{symbol}] V6 outcome 回写失败: {_oc_e}")
+    else:
+        slog.warning(f"[{symbol}] 平仓无 signal_id，跳过 trade_snapshots 回写")
+
+    # 本地持仓清理（无 close 则 fallback remove）
+    try:
+        if hasattr(position_manager, "close"):
+            position_manager.close(
+                symbol, pnl_r=pnl_r, exit_reason=reason, exit_price=current_price
+            )
+        else:
+            position_manager.remove(symbol)
+    except Exception as _pm_e:
+        slog.error(f"[{symbol}] 清除持仓失败: {_pm_e}")
+        try:
+            position_manager.remove(symbol)
+        except Exception:
+            pass
+
+    try:
+        _breaker.record_trade(pnl_r)
+        _sizer_v2.record_outcome(pnl_r)
+    except Exception:
+        pass
+
     global _last_stop_loss_time
     _last_stop_loss_time[symbol] = time.time()
     try:
         signal_deduper.mark_sl_hit(symbol)
     except Exception:
         pass
-
-
-# ============================================================
-# 主循环函数（供 app.py 的 asyncio.gather 调用）
-# ============================================================
-async def main_loop():
-    """自动交易主循环：定期扫描所有交易对 → 检查持仓追踪止损
-
-    由 app.py 的 _start_hf_auto_trader 内的 asyncio 事件循环驱动，
-    与 _feeder.run() 通过 asyncio.gather 并行运行。
-    """
-    slog.info("[main_loop] 自动交易主循环已启动")
-
-    # 首次启动时恢复未结算持仓
-    global _RECOVERED_POSITIONS
-    try:
-        if not _RECOVERED_POSITIONS and ENABLE_RUNTIME_RECOVERY:
-            try:
-                _report = position_reconciler.startup_recover(do_exchange=True)
-                _recovered = _report.recovered_symbols
-            except Exception as _rec2:
-                slog.error(f"[main_loop] reconciler 恢复失败，回退磁盘恢复: {_rec2}")
-                _recovered = position_manager.recover_from_disk()
-            if _recovered:
-                safe_send(f"🔁 重启持仓恢复: {len(_recovered)} 个持仓已还原", priority="SYSTEM")
-                slog.info(f"[main_loop] 持仓恢复完成: {len(_recovered)} 个")
-            _RECOVERED_POSITIONS = True
-    except Exception as _rec_e:
-        slog.error(f"[main_loop] 持仓恢复异常: {_rec_e}")
-
-    _scan_interval = SCAN_INTERVAL  # 300秒
-    _trail_interval = 10            # 追踪止损检查频率（秒）
-    _last_scan_time = 0.0
-    _last_trail_time = 0.0
-    _loop_count = 0
-
-    while True:
-        try:
-            now = time.time()
-            _loop_count += 1
-
-            # ---- 1. 信号扫描 ----
-            if now - _last_scan_time >= _scan_interval:
-                _last_scan_time = now
-                slog.info(f"\n[main_loop] === 信号扫描 #{_loop_count} ===")
-                for _symbol in SYMBOLS:
-                    try:
-                        result = await scan_and_decide(_symbol)
-                        if result is None:
-                            continue
-
-                        # 处理 Observer-only 事件
-                        if result.get("_is_observer_only"):
-                            _curr = result.get("curr")
-                            _exec_ctx = result.get("exec_ctx", {})
-                            _macro_ctx = result.get("macro_ctx", {})
-                            _long_score = result.get("long_score", 0)
-                            _short_score = result.get("short_score", 0)
-
-                            _obs_events = _detect_observer_events(_curr, _exec_ctx, _macro_ctx, _long_score, _short_score)
-                            if _obs_events:
-                                _new_events = _new_observer_events(_symbol, _obs_events)
-                                for _ev in _new_events:
-                                    async_background_task(
-                                        _push_observer_event,
-                                        symbol=_symbol, ev=_ev,
-                                        long_score=_long_score, short_score=_short_score,
-                                        long_ev=result.get("long_ev", 0), short_ev=result.get("short_ev", 0),
-                                        long_entry=result.get("long_entry", 0), long_sl=result.get("long_sl", 0),
-                                        long_tp1=result.get("long_tp1", 0), long_rr=result.get("long_rr", 0),
-                                        short_entry=result.get("short_entry", 0), short_sl=result.get("short_sl", 0),
-                                        short_tp1=result.get("short_tp1", 0), short_rr=result.get("short_rr", 0),
-                                        price=result.get("price", 0), rsi=result.get("rsi", 0),
-                                        adx=result.get("adx", 0), atr=result.get("atr", 0),
-                                        macd_hist=result.get("macd_hist", 0), volume_ratio=result.get("volume_ratio", 1),
-                                        candle_color=result.get("candle_color", ""),
-                                        color_changed=result.get("color_changed", False),
-                                        regime=result.get("regime", ""), vol_state=result.get("vol_state", ""),
-                                        squeeze=result.get("squeeze", ""),
-                                        trend_direction=result.get("trend_direction", ""),
-                                        bsl_level=result.get("bsl_level", 0), ssl_level=result.get("ssl_level", 0),
-                                        is_bsl_swept=result.get("is_bsl_swept", False),
-                                        is_ssl_swept=result.get("is_ssl_swept", False),
-                                        bullish_ob=result.get("bullish_ob"), bearish_ob=result.get("bearish_ob"),
-                                        bullish_fvg=result.get("bullish_fvg"), bearish_fvg=result.get("bearish_fvg"),
-                                        funding_rate=result.get("funding_rate"),
-                                    )
-                            continue
-
-                        # 标准交易信号：通过 check_and_open 处理
-                        _opened = await asyncio.to_thread(check_and_open, result)
-                        if _opened:
-                            slog.info(f"[main_loop] {_symbol} 开单成功")
-                        else:
-                            # 即使未开单也推送 Observer 事件
-                            _obs_events = _detect_observer_events(
-                                result.get("curr"), result.get("exec_ctx", {}),
-                                result.get("macro_ctx", {}),
-                                result.get("long_score", 0), result.get("short_score", 0),
-                            )
-                            if _obs_events:
-                                _new_events = _new_observer_events(_symbol, _obs_events)
-                                for _ev in _new_events:
-                                    async_background_task(
-                                        _push_observer_event,
-                                        symbol=_symbol, ev=_ev,
-                                        long_score=result.get("long_score", 0), short_score=result.get("short_score", 0),
-                                        long_ev=result.get("long_ev", 0), short_ev=result.get("short_ev", 0),
-                                        long_entry=result.get("long_entry", 0), long_sl=result.get("long_sl", 0),
-                                        long_tp1=result.get("long_tp1", 0), long_rr=result.get("long_rr", 0),
-                                        short_entry=result.get("short_entry", 0), short_sl=result.get("short_sl", 0),
-                                        short_tp1=result.get("short_tp1", 0), short_rr=result.get("short_rr", 0),
-                                        price=result.get("price", 0), rsi=result.get("rsi", 0),
-                                        adx=result.get("adx", 0), atr=result.get("atr", 0),
-                                        macd_hist=result.get("macd_hist", 0), volume_ratio=result.get("volume_ratio", 1),
-                                        candle_color=result.get("candle_color", ""),
-                                        color_changed=result.get("color_changed", False),
-                                        regime=result.get("regime", ""), vol_state=result.get("vol_state", ""),
-                                        squeeze=result.get("squeeze", ""),
-                                        trend_direction=result.get("trend_direction", ""),
-                                        bsl_level=result.get("bsl_level", 0), ssl_level=result.get("ssl_level", 0),
-                                        is_bsl_swept=result.get("is_bsl_swept", False),
-                                        is_ssl_swept=result.get("is_ssl_swept", False),
-                                        bullish_ob=result.get("bullish_ob"), bearish_ob=result.get("bearish_ob"),
-                                        bullish_fvg=result.get("bullish_fvg"), bearish_fvg=result.get("bearish_fvg"),
-                                        funding_rate=result.get("funding_rate"),
-                                    )
-                    except Exception as _scan_e:
-                        slog.error(f"[main_loop] {_symbol} 扫描异常: {_scan_e}")
-                        traceback.print_exc()
-
-            # ---- 2. 追踪止损检查 ----
-            if now - _last_trail_time >= _trail_interval:
-                _last_trail_time = now
-                _all_pos = position_manager.get()
-                if _all_pos:
-                    for _sym, _pos in list(_all_pos.items()):
-                        try:
-                            _price = await _fetch_ticker_price(_sym)
-                            if _price is None or _price <= 0:
-                                continue
-                            check_trailing(_sym, _pos, _price)
-                        except Exception as _pos_e:
-                            slog.error(f"[main_loop] {_sym} 追踪止损异常: {_pos_e}")
-
-            # ---- 定期对账 ----
-            try:
-                position_reconciler.periodic_check(min_interval_sec=120.0)
-            except Exception as _rec_e:
-                if _loop_count % 30 == 0:
-                    slog.error(f"[main_loop] reconciler 巡查异常: {_rec_e}")
-
-            # ---- 3. 日终面板推送 ----
-            _now_dt = __import__("datetime").datetime.now()
-            if not _panel_today_sent[0]:
-                if _now_dt.hour == 23 and _now_dt.minute >= 55:
-                    try:
-                        _panel_msg = _panel.generate_summary()
-                        safe_send(f"📋 日终面板\n{_panel_msg}", priority="SYSTEM")
-                        _panel_today_sent[0] = True
-                    except Exception as _panel_e:
-                        slog.error(f"[main_loop] 日终面板推送异常: {_panel_e}")
-            elif _now_dt.hour == 0 and _now_dt.minute < 5:
-                _panel_today_sent[0] = False
-
-            # 短暂休眠，防止 CPU 空转
-            await asyncio.sleep(1)
-
-        except asyncio.CancelledError:
-            slog.info("[main_loop] 主循环已取消")
-            break
-        except Exception as _loop_e:
-            slog.error(f"[main_loop] 主循环异常: {_loop_e}")
-            traceback.print_exc()
-            await asyncio.sleep(5)
-
-    slog.info("[main_loop] 主循环已退出")
