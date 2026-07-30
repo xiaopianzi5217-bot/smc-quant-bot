@@ -2289,3 +2289,36 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         signal_deduper.mark_sl_hit(symbol)
     except Exception:
         pass
+# ============================================================
+# 【修复】主循环 — app.py 684 行等待的入口函数
+# ============================================================
+async def main_loop():
+    """自动交易主循环：扫描多品种信号并管理持仓"""
+    slog.info(f"[main_loop] 主循环启动，监控品种: {SYMBOLS}")
+    loop_interval = 10
+    while True:
+        try:
+            for symbol in SYMBOLS:
+                try:
+                    positions = position_manager.get()
+                    pos = positions.get(symbol)
+                    if pos is not None:
+                        current_price = await _fetch_ticker_price(symbol)
+                        if current_price is not None:
+                            check_trailing(symbol, pos, current_price)
+                    if _breaker.can_open():
+                        result = await scan_and_decide(symbol)
+                        if result is not None:
+                            opened = check_and_open_v6_with_routing(result)
+                            if not opened:
+                                check_and_open(result)
+                except Exception as sym_e:
+                    slog.error(f"[main_loop] {symbol} 处理异常: {sym_e}")
+                    continue
+        except asyncio.CancelledError:
+            slog.info("[main_loop] 主循环被取消，正常退出")
+            break
+        except Exception as loop_e:
+            slog.error(f"[main_loop] 循环异常: {loop_e}")
+        await asyncio.sleep(loop_interval)
+
