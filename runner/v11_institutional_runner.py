@@ -129,7 +129,7 @@ def evaluate_symbol(symbol, cfg):
     wvf = params.get("wvf_std_mult", 2.0)
 
     # 根据 data_mode 决定使用真实数据还是模拟数据
-    data_mode = str(cfg.get("data_mode", "sample_data")).lower()
+    data_mode = str(cfg.get("data_mode", "live")).lower()
     if data_mode == "live":
         # 分别获取 exec 和 macro 数据，各自处理失败情况
         try:
