@@ -2290,11 +2290,11 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     except Exception:
         pass
 # ============================================================
-# ¡¾ĞŞ¸´¡¿Ö÷Ñ­»· ¡ª app.py 684 ĞĞµÈ´ıµÄÈë¿Úº¯Êı
+# ã€ä¿®å¤ã€‘ä¸»å¾ªç¯ â€” app.py 684 è¡Œç­‰å¾…çš„å…¥å£å‡½æ•°
 # ============================================================
 async def main_loop():
-    """×Ô¶¯½»Ò×Ö÷Ñ­»·£ºÉ¨Ãè¶àÆ·ÖÖĞÅºÅ²¢¹ÜÀí³Ö²Ö"""
-    slog.info(f"[main_loop] Ö÷Ñ­»·Æô¶¯£¬¼à¿ØÆ·ÖÖ: {SYMBOLS}")
+    """è‡ªåŠ¨äº¤æ˜“ä¸»å¾ªç¯ï¼šæ‰«æå¤šå“ç§ä¿¡å·å¹¶ç®¡ç†æŒä»“"""
+    slog.info(f"[main_loop] ä¸»å¾ªç¯å¯åŠ¨ï¼Œç›‘æ§å“ç§: {SYMBOLS}")
     loop_interval = 10
     while True:
         try:
@@ -2313,12 +2313,12 @@ async def main_loop():
                             if not opened:
                                 check_and_open(result)
                 except Exception as sym_e:
-                    slog.error(f"[main_loop] {symbol} ´¦ÀíÒì³£: {sym_e}")
+                    slog.error(f"[main_loop] {symbol} å¤„ç†å¼‚å¸¸: {sym_e}")
                     continue
         except asyncio.CancelledError:
-            slog.info("[main_loop] Ö÷Ñ­»·±»È¡Ïû£¬Õı³£ÍË³ö")
+            slog.info("[main_loop] ä¸»å¾ªç¯è¢«å–æ¶ˆï¼Œæ­£å¸¸é€€å‡º")
             break
         except Exception as loop_e:
-            slog.error(f"[main_loop] Ñ­»·Òì³£: {loop_e}")
+            slog.error(f"[main_loop] å¾ªç¯å¼‚å¸¸: {loop_e}")
         await asyncio.sleep(loop_interval)
 
