@@ -245,7 +245,11 @@ def generate_v56_candidates(df: pd.DataFrame, cfg: Optional[V56Config] = None) -
     """Generate a broad non-hindsight candidate pool from five pattern families."""
     cfg = cfg or V56Config()
     rows: List[Dict[str, Any]] = []
-    for i in range(max(cfg.warmup_bars, 260), len(df) - 2):
+    # 【修复20260816】len(df)-1 替代 len(df)-2：
+    # 原边界导致最后 2 根 K 线永远无法成为信号点，即使它们已满足扫单/破位条件。
+    # 现在允许前一根 K 线（idx=len(df)-2）生成信号，最后一根（idx=len(df)-1）
+    # 仍是"下一根进场"的执行参考，不生成信号。
+    for i in range(max(cfg.warmup_bars, 260), len(df) - 1):
         r = df.iloc[i]
         atr = float(r.get("atr", np.nan))
         if not np.isfinite(atr) or atr <= 0:

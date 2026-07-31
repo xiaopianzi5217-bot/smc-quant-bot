@@ -156,6 +156,10 @@ _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open�
 _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=55.0,
     allowed_hours=tuple(range(24)),
+    # 【修复20260816】允许 Tier2 信号（WEAK_BOS / TREND_PULLBACK / FVG_TOUCH 等）
+    # 只要 score >= 55 即通过，消除"69.5分候选直接全被过滤"的白名单问题
+    allow_tier2_if_strong=True,
+    strong_tier2_score=55.0,
 ))
 _bucket_ev_path = Path("data/v56_5_bucket_ev.json")
 if _bucket_ev_path.exists():
