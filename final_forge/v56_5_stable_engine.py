@@ -835,7 +835,10 @@ class V56_5_Engine:
     def generate_candidates(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
+        symbol = df.attrs.get("symbol", None)
         df = load_ohlcv(df)
+        if symbol:
+            df.attrs["symbol"] = symbol
         if not df["datetime"].is_monotonic_increasing:
             df = df.sort_values("datetime").reset_index(drop=True)
         self._ohlcv_df = df.copy()

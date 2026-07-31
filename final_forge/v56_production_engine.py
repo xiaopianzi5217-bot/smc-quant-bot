@@ -216,6 +216,7 @@ def _append(rows: List[Dict[str, Any]], df: pd.DataFrame, i: int, setup: str, di
     rows.append(
         {
             "idx": int(i),
+            "symbol": str(df.attrs.get("symbol", "UNKNOWN")),
             "datetime": r["datetime"],
             "date": r["date"],
             "setup_type": setup,

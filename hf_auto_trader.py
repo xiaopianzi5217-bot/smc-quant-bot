@@ -93,6 +93,9 @@ from analytics.feature_hash import generate_feature_hash
 MAX_DRAWDOWN_PCT = 15.0 
 _peak_equity = 0.0 
 
+# ---------- 【新增】K线版本缓存：避免K线未更新时重复全量重算 ----------
+_last_bar_dt_by_symbol: dict = {} 
+
 # ---------- 资金曲线熔断器 + V2 仓位管理器 ----------
 _breaker = EquityCircuitBreaker(max_daily_loss_r=3.0, max_consec_losses=3)
 _sizer_v2 = get_smart_sizer_v2() 
@@ -496,7 +499,19 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320) -> 
 
 async def scan_and_decide(symbol: str) -> dict | None:
     from runner.v11_institutional_runner import make_sample_ohlcv
-    
+
+    # 【新增】前置K线版本预检：先轻量拉2根K线，未变化则跳过全量拉取与重算
+    try:
+        _probe = await fetch_ohlcv(symbol, "15m", 2)
+        if _probe is not None and not _probe.empty:
+            _probe_key = str(_probe["datetime"].iloc[-1])
+            if _last_bar_dt_by_symbol.get(symbol) == _probe_key:
+                slog.info(f"[{symbol}] K线未更新（{_probe_key}），跳过本轮全量拉取与重算")
+                return None
+            _last_bar_dt_by_symbol[symbol] = _probe_key
+    except Exception as _probe_e:
+        slog.warning(f"[{symbol}] K线预检失败，继续全量拉取: {_probe_e}")
+
     exec_task = fetch_ohlcv(symbol, "15m", MAX_CANDLES)
     macro_task = fetch_ohlcv(symbol, "1h", MAX_CANDLES)
     exec_result, macro_result = await asyncio.gather(exec_task, macro_task)
@@ -518,6 +533,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
     except Exception:
         slog.info(f"[{symbol}] 最新K线时间: (无法解析) | bars={len(df_exec)}")
 
+    # 双保险：全量拉取后再次比对最新K线，防止预检与全量之间出现时间窗口空洞
+    _last_bar_key = str(df_exec["datetime"].iloc[-1]) if "datetime" in df_exec.columns else str(len(df_exec))
+    if _last_bar_dt_by_symbol.get(symbol) == _last_bar_key:
+        slog.info(f"[{symbol}] K线未更新（{_last_bar_key}），跳过本轮全量重算")
+        return None
+    _last_bar_dt_by_symbol[symbol] = _last_bar_key
+
     df_macro = macro_result
     if df_macro is None or len(df_macro) < 50:
         slog.info(f"[{symbol}] ⚠️ macro 数据不足，临时使用 sample OHLCV（仅兜底，不应用于正式评估）")
@@ -537,6 +559,9 @@ async def scan_and_decide(symbol: str) -> dict | None:
         )
         return None
 
+    # 【新增】传递 symbol 到候选 DataFrame（修复 UNKNOWN_ 前缀问题）
+    df_v56.attrs["symbol"] = symbol
+
     # Step 1: generate_candidates
     candidates = _V56_ENGINE.generate_candidates(df_v56)
     from analytics.daily_report import daily_report
@@ -554,7 +579,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         # 原 LOOKBACK=5（仅75分钟）过紧，SMC 结构常需多根确认。
         # 改为 16 根（15m × 16 ≈ 4 小时）；排重逻辑仍会防止重复开仓。
         LOOKBACK_CANDLES = 16
-        recent_threshold = max(0, last_idx - LOOKBACK_CANDLES)
+        recent_threshold = max(0, last_idx - LOOKBACK_CANDLES + 1)  # 修复: 实际保留16根(304~319)
         _full_count = len(candidates)
         _idx_min = int(candidates["idx"].min()) if _full_count else -1
         _idx_max = int(candidates["idx"].max()) if _full_count else -1
