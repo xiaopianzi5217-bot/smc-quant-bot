@@ -962,14 +962,16 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "symbol": symbol,
         "direction": direction,
         "expected_value": round(ev, 4),
-        "score": round(score, 2),
+        "score": round(_fl_final_score, 2),  # 风控否决/调整后的最终分（关键修复：不再使用原始 score）
+        "final_score": round(_fl_final_score, 2),  # 对外暴露的最终分，供 V6 路由判断
+        "rejected": _fl_final_score <= 0.0,  # 被一票否决归零后，路由层必须据此拦截
         "entry": entry_price,
         "sl": sl,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
         "rr": round(rr, 2),
-        "approved": True,
+        "approved": _fl_final_score > 0.0,  # 风控否决后为 False，任何后续 GATE 都不能放行
         "reason": f"V56.5_{best.get('setup_type','?')}_{best.get('gate_reason','PASSED')}",
         "regime": best.get("regime", "unknown"),
         "vol_state": exec_ctx.get("volatility", "unknown"),
@@ -1457,8 +1459,13 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
     """
     【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
     """
+    # 优先使用最终分（风控否决/调整后），杜绝路由拿到未扣分的原始 score
     score = float(result.get("v6_final_score", result.get("score", 0.0)) or 0.0)
     result["v6_final_score"] = score
+    if score <= 0.0:
+        result["v6_level"] = "REJECT_GRADE"
+        result["action_route"] = "ABSOLUTE_DROP"
+        return result
 
     if score >= 70.0:
         result["v6_level"] = "A_GRADE"
@@ -1481,6 +1488,12 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     symbol = result.get("symbol", "?")
     result["base_size"] = float(result.get("base_size", result.get("size", 0.05)) or 0.05)
     result["v6_final_score"] = float(result.get("v6_final_score", result.get("score", 0.0)) or 0.0)
+
+    # 【关键修复】风控否决（LIQUIDITY_SWEEP 等一票否决）后，立即拦截，禁止进入路由与实盘推送
+    if bool(result.get("rejected", False)) or float(result.get("score", 0.0) or 0.0) <= 0.0:
+        _r_reason = "ONE_VETO_REJECT" if bool(result.get("rejected", False)) else "SCORE_ZERO"
+        slog.warning(f"[V6 分级路由 - 否决拦截] {symbol} {_r_reason} score={result.get('score', 0.0)}，跳过路由与推送")
+        return False
 
     result = evaluate_signal_v6_routing(result)
     route = result["action_route"]
@@ -1610,6 +1623,11 @@ def check_and_open(result: dict | None) -> bool:
 
     symbol = result.get("symbol", "?")
     direction = result.get("direction", None)
+
+    # 【关键修复】被否决信号（LIQUIDITY_SWEEP 等一票否决归零）在此直接拦截，防止兜底链路误开单
+    if bool(result.get("rejected", False)) or float(result.get("score", 0.0) or 0.0) <= 0.0:
+        slog.warning(f"[check_and_open] {symbol} 信号已被否决（score={result.get('score', 0.0)}，rejected={result.get('rejected', False)}），拒绝开单")
+        return False
 
     # ---- 止损冷却 ----
     if not _check_cooldown(symbol):
@@ -2335,9 +2353,13 @@ async def main_loop():
                     if _breaker.can_open():
                         result = await scan_and_decide(symbol)
                         if result is not None:
-                            opened = check_and_open_v6_with_routing(result)
-                            if not opened:
-                                check_and_open(result)
+                            # 【关键修复】被风控否决的信号（LIQUIDITY_SWEEP 一票否决等）禁止进入任何路由/推送链路
+                            if bool(result.get("rejected", False)) or float(result.get("score", 0.0) or 0.0) <= 0.0:
+                                slog.warning(f"[main_loop] {symbol} 信号已被风控否决（score={result.get('score', 0.0)}），跳过开单链路")
+                            else:
+                                opened = check_and_open_v6_with_routing(result)
+                                if not opened:
+                                    check_and_open(result)
                 except Exception as sym_e:
                     slog.error(f"[main_loop] {symbol} 处理异常: {sym_e}")
                     continue
