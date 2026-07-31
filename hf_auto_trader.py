@@ -2343,9 +2343,35 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
 async def main_loop():
     """自动交易主循环：扫描多品种信号并管理持仓"""
     slog.info(f"[main_loop] 主循环启动，监控品种: {SYMBOLS}")
+
+    # ===== 启动持仓恢复 + 对账（只做一次）=====
+    global _RECOVERED_POSITIONS
+    try:
+        if not _RECOVERED_POSITIONS and ENABLE_RUNTIME_RECOVERY:
+            try:
+                _report = position_reconciler.startup_recover(do_exchange=True)
+                _n = len(getattr(_report, "recovered_symbols", None) or [])
+                slog.info(f"[main_loop] reconciler 启动恢复完成: recovered={_n} mode={getattr(_report, 'mode', '?')}")
+            except Exception as _rec_e:
+                slog.error(f"[main_loop] reconciler 失败，回退磁盘恢复: {_rec_e}")
+                try:
+                    _syms = position_manager.recover_from_disk()
+                    slog.info(f"[main_loop] 磁盘恢复: {_syms}")
+                except Exception as _disk_e:
+                    slog.error(f"[main_loop] 磁盘恢复也失败: {_disk_e}")
+            _RECOVERED_POSITIONS = True
+    except Exception as _e:
+        slog.error(f"[main_loop] 启动恢复异常: {_e}")
+
     loop_interval = 10
     while True:
         try:
+            # 【修复20260816】约每 2 分钟对账一次；reconciler 内部还有 min_interval
+            if int(time.time()) % 120 < loop_interval:
+                try:
+                    position_reconciler.periodic_check(min_interval_sec=120.0)
+                except Exception as _pe:
+                    slog.error(f"[main_loop] periodic_check: {_pe}")
             for symbol in SYMBOLS:
                 try:
                     positions = position_manager.get()
