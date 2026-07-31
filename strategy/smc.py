@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from indicators.pivots import find_pivots, dynamic_pivot_threshold
+from indicators.pivots import find_pivots, find_developing_pivots, dynamic_pivot_threshold
 from strategy.regime import detect_market_regime
 from config import PIVOT_PARAMS, STRATEGY_PARAMS
 import pandas as pd
@@ -260,6 +260,15 @@ def build_macro_context(df_1h):
     p = PIVOT_PARAMS['macro']
     liq_hp = find_pivots(df_1h['high'], p['left'], p['right'], True, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
     liq_lp = find_pivots(df_1h['low'], p['left'], p['right'], False, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
+    # 【修复】实时 Developing Pivot（消除右侧确认延迟）
+    # 原逻辑中最新 right 根 K 线永远无法被识别为 Pivot，
+    # 导致 BSL/SSL、CHOCH、Sweep 检测使用旧结构点，最新 K 线无法触发信号。
+    developing_hp = find_developing_pivots(df_1h['high'], p['left'], p['right'], True, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
+    developing_lp = find_developing_pivots(df_1h['low'], p['left'], p['right'], False, df_1h['ATRr_14'], p['atr_threshold'], p['min_spacing'])
+    if developing_hp and (not liq_hp or developing_hp[-1] > liq_hp[-1]):
+        liq_hp = liq_hp + [developing_hp[-1]]
+    if developing_lp and (not liq_lp or developing_lp[-1] > liq_lp[-1]):
+        liq_lp = liq_lp + [developing_lp[-1]]
     bsl = df_1h['high'].iloc[liq_hp[-1]] if liq_hp else df_1h['high'].max()
     ssl = df_1h['low'].iloc[liq_lp[-1]] if liq_lp else df_1h['low'].min()
     curr_price = df_1h['close'].iloc[-1]; curr = df_1h.iloc[-1]
@@ -475,6 +484,15 @@ def build_exec_context(df, symbol=None, timeframe="15m"):
     atr_threshold = dynamic_pivot_threshold(regime_info, p['atr_threshold_low'], p['atr_threshold_normal'], p['atr_threshold_high'])
     liq_hp = find_pivots(df['high'], p['left'], p['right'], True, df['ATRr_14'], atr_threshold, p['min_spacing'])
     liq_lp = find_pivots(df['low'], p['left'], p['right'], False, df['ATRr_14'], atr_threshold, p['min_spacing'])
+    # 【修复】实时 Developing Pivot（消除右侧确认延迟）
+    # 原逻辑中最新 right 根 K 线永远无法被识别为 Pivot，
+    # 导致 BSL/SSL、CHOCH、Sweep 检测使用旧结构点，最新 4~7 根 K 线无法触发信号。
+    developing_hp = find_developing_pivots(df['high'], p['left'], p['right'], True, df['ATRr_14'], atr_threshold, p['min_spacing'])
+    developing_lp = find_developing_pivots(df['low'], p['left'], p['right'], False, df['ATRr_14'], atr_threshold, p['min_spacing'])
+    if developing_hp and (not liq_hp or developing_hp[-1] > liq_hp[-1]):
+        liq_hp = liq_hp + [developing_hp[-1]]
+    if developing_lp and (not liq_lp or developing_lp[-1] > liq_lp[-1]):
+        liq_lp = liq_lp + [developing_lp[-1]]
 
     eval_idx = max(0, target_idx - 8)
     bsl_idx, bsl_level = _last_unswept_high(df, liq_hp, target_idx, eval_idx)
