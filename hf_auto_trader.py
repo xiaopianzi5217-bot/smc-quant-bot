@@ -2007,9 +2007,9 @@ def check_and_open(result: dict | None) -> bool:
     try:
         account_balance = 1000.0
         try:
-            from state.portfolio_state import get_portfolio_state
-            ps = get_portfolio_state()
-            account_balance = float(ps.get("balance", 1000.0))
+            from risk.portfolio_state import PortfolioStateManager
+            _ps = PortfolioStateManager().load()
+            account_balance = float(getattr(_ps, "equity", 1000.0))
         except Exception:
             pass
 
