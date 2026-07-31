@@ -506,9 +506,10 @@ async def scan_and_decide(symbol: str) -> dict | None:
         if _probe is not None and not _probe.empty:
             _probe_key = str(_probe["datetime"].iloc[-1])
             if _last_bar_dt_by_symbol.get(symbol) == _probe_key:
-                slog.info(f"[{symbol}] K线未更新（{_probe_key}），跳过本轮全量拉取与重算")
+                # 仅做快速跳过，不写缓存——缓存统一由下方全量层 _last_bar_key 写入，
+                # 否则新K线首次检出时缓存已被探针提前改成新时间，全量层会误判跳过本轮重算。
+                slog.debug(f"[{symbol}] K线未更新（{_probe_key}），跳过本轮全量拉取与重算")
                 return None
-            _last_bar_dt_by_symbol[symbol] = _probe_key
     except Exception as _probe_e:
         slog.warning(f"[{symbol}] K线预检失败，继续全量拉取: {_probe_e}")
 
@@ -536,7 +537,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     # 双保险：全量拉取后再次比对最新K线，防止预检与全量之间出现时间窗口空洞
     _last_bar_key = str(df_exec["datetime"].iloc[-1]) if "datetime" in df_exec.columns else str(len(df_exec))
     if _last_bar_dt_by_symbol.get(symbol) == _last_bar_key:
-        slog.info(f"[{symbol}] K线未更新（{_last_bar_key}），跳过本轮全量重算")
+        slog.debug(f"[{symbol}] K线未更新（{_last_bar_key}），跳过本轮全量重算")
         return None
     _last_bar_dt_by_symbol[symbol] = _last_bar_key
 
