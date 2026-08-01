@@ -966,7 +966,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "symbol": symbol,
         "direction": direction,
         "expected_value": round(ev, 4),
-        "score": round(_fl_final_score, 2),  # 风控否决/调整后的最终分（关键修复：不再使用原始 score）
+        "score": round(_fl_final_score, 2),  # 风控否决/调整后的最终分
+        "orig_score": round(score, 2),  # 原始进入 V56.5 / Calibration 评分，用于 V6 路由判断
         "final_score": round(_fl_final_score, 2),  # 对外暴露的最终分，供 V6 路由判断
         "rejected": _fl_final_score <= 0.0,  # 被一票否决归零后，路由层必须据此拦截
         "entry": entry_price,
@@ -1463,8 +1464,8 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
     """
     【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
     """
-    # 优先使用最终分（风控否决/调整后），杜绝路由拿到未扣分的原始 score
-    score = float(result.get("v6_final_score", result.get("score", 0.0)) or 0.0)
+    # 优先使用原始 V56.5 score（若存在），避免风控 / 特征惩罚后把好信号压进 RESEARCH_SILENT/ABSOLUTE_DROP
+    score = float(result.get("orig_score", result.get("v6_final_score", result.get("score", 0.0))) or 0.0)
     result["v6_final_score"] = score
     if score <= 0.0:
         result["v6_level"] = "REJECT_GRADE"
@@ -1577,7 +1578,48 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         })
     except Exception:
         pass
-    safe_send(f"🟢 开单通知\n级别: {level} ({score}分)\n标的: {symbol}\n实盘仓位: {trade_size}", priority="TRADE")
+    entry = result.get("entry", 0.0)
+    sl = result.get("sl", 0.0)
+    tp1 = result.get("tp1", 0.0)
+    tp2 = result.get("tp2", 0.0)
+    tp3 = result.get("tp3", 0.0)
+    ev = result.get("expected_value", 0.0)
+    rr = result.get("rr", 0.0)
+    reason = result.get("reason", "?")
+
+    def _translate_reason(reason_text: str) -> str:
+        if not reason_text:
+            return ''
+        text = str(reason_text).lower()
+        parts = []
+        if 'v56.5' in text or 'v56_5' in text:
+            parts.append('来自 V56.5 信号引擎')
+        if 'structure_override' in text or 'override' in text:
+            parts.append('结构覆盖通道：该信号结构强度高，满足 V56.5 的 Structure Override 特权通道，优先通过后续质量过滤。')
+        if 'liquidity_sweep' in text:
+            parts.append('流动性扫单：关键流动性区域被扫，属于高结构信号。')
+        if 'choch' in text:
+            parts.append('结构转变：市场当前出现结构性转折，方向有变动。')
+        if 'fvg' in text:
+            parts.append('失衡区：市场存在价格回补机会。')
+        if 'bos' in text:
+            parts.append('结构突破：价格已突破关键结构位，动量方向明确。')
+        if not parts:
+            return reason_text
+        return '；'.join(parts)
+
+    reason_cn = _translate_reason(reason)
+    safe_send(
+        f"🟢 开单通知\n"
+        f"级别: {level} ({score:.1f}分)\n"
+        f"标的: {symbol} ({result.get('direction','?')})\n"
+        f"仓位: {trade_size:.4f}\n"
+        f"入场: {entry:.2f}  SL: {sl:.2f}  TP1: {tp1:.2f}  TP2: {tp2:.2f}  TP3: {tp3:.2f}\n"
+        f"评分: {score:.1f} | EV: {ev:.4f} | RR: {rr:.2f}\n"
+        f"原因: {reason}\n"
+        f"说明: {reason_cn}",
+        priority="TRADE",
+    )
     return True
 
 
@@ -1971,11 +2013,27 @@ def check_and_open(result: dict | None) -> bool:
         except: pass
     _liq_text_x = '\n'.join(_liq_lines) if _liq_lines else ''
 
+    def _translate_reason(reason_text: str) -> str:
+        if not reason_text:
+            return ''
+        text = str(reason_text).lower()
+        parts = []
+        if 'v56.5' in text or 'v56_5' in text:
+            parts.append('来自 V56.5 信号引擎')
+        for key, desc in _REASON_TRANSLATIONS.items():
+            if key in text and desc not in parts:
+                parts.append(desc)
+        if not parts:
+            return reason_text
+        return '；'.join(parts)
+
+    reason_cn = _translate_reason(reason)
     msg = "\n".join([
         f"{dir_emoji2} [{symbol}] {dir_cn} 信号通过",
         f"入场: {entry:.2f}  SL: {sl:.2f}  TP1: {tp1:.2f}  TP2: {tp2:.2f}  TP3: {tp3:.2f}",
         f"评分: {score:.1f} | EV: {ev:.4f} | RR: {rr:.2f}",
         f"原因: {reason}",
+        f"说明: {reason_cn}",
         f"多头: {lp_s:.1f}分  空头: {sp_s:.1f}分  分差: {sg:.1f}分",
     ])
     safe_send(msg, priority="TRADE")
