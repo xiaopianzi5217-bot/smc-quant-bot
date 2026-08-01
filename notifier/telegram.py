@@ -39,6 +39,22 @@ def _telegram_config():
     return token, chat_id, api_base
 
 
+def _resolve_wechat_token(token_file: Path | None = None) -> str:
+    """兼容旧版 PUSHPLUS_TOKEN 和部署常见的 WX_BOT_KEY。"""
+    file_path = token_file or Path(__file__).resolve().parents[1] / "config" / "pushplus_token.txt"
+    token = ""
+    if file_path.exists():
+        try:
+            token = file_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    if not token:
+        token = _env("PUSHPLUS_TOKEN", "WX_BOT_KEY", "WX_TOKEN", default="")
+    if not token:
+        token = _env("TG_BOT_TOKEN", default="")
+    return token.strip().strip("\"'")
+
+
 def _post(url, data, timeout=30):
     return requests.post(
         url,
@@ -58,19 +74,17 @@ def _get(url, timeout=30):
 
 def send_telegram(message: str) -> str:
     # --- 微信双发代码开始 (已扁平化防手机缩进报错) ---
-    # --- 微信双发代码开始 (已扁平化防手机缩进报错) ---
-    wechat_token_file = Path(__file__).resolve().parents[1] / "config" / "pushplus_token.txt"
-    wechat_token = ""
-    if wechat_token_file.exists():
-        try:
-            wechat_token = wechat_token_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    if not wechat_token:
-        wechat_token = os.getenv("PUSHPLUS_TOKEN", "")
+    wechat_token = _resolve_wechat_token()
     if wechat_token:
-        try: print("[DEBUG] 微信推送:", requests.post("http://www.pushplus.plus/send", data={"token": wechat_token, "title": "SMC量化通知", "content": str(message), "template": "html"}, timeout=5).text)
-        except Exception as e: print(f"[DEBUG] 微信异常: {e}")
+        try:
+            resp = requests.post(
+                "https://www.pushplus.plus/send",
+                data={"token": wechat_token, "title": "SMC量化通知", "content": str(message), "template": "html"},
+                timeout=(5, 10),
+            )
+            print("[DEBUG] 微信推送:", resp.text)
+        except Exception as e:
+            print(f"[DEBUG] 微信异常: {e}")
     else:
         slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
     # --- 微信双发代码结束 ---
@@ -131,18 +145,17 @@ def send_telegram(message: str) -> str:
 
 def test_telegram() -> str:
     # --- 微信测试代码开始 (已扁平化防手机缩进报错) ---
-    wechat_token_file = Path(__file__).resolve().parents[1] / "config" / "pushplus_token.txt"
-    wechat_token = ""
-    if wechat_token_file.exists():
-        try:
-            wechat_token = wechat_token_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    if not wechat_token:
-        wechat_token = os.getenv("PUSHPLUS_TOKEN", "")
+    wechat_token = _resolve_wechat_token()
     if wechat_token:
-        try: print("[DEBUG] 微信测试:", requests.post("http://www.pushplus.plus/send", data={"token": wechat_token, "title": "SMC系统测试", "content": "测试联通成功！微信与Telegram均已激活。", "template": "html"}, timeout=5).text)
-        except Exception as e: print(f"[DEBUG] 微信测试异常: {e}")
+        try:
+            resp = requests.post(
+                "https://www.pushplus.plus/send",
+                data={"token": wechat_token, "title": "SMC系统测试", "content": "测试联通成功！微信与Telegram均已激活。", "template": "html"},
+                timeout=(5, 10),
+            )
+            print("[DEBUG] 微信测试:", resp.text)
+        except Exception as e:
+            print(f"[DEBUG] 微信测试异常: {e}")
     else:
         slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
     # --- 微信测试代码结束 ---
