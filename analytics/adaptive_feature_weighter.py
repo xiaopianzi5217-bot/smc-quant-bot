@@ -49,24 +49,53 @@ def update_feature(feature: str, outcome_r: float) -> None:
     if feature not in feature_weighter.feature_stats:
         return
 
-    # 样本保护：累计 <30 笔时不更新权重
+    # 样本保护与分阶段限幅策略：
+    # 0-99 笔：仅记录样本，不调整权重（数据收集阶段）
+    # 100-499 笔：轻微调整，权重相对当前值波动不超过 ±5%
+    # 500-999 笔：放宽限制，允许更大调整（最多 ±20%），但仍保持分层上下界
+    # >=1000 笔：按原始逻辑更新（但仍受全局上下界限制）
     feature_weighter.samples[feature] = feature_weighter.samples.get(feature, 0) + 1
-    if feature_weighter.samples[feature] < 30:
-        return
 
     s = feature_weighter.feature_stats[feature]
-    if abs(outcome_r) >= 0.2:
-        s["trades"] += 1
-        if outcome_r > 0.2:
-            s["wins"] += 1
-        prev_total = s.get("avg_r", 0) * (s["trades"] - 1)
-        s["avg_r"] = (prev_total + outcome_r) / s["trades"]
-        win_rate = s["wins"] / s["trades"] if s["trades"] > 0 else 0.5
-        new_weight = 0.6 * s.get("weight", 1.0) + 0.4 * (win_rate * 1.8 + s["avg_r"] * 0.8)
-        # 分层限幅：Structure 层 [0.70, 1.30]；新增层 [0.85, 1.15]
-        _new_features = {"LIQUIDITY", "VOLATILITY", "REGIME", "VWAP"}
-        if feature in _new_features:
-            new_weight = max(0.85, min(new_weight, 1.15))
-        else:
-            new_weight = max(0.70, min(new_weight, 1.30))
-        s["weight"] = new_weight
+    if abs(outcome_r) < 0.2:
+        # 对非常小的 outcome_r 不纳入样本统计
+        return
+
+    # 更新统计量（trade/win/avg_r）在所有阶段都进行
+    s["trades"] += 1
+    if outcome_r > 0.2:
+        s["wins"] += 1
+    prev_total = s.get("avg_r", 0) * (s["trades"] - 1)
+    s["avg_r"] = (prev_total + outcome_r) / s["trades"]
+    win_rate = s["wins"] / s["trades"] if s["trades"] > 0 else 0.5
+
+    current = s.get("weight", 1.0)
+    # 基础候选权重（原始计算逻辑）
+    candidate = 0.6 * current + 0.4 * (win_rate * 1.8 + s["avg_r"] * 0.8)
+
+    samples = feature_weighter.samples[feature]
+    # 分层限幅基础
+    _new_features = {"LIQUIDITY", "VOLATILITY", "REGIME", "VWAP"}
+    if feature in _new_features:
+        global_min, global_max = 0.85, 1.15
+    else:
+        global_min, global_max = 0.70, 1.30
+
+    if samples < 100:
+        # 仅记录，不更新权重
+        return
+    elif samples < 500:
+        # 轻微调整 ±5%
+        lower = max(global_min, current * 0.95)
+        upper = min(global_max, current * 1.05)
+        new_weight = max(lower, min(candidate, upper))
+    elif samples < 1000:
+        # 中度调整 ±20%（受全局上下界约束）
+        lower = max(global_min, current * 0.80)
+        upper = min(global_max, current * 1.20)
+        new_weight = max(lower, min(candidate, upper))
+    else:
+        # >=1000：放开到全局上下界
+        new_weight = max(global_min, min(candidate, global_max))
+
+    s["weight"] = new_weight

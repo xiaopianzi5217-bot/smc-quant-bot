@@ -90,7 +90,15 @@ class TradeLifecycleManager:
             if dispatch_execution_event:
                 dispatch_execution_event(event)
             elif self.notifier:
-                self.notifier(event["message"])
+                # 传递完整 event 对象以包含 raw/详情，避免仅发送简短 message 导致信息丢失
+                try:
+                    self.notifier(event)
+                except Exception:
+                    # 兼容接收字符串的旧式 notifier
+                    try:
+                        self.notifier(event.get("message"))
+                    except Exception:
+                        pass
             return {"event": "STOP_LOSS", "symbol": symbol, "price": price, "closed_size": close_size}
 
         if hit_tp1 and not p.tp1_done:
@@ -141,7 +149,14 @@ class TradeLifecycleManager:
             if dispatch_execution_event:
                 dispatch_execution_event(event)
             elif self.notifier:
-                self.notifier(msg)
+                # 传递完整 event 对象，包含 raw/details
+                try:
+                    self.notifier(event)
+                except Exception:
+                    try:
+                        self.notifier(msg)
+                    except Exception:
+                        pass
             return {"event": "MANAGE", "symbol": symbol, "actions": actions, "remaining_size": getattr(p, "remaining_size", None)}
 
         return {"event": "HOLD", "symbol": symbol, "price": price, "remaining_size": remaining}

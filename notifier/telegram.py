@@ -40,7 +40,7 @@ def _telegram_config():
 
 
 def _resolve_wechat_token(token_file: Path | None = None) -> str:
-    """兼容旧版 PUSHPLUS_TOKEN 和部署常见的 WX_BOT_KEY。"""
+    """兼容多种部署环境下的微信/PushPlus token 变量名。"""
     file_path = token_file or Path(__file__).resolve().parents[1] / "config" / "pushplus_token.txt"
     token = ""
     if file_path.exists():
@@ -49,7 +49,18 @@ def _resolve_wechat_token(token_file: Path | None = None) -> str:
         except Exception:
             pass
     if not token:
-        token = _env("PUSHPLUS_TOKEN", "WX_BOT_KEY", "WX_TOKEN", default="")
+        for env_name in (
+            "PUSHPLUS_TOKEN",
+            "WX_BOT_KEY",
+            "WX_TOKEN",
+            "WEIXIN_BOT_KEY",
+            "WECHAT_BOT_KEY",
+            "WEIXIN_TOKEN",
+            "WECHAT_TOKEN",
+        ):
+            token = _env(env_name, default="")
+            if token:
+                break
     if not token:
         token = _env("TG_BOT_TOKEN", default="")
     return token.strip().strip("\"'")
@@ -82,11 +93,16 @@ def send_telegram(message: str) -> str:
                 data={"token": wechat_token, "title": "SMC量化通知", "content": str(message), "template": "html"},
                 timeout=(5, 10),
             )
+            if resp.status_code != 200:
+                slog.warning(f"[DEBUG] 微信推送失败: HTTP {resp.status_code}｜{resp.text[:300]}")
+            else:
+                slog.info("[DEBUG] 微信推送成功")
             print("[DEBUG] 微信推送:", resp.text)
         except Exception as e:
+            slog.error(f"[DEBUG] 微信异常: {e}")
             print(f"[DEBUG] 微信异常: {e}")
     else:
-        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
+        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus/WeChat Token。请在 HuggingFace Secrets 中配置 PUSHPLUS_TOKEN 或 WX_BOT_KEY")
     # --- 微信双发代码结束 ---
 
     token, chat_id, api_base = _telegram_config()
@@ -153,11 +169,16 @@ def test_telegram() -> str:
                 data={"token": wechat_token, "title": "SMC系统测试", "content": "测试联通成功！微信与Telegram均已激活。", "template": "html"},
                 timeout=(5, 10),
             )
+            if resp.status_code != 200:
+                slog.warning(f"[DEBUG] 微信测试失败: HTTP {resp.status_code}｜{resp.text[:300]}")
+            else:
+                slog.info("[DEBUG] 微信测试成功")
             print("[DEBUG] 微信测试:", resp.text)
         except Exception as e:
+            slog.error(f"[DEBUG] 微信测试异常: {e}")
             print(f"[DEBUG] 微信测试异常: {e}")
     else:
-        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus Token")
+        slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus/WeChat Token。请在 HuggingFace Secrets 中配置 PUSHPLUS_TOKEN 或 WX_BOT_KEY")
     # --- 微信测试代码结束 ---
 
     token, chat_id, api_base = _telegram_config()

@@ -162,44 +162,286 @@ def dynamic_position_risk(trade_history: list, exec_ctx: Dict[str, Any] | None =
         
     return base_mult
 
-def check_partial_close_and_trail(direction: str, current_price: float, entry_price: float, current_sl: float, tp1: float, tp2: float, atr: float = 0.0, stage: int = 0) -> dict:
+def check_partial_close_and_trail(
+    position,
+    current_price
+) -> dict:
     """
-    鍔ㄦ€佽拷韪闀匡細1.5 鍊?ATR锛屾窐姹板浐瀹氱櫨鍒嗘瘮杩借釜銆?
+    动态止盈止损管理 V58.7
+
+    返回:
+    {
+        action:
+        reason:
+        new_sl:
+        stage:
+    }
+
+    action:
+        HOLD
+        MOVE_SL
+        PARTIAL_CLOSE
+        CLOSE_ALL
     """
-    d = str(direction or "").lower()
-    res = {"action": "HOLD", "close_pct": 0.0, "new_sl": current_sl, "new_stage": stage}
-    if entry_price <= 0 or current_price <= 0: return res
 
-    trail_dist = (atr * 1.5) if atr > 0 else (current_price * 0.01)
+    if not position:
+        return {
+            "action": "HOLD",
+            "reason": "NO_POSITION"
+        }
 
-    if "long" in d:
-        if stage < 2 and current_price >= tp2:
-            res["action"] = "PARTIAL_CLOSE"
-            res["close_pct"] = 0.30 
-            res["new_sl"] = max(current_sl, tp1)
-            res["new_stage"] = 2
-        elif stage < 1 and current_price >= tp1:
-            res["action"] = "PARTIAL_CLOSE"
-            res["close_pct"] = 0.30 
-            res["new_sl"] = max(current_sl, entry_price * 1.002) 
-            res["new_stage"] = 1
-        elif stage >= 2 and current_price > entry_price:
-            res["action"] = "TRAIL_ONLY"
-            res["new_sl"] = max(current_sl, current_price - trail_dist)
-    
-    if "short" in d:
-        if stage < 2 and current_price <= tp2:
-            res["action"] = "PARTIAL_CLOSE"
-            res["close_pct"] = 0.30
-            res["new_sl"] = min(current_sl, tp1) if current_sl > 0 else tp1
-            res["new_stage"] = 2
-        elif stage < 1 and current_price <= tp1:
-            res["action"] = "PARTIAL_CLOSE"
-            res["close_pct"] = 0.30
-            res["new_sl"] = min(current_sl, entry_price * 0.998) if current_sl > 0 else entry_price * 0.998
-            res["new_stage"] = 1
-        elif stage >= 2 and current_price < entry_price:
-            res["action"] = "TRAIL_ONLY"
-            res["new_sl"] = min(current_sl, current_price + trail_dist) if current_sl > 0 else current_price + trail_dist
-            
-    return res
+    # 兼容旧 key: 支持 `side` 或 `direction`，entry/entry_price，stop_loss/current_sl
+    side = position.get("side") or position.get("direction")
+
+    entry = float(position.get("entry") or position.get("entry_price") or 0)
+    sl = float(position.get("stop_loss") or position.get("current_sl") or position.get("sl") or 0)
+
+    tp1 = float(position.get("tp1") or 0)
+    tp2 = float(position.get("tp2") or 0)
+
+    stage = int(position.get("stage", 0) or 0)
+
+    if entry <= 0:
+        return {
+            "action": "HOLD",
+            "reason": "INVALID_ENTRY"
+        }
+
+    # ============================
+    # 计算R
+    # ============================
+
+    risk = abs(entry - sl)
+
+    if risk <= 0:
+        return {
+            "action":"HOLD",
+            "reason":"INVALID_RISK"
+        }
+
+    if str(side or "").lower().startswith("long"):
+        profit_r = (current_price - entry) / risk
+    else:
+        profit_r = (entry - current_price) / risk
+
+    # ============================
+    # 1. 首先检查硬止损
+    # ============================
+
+    if str(side or "").lower().startswith("long"):
+        if current_price <= sl:
+            return {
+                "action":
+                    "CLOSE_ALL",
+
+                "reason":
+                    "STOP_LOSS",
+
+                "profit_r":
+                    round(profit_r,3),
+
+                "stage":
+                    stage
+            }
+    else:
+        if current_price >= sl:
+            return {
+                "action":
+                    "CLOSE_ALL",
+
+                "reason":
+                    "STOP_LOSS",
+
+                "profit_r":
+                    round(profit_r,3),
+
+                "stage":
+                    stage
+            }
+
+    # ============================
+    # 2. 盈利0.8R 保本
+    # ============================
+
+    if profit_r >= 0.8 and stage < 1:
+
+        return {
+
+            "action":
+                "MOVE_SL",
+
+            "new_sl":
+                entry,
+
+            "reason":
+                "BREAKEVEN_PROTECT",
+
+            "stage":
+                1,
+
+            "profit_r":
+                round(profit_r,3)
+
+        }
+
+    # ============================
+    # 3. TP1 部分止盈
+    # ============================
+
+    if stage < 2:
+
+        if str(side or "").lower().startswith("long"):
+
+            hit_tp1 = (
+                current_price >= tp1
+            )
+
+        else:
+
+            hit_tp1 = (
+                current_price <= tp1
+            )
+
+        if hit_tp1:
+
+            return {
+
+                "action":
+                    "PARTIAL_CLOSE",
+
+                "close_percent":
+                    50,
+
+                "reason":
+                    "TP1_HIT",
+
+                "stage":
+                    2,
+
+                "profit_r":
+                    round(profit_r,3)
+
+            }
+
+    # ============================
+    # 4. TP2 后启动追踪
+    # ============================
+
+    if stage >=2:
+
+        trail_distance = risk * 0.5
+
+        if str(side or "").lower().startswith("long"):
+
+            new_sl = (
+                current_price -
+                trail_distance
+            )
+
+            if new_sl > sl:
+
+                return {
+
+                    "action":
+                        "MOVE_SL",
+
+                    "new_sl":
+                        new_sl,
+
+                    "reason":
+                        "TRAILING_STOP",
+
+                    "stage":
+                        3,
+
+                    "profit_r":
+                        round(
+                            profit_r,
+                            3
+                        )
+                }
+
+        else:
+
+            new_sl = (
+                current_price +
+                trail_distance
+            )
+
+            if new_sl < sl:
+
+                return {
+
+                    "action":
+                        "MOVE_SL",
+
+                    "new_sl":
+                        new_sl,
+
+                    "reason":
+                        "TRAILING_STOP",
+
+                    "stage":
+                        3,
+
+                    "profit_r":
+                        round(
+                            profit_r,
+                            3
+                        )
+                }
+
+    # ============================
+    # 5. TP2全部退出
+    # ============================
+
+    if str(side or "").lower().startswith("long"):
+
+        hit_tp2 = (
+            current_price>=tp2
+        )
+
+    else:
+
+        hit_tp2 = (
+            current_price<=tp2
+        )
+
+    if hit_tp2:
+
+        return {
+
+            "action":
+                "CLOSE_ALL",
+
+            "reason":
+                "TP2_HIT",
+
+            "profit_r":
+                round(
+                    profit_r,
+                    3
+                ),
+
+            "stage":
+                4
+
+        }
+
+    return {
+
+        "action":
+            "HOLD",
+
+        "reason":
+            "WAIT",
+
+        "profit_r":
+            round(
+                profit_r,
+                3
+            ),
+
+        "stage":
+            stage
+    }

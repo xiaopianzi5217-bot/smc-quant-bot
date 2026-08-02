@@ -14,6 +14,8 @@ try:
 except Exception:
     pass
 
+from analytics.exit_event_logger import exit_logger
+
 # 压制 asyncio / Gradio 退出时 "Invalid file descriptor: -1" 警告
 warnings.filterwarnings("ignore", category=ResourceWarning)
 warnings.filterwarnings("ignore", message=".*Invalid file descriptor.*")
@@ -60,6 +62,7 @@ from decision.v9_decision_kernel import V9DecisionKernel
 from decision.v37_gate import v37_final_gate
 from state.position_manager import position_manager
 from state.position_reconciler import position_reconciler
+from state.trade_journal import journal as trade_journal
 from utils.safe_extract import safe_get, safe_get_str, safe_get_float
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
@@ -493,7 +496,7 @@ def execution_layer_status(symbol):
 def background_monitor_worker():
     import requests
     import time
-    slog.info("[Monitor] 后台守护线程已启动 (灾难监控 & 追踪止损 5s轮询)...")
+    slog.info("[Monitor] 后台守护线程已启动(灾难监控 & 追踪止损 5s轮询)...")
     
     def _get_price(sym):
         try:
@@ -512,16 +515,16 @@ def background_monitor_worker():
     
     loop_count = 0
     while True:
-        time.sleep(5)  # 【修复1】将 60 秒改为 5 秒，确保不会错过插针行情
+        time.sleep(5)
         loop_count += 1
         try:
-                        # 0. 定期持仓对账（每 24 次 ≈ 120s）
+            # 0. 定期持仓对账（每 24 次 ≈120s）
             if loop_count % 24 == 0:
                 try:
                     position_reconciler.periodic_check(min_interval_sec=100.0)
                 except Exception as _re:
                     slog.error(f"[Monitor] reconciler 异常: {_re}")
-            # 1. 灾难自愈检测 (没必要每5秒查一次，每12次即60秒查一次即可)
+            # 1. 灾难自愈检测（每 12 次即 60 秒查一次即可）
             if loop_count % 12 == 0:
                 if not health_monitor.is_healthy():
                     stales = health_monitor.check_stale_symbols()
@@ -540,42 +543,98 @@ def background_monitor_worker():
                 if curr_price is None:
                     continue
                 
-                # 调用我们在 risk.py 中写的超强分批止盈逻辑
+                # 更新 MFE/MAE（最大有利/不利波动）
+                try:
+                    if str(pos.get('direction','')).lower().startswith('long'):
+                        pos['mfe'] = max(pos.get('mfe', 0), curr_price - float(pos.get('entry') or pos.get('entry_price') or 0))
+                        pos['mae'] = min(pos.get('mae', 0), curr_price - float(pos.get('entry') or pos.get('entry_price') or 0))
+                    else:
+                        pos['mfe'] = max(pos.get('mfe', 0), float(pos.get('entry') or pos.get('entry_price') or 0) - curr_price)
+                        pos['mae'] = min(pos.get('mae', 0), float(pos.get('entry') or pos.get('entry_price') or 0) - curr_price)
+                    try:
+                        position_manager.update(sym, dict(pos))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # 调用 risk.py 的超强分批止盈逻辑（新签名：传入 position dict）
                 action_plan = check_partial_close_and_trail(
-                    direction=pos['direction'],
-                    current_price=curr_price,
-                    entry_price=pos['entry'],
-                    current_sl=pos['current_sl'],
-                    tp1=pos['tp1'],
-                    tp2=pos['tp2'],
-                    stage=safe_get(pos, 'stage', default=0)
+                    pos,
+                    curr_price
+                )
+
+                slog.info(
+                    f"""
+[EXIT_MANAGER]
+symbol={sym}
+action={action_plan.get('action')}
+reason={action_plan.get('reason')}
+R={action_plan.get('profit_r')}
+stage={action_plan.get('stage')}
+"""
                 )
                 
-                if action_plan['action'] == 'PARTIAL_CLOSE':
-                    msg = f"🏆 [{sym}] 到达目标位! 平仓 {action_plan['close_pct']*100}%，止损移至 {action_plan['new_sl']}"
+                if action_plan.get('action') == 'PARTIAL_CLOSE':
+                    pct = action_plan.get('close_percent') or action_plan.get('close_pct') or 0
+                    # close_percent 以百分比表示 (eg. 50)
+                    pct_display = f"{pct}%" if pct > 1 else f"{pct*100:.0f}%"
+                    msg = f"🎯 [{sym}] 到达目标位 平仓 {pct_display}，止损移至 {action_plan.get('new_sl')}"
                     safe_send_telegram(msg)
-                    pos['current_sl'] = action_plan['new_sl']
-                    pos['stage'] = action_plan['new_stage']
-                    # ===== [修复20260817] 回写 position_manager =====
+                    if action_plan.get('new_sl') is not None:
+                        pos['current_sl'] = action_plan.get('new_sl')
+                    pos['stage'] = action_plan.get('stage', pos.get('stage', 0))
                     try:
                         position_manager.update(sym, dict(pos))
                     except Exception as _pm_e:
                         slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
-                elif action_plan['action'] == 'TRAIL_ONLY' and abs(pos['current_sl'] - action_plan['new_sl']) > curr_price * 0.001:
-                    pos['current_sl'] = action_plan['new_sl']
-                    safe_send_telegram(f"🛡️ [{sym}] 追踪止损已推移至 {action_plan['new_sl']}")
-                    # ===== [修复20260817] 回写 position_manager =====
+                elif action_plan.get('action') == 'MOVE_SL' and action_plan.get('new_sl') is not None:
+                    # 包括保本与追踪止损
+                    new_sl = action_plan.get('new_sl')
+                    if abs(pos.get('current_sl', 0) - new_sl) > curr_price * 0.001:
+                        pos['current_sl'] = new_sl
+                        pos['stage'] = action_plan.get('stage', pos.get('stage', 0))
+                        safe_send_telegram(f"🛡️ [{sym}] 止损已推移至 {new_sl}")
+                        try:
+                            position_manager.update(sym, dict(pos))
+                        except Exception as _pm_e:
+                            slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
+
+                elif action_plan['action'] == 'CLOSE_ALL':
+                    # ===== [修复20260825] 止损平仓真正触发：通知 + 回写 outcome + 清仓 =====
+                    _dir = pos.get('direction', 'Long')
+                    _entry = float(pos.get('entry') or 0.0)
+                    _sl = float(pos.get('current_sl') or pos.get('sl') or 0.0)
+                    _risk = abs(_entry - _sl) if (_entry and _sl) else 0.0
+                    _pnl_r = 0.0
+                    if _risk > 0:
+                        _pnl_r = (curr_price - _entry) / _risk if _dir == 'Long' else (_entry - curr_price) / _risk
+                    _sig_id = pos.get('signal_id') or ''
+                    msg = f"🛑 [{sym}] 触发止损全平 {_dir} @{curr_price:.2f} pnl_r={_pnl_r:.2f}"
+                    safe_send_telegram(msg)
+                    slog.info(f"[Monitor] {msg} signal_id={_sig_id}")
+                    # exit event will be logged from trading core (hf_auto_trader), avoid duplicate logging here
                     try:
-                        position_manager.update(sym, dict(pos))
-                    except Exception as _pm_e:
-                        slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
+                        _oid = pos.get('order_id') or pos.get('tracker_signal_id') or ''
+                        if _oid:
+                            trade_journal.close_trade(
+                                order_id=str(_oid),
+                                close_price=float(curr_price),
+                                pnl_r=float(_pnl_r),
+                                exit_reason='SL_MONITOR',
+                            )
+                    except Exception as _tj_e:
+                        slog.error(f"[Monitor] journal 平仓写入失败: {_tj_e}")
+                    try:
+                        position_manager.remove(sym)
+                    except Exception as _rm_e:
+                        slog.error(f"[Monitor] 持仓清理失败: {_rm_e}")
 
         except Exception as e:
             print(f"后台线程异常: {e}")
 
-# 后台守护线程不要在 import app 时自动启动；否则测试/热加载导入时会触发 ccxt 连接。
-# 实际 launch 时在 __main__ 中启动。
+
 def start_background_monitor():
     t = threading.Thread(target=background_monitor_worker, daemon=True)
     t.start()
@@ -652,6 +711,8 @@ def _start_hf_auto_trader():
 
     try:
         import hf_auto_trader
+        from analytics import start_outcome_worker
+        from analytics.daily_report import start_daily_report_scheduler
         import asyncio
         from execution.micro.feeder import MicroFeeder
 
@@ -666,6 +727,17 @@ def _start_hf_auto_trader():
         async def _run_async_main():
             _feeder = None
             try:
+                # 启动 OutcomeConsumer 后台 worker（每 30s 消费一次 events.jsonl）
+                try:
+                    t_worker = threading.Thread(target=start_outcome_worker, args=(30.0,), daemon=True)
+                    t_worker.start()
+                except Exception as _w_e:
+                    slog.error(f"[HF] 无法启动 OutcomeWorker: {_w_e}")
+                # 启动每日 UTC0 报表发送
+                try:
+                    start_daily_report_scheduler()
+                except Exception as _dr_e:
+                    slog.error(f"[HF] 无法启动 DailyReport scheduler: {_dr_e}")
                 if _feeder is not None:
                     slog.info("[Feeder] gather 启动 feeder + main_loop")
                     # 重要：使用 return_exceptions=True 防止一个协程异常导致另一个被取消

@@ -1,0 +1,11 @@
+{
+  "processed": {
+    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 18:45:00_s6_ev+0.035_rang": 1785593620.067399,
+    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 20:15:00_s6_ev+0.073_mixe": 1785593620.0703936,
+    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 20:30:00_s6_ev+0.066_rang": 1785593620.0733829,
+    "ETH/USDT_Long_FVG_TOUCH_dt2026-08-01 20:30:00_s5_ev+0.311_rang": 1785593620.0753775
+  },
+  "cooldowns": {},
+  "sl_times": {},
+  "updated_at": 1785593620.0753775
+}

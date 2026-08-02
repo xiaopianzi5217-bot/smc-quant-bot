@@ -10,6 +10,8 @@ class NotifierPushplusTests(unittest.TestCase):
         os.environ.pop("PUSHPLUS_TOKEN", None)
         os.environ.pop("WX_BOT_KEY", None)
         os.environ.pop("WX_TOKEN", None)
+        os.environ.pop("WEIXIN_BOT_KEY", None)
+        os.environ.pop("WECHAT_BOT_KEY", None)
         os.environ["WX_BOT_KEY"] = "alias-token"
 
         with tempfile.TemporaryDirectory() as tmpdir:

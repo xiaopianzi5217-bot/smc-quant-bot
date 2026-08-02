@@ -1,0 +1,9 @@
+{
+  "continue.pauseCodebaseIndexOnStart": true,
+  "continue.enableConsole": false,
+  "continue.enableQuickActions": false,
+  "continue.enableTabAutocomplete": false,
+  "continue.enableNextEdit": false,
+  "continue.showInlineTip": false,
+  "continue.disableQuickFix": true
+}
