@@ -20,6 +20,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pandas as pd
+import uuid
 
 # ---------- 基础指标与策略模块 ----------
 from indicators.basic import add_all_indicators, calculate_advanced_sqzmom
@@ -88,6 +89,7 @@ import utils.v6_event_hooks
 from analytics.event_schema import event_logger
 from analytics.outcome_db import OutcomeDatabase
 from analytics.feature_hash import generate_feature_hash
+from analytics.exit_event_logger import exit_logger
 
 # ---------- 全局参数 ----------
 MAX_DRAWDOWN_PCT = 15.0 
@@ -234,21 +236,25 @@ def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: 
         max_forward = max(max_forward, this_forward)
         max_adverse = max(max_adverse, this_adverse)
 
+        pos_tmp = {
+            "direction": direction,
+            "entry": entry,
+            "current_sl": current_sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "stage": stage,
+            "atr": atr,
+        }
+
         action_plan = check_partial_close_and_trail(
-            direction=direction,
-            current_price=close,
-            entry_price=entry,
-            current_sl=current_sl,
-            tp1=tp1,
-            tp2=tp2,
-            atr=atr,
-            stage=stage,
+            pos_tmp,
+            close,
         )
-        if action_plan["action"] == "PARTIAL_CLOSE":
-            current_sl = action_plan["new_sl"]
-            stage = action_plan["new_stage"]
-        elif action_plan["action"] == "TRAIL_ONLY":
-            current_sl = action_plan["new_sl"]
+        if action_plan.get("action") == "PARTIAL_CLOSE":
+            current_sl = action_plan.get("new_sl", current_sl)
+            stage = action_plan.get("stage", stage)
+        elif action_plan.get("action") == "MOVE_SL":
+            current_sl = action_plan.get("new_sl", current_sl)
 
         if direction == "Long":
             if low <= current_sl:
@@ -1625,6 +1631,8 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     # 之前只发通知、返回 True，从不调用 position_manager.update()
     # 导致 main_loop / background_monitor 永远看不到持仓 -> 永远不触发追踪止损/平仓
     try:
+        # 生成 trade_id 并保存到 position，供 ExitEventLogger 与 Outcome 去重使用
+        _trade_id = str(uuid.uuid4())
         position_manager.update(symbol, {
             "direction": result.get("direction", "Long"),
             "entry": entry,
@@ -1643,8 +1651,27 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             "atr": float(result.get("atr") or 0.0),
             "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
             "ml_active": bool(result.get("ml_active", False)),
+            "trade_id": _trade_id,
         })
         slog.info(f"[V6路由] {symbol} 持仓已写入 position_manager: {position_manager.get(symbol)}")
+        try:
+            # 记录 OPEN 事件，便于后续与 EXIT 关联
+            try:
+                exit_logger.log_open(symbol, position_manager.get(symbol))
+            except Exception:
+                slog.error(f"[V6路由] exit_logger.log_open 失败: {symbol}")
+
+            try:
+                from analytics.state_recovery import save_positions
+
+                try:
+                    save_positions(position_manager.get())
+                except Exception as _sp_e:
+                    slog.error(f"[StateRecovery] save_positions failed: {_sp_e}")
+            except Exception:
+                pass
+        except Exception:
+            pass
     except Exception as _pm_e:
         slog.error(f"[V6路由] 持仓写入失败: {_pm_e}")
         traceback.print_exc()
@@ -2115,6 +2142,15 @@ def check_and_open(result: dict | None) -> bool:
         "ml_active": bool(result.get("ml_active", False)),
     })
 
+    try:
+        from analytics.state_recovery import save_positions
+        try:
+            save_positions(position_manager.get())
+        except Exception:
+            pass
+    except Exception:
+        pass
+
         # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
 
     # ===== V2 智能仓位计算器 + 熔断器乘数 =====
@@ -2179,6 +2215,11 @@ def check_and_open(result: dict | None) -> bool:
         if _pos_data:
             _pos_data["tracker_signal_id"] = _tracker_signal_id
             position_manager.update(symbol, _pos_data)
+            try:
+                from analytics.state_recovery import save_positions
+                save_positions(position_manager.get())
+            except Exception:
+                pass
             _fb_raw_scores = result.get("_feedback_raw_scores", {})
             if _tracker_signal_id and _fb_raw_scores:
                 _feature_learner.record_features(signal_id=_tracker_signal_id, features=_fb_raw_scores)
@@ -2209,6 +2250,11 @@ def check_and_open(result: dict | None) -> bool:
             if _pos_data:
                 _pos_data["order_id"] = _order_id
                 position_manager.update(symbol, _pos_data)
+                try:
+                    from analytics.state_recovery import save_positions
+                    save_positions(position_manager.get())
+                except Exception:
+                    pass
     except Exception as tj_err:
         slog.error(f"[TradeJournal] 写入失败: {tj_err}")
     
@@ -2313,6 +2359,11 @@ def check_and_open(result: dict | None) -> bool:
                 _pos_data2["audit_final_r"] = _fr
                 _pos_data2["audit_exit"] = _er
                 position_manager.update(symbol, _pos_data2)
+                try:
+                    from analytics.state_recovery import save_positions
+                    save_positions(position_manager.get())
+                except Exception:
+                    pass
     except Exception as _audit_e:
                 slog.error(f"[SignalAuditLog] 后验记录异常: {_audit_e}")
         
@@ -2346,27 +2397,87 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         stage = pos.get("stage", 0)
         tp1 = pos.get("tp1", 0)
         tp2 = pos.get("tp2", 0)
+        # 更新最大有利/不利波动（MFE / MAE）并回写持仓
+        try:
+            if str(pos.get("direction", "")).lower().startswith("long"):
+                pos["mfe"] = max(pos.get("mfe", 0), current_price - entry)
+                pos["mae"] = min(pos.get("mae", 0), current_price - entry)
+            else:
+                pos["mfe"] = max(pos.get("mfe", 0), entry - current_price)
+                pos["mae"] = min(pos.get("mae", 0), entry - current_price)
+            try:
+                position_manager.update(symbol, pos)
+                try:
+                    from analytics.state_recovery import save_positions
+                    save_positions(position_manager.get())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
         
+        pos_dict = {
+            "direction": direction,
+            "entry": entry,
+            "current_sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "stage": stage,
+            "atr": atr_val,
+        }
+
         action_plan = check_partial_close_and_trail(
-            direction=direction,
-            current_price=current_price,
-            entry_price=entry,
-            current_sl=sl,
-            tp1=tp1,
-            tp2=tp2,
-            atr=atr_val,
-            stage=stage,
+            pos_dict,
+            current_price,
         )
+
+        slog.info(
+            f"""
+[EXIT_MANAGER]
+symbol={symbol}
+action={action_plan.get('action')}
+reason={action_plan.get('reason')}
+R={action_plan.get('profit_r')}
+stage={action_plan.get('stage')}
+"""
+        )
+
+        if action_plan.get("action") == "PARTIAL_CLOSE":
+            if action_plan.get('new_sl') is not None:
+                pos["current_sl"] = action_plan.get("new_sl")
+            pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
+            position_manager.update(symbol, pos)
+            try:
+                from analytics.state_recovery import save_positions
+                save_positions(position_manager.get())
+            except Exception:
+                pass
+            safe_send(f"部分平仓: {symbol} {direction} @{current_price:.2f} new_sl={action_plan.get('new_sl'):.2f}", priority="TRADE")
+        elif action_plan.get("action") == "MOVE_SL" and action_plan.get('new_sl') is not None:
+            pos["current_sl"] = action_plan.get('new_sl')
+            pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
+            position_manager.update(symbol, pos)
+            try:
+                from analytics.state_recovery import save_positions
+                save_positions(position_manager.get())
+            except Exception:
+                pass
+            safe_send(f"🛡️ [{symbol}] 追踪/保本止损已推移至 {action_plan.get('new_sl')}", priority="TRADE")
         
-        if action_plan["action"] == "PARTIAL_CLOSE":
-            pos["current_sl"] = action_plan["new_sl"]
-            pos["stage"] = action_plan["new_stage"]
-            position_manager.update(symbol, pos)
-            safe_send(f"部分平仓: {symbol} {direction} @{current_price:.2f} new_sl={action_plan['new_sl']:.2f}", priority="TRADE")
-        elif action_plan["action"] == "TRAIL_ONLY":
-            pos["current_sl"] = action_plan["new_sl"]
-            position_manager.update(symbol, pos)
         elif action_plan["action"] == "CLOSE_ALL":
+            try:
+                exit_logger.log_exit(
+                    symbol=symbol,
+                    position=pos,
+                    exit_price=current_price,
+                    reason=action_plan.get('reason') or 'CLOSE_ALL',
+                    action='CLOSE_ALL',
+                    mfe=pos.get('mfe'),
+                    mae=pos.get('mae')
+                )
+            except Exception:
+                slog.error(f"[check_trailing] exit_logger.log_exit 失败: {symbol}")
             _trigger_stop_loss(symbol, pos, current_price, reason="TRAIL_STOP")
         elif action_plan["action"] == "HOLD":
             pass
@@ -2434,6 +2545,16 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
             position_manager.remove(symbol)
         except Exception:
             pass
+
+    # 持久化当前持仓状态到磁盘，便于进程重启恢复
+    try:
+        from analytics.state_recovery import save_positions
+        try:
+            save_positions(position_manager.get())
+        except Exception as _sp_e:
+            slog.error(f"[StateRecovery] save_positions failed: {_sp_e}")
+    except Exception:
+        pass
 
     try:
         _breaker.record_trade(pnl_r)
