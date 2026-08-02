@@ -1620,6 +1620,35 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         f"说明: {reason_cn}",
         priority="TRADE",
     )
+
+    # ===== [修复20260825] V6 路由确认开仓后，必须写入持仓管理器 =====
+    # 之前只发通知、返回 True，从不调用 position_manager.update()
+    # 导致 main_loop / background_monitor 永远看不到持仓 -> 永远不触发追踪止损/平仓
+    try:
+        position_manager.update(symbol, {
+            "direction": result.get("direction", "Long"),
+            "entry": entry,
+            "current_sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "stage": 0,
+            "sl_hit": False,
+            "last_sl_msg": "",
+            "open_score": result.get("v6_final_score", score),
+            "open_confidence": result.get("confidence", 0.5),
+            "open_regime": str(result.get("regime", "UNKNOWN")),
+            "open_features": result.get("_feedback_features", []),
+            "signal_id": sig_id,
+            "atr": float(result.get("atr") or 0.0),
+            "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
+            "ml_active": bool(result.get("ml_active", False)),
+        })
+        slog.info(f"[V6路由] {symbol} 持仓已写入 position_manager: {position_manager.get(symbol)}")
+    except Exception as _pm_e:
+        slog.error(f"[V6路由] 持仓写入失败: {_pm_e}")
+        traceback.print_exc()
+
     return True
 
 
@@ -2012,6 +2041,29 @@ def check_and_open(result: dict | None) -> bool:
         try: _liq_lines.append(f'资金费率: {float(_fr_x):.4f}%')
         except: pass
     _liq_text_x = '\n'.join(_liq_lines) if _liq_lines else ''
+
+    _REASON_TRANSLATIONS = {
+        'liquidity_sweep': '流动性扫单：关键流动性区域被扫，属于高结构信号',
+        'choch': '结构转变：市场当前出现结构性转折，方向有变动',
+        'fvg': '失衡区：市场存在价格回补机会',
+        'bos': '结构突破：价格已突破关键结构位，动量方向明确',
+        'structure_override': '结构覆盖通道：该信号结构强度高，满足特权通道',
+        'breakout': '突破：价格突破关键位',
+        'reversal': '反转：趋势反转信号',
+        'sweep': '扫单：流动性被扫',
+        'premium': '溢价区做空',
+        'discount': '折价区做多',
+        'ote': '最优交易区间',
+        'wvf': '威廉姆斯鳄鱼线',
+        'squeeze': '挤仓释放',
+        'macd_bull': 'MACD金叉',
+        'macd_bear': 'MACD死叉',
+        'rsi_ob': 'RSI超买',
+        'rsi_os': 'RSI超卖',
+        'trend_break': '趋势破位',
+        'supply_zone': '供应区',
+        'demand_zone': '需求区',
+    }
 
     def _translate_reason(reason_text: str) -> str:
         if not reason_text:

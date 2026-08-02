@@ -173,6 +173,11 @@ def check_partial_close_and_trail(direction: str, current_price: float, entry_pr
     trail_dist = (atr * 1.5) if atr > 0 else (current_price * 0.01)
 
     if "long" in d:
+        # 【修复20260825】止损优先：价格 <= 当前止损价 -> CLOSE_ALL
+        if current_price <= current_sl:
+            res["action"] = "CLOSE_ALL"
+            res["close_pct"] = 1.0
+            return res
         if stage < 2 and current_price >= tp2:
             res["action"] = "PARTIAL_CLOSE"
             res["close_pct"] = 0.30 
@@ -188,6 +193,11 @@ def check_partial_close_and_trail(direction: str, current_price: float, entry_pr
             res["new_sl"] = max(current_sl, current_price - trail_dist)
     
     if "short" in d:
+        # 【修复20260825】止损优先：价格 >= 当前止损价 -> CLOSE_ALL
+        if current_price >= current_sl:
+            res["action"] = "CLOSE_ALL"
+            res["close_pct"] = 1.0
+            return res
         if stage < 2 and current_price <= tp2:
             res["action"] = "PARTIAL_CLOSE"
             res["close_pct"] = 0.30
