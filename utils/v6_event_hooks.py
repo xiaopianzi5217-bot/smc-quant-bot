@@ -18,7 +18,7 @@ def on_record_open_snapshot(result: dict, kelly_size: float = 0.05):
     record_open_snapshot(result, kelly_size=kelly_size)
 
 
-def on_record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: float = None, exit_price: float = None):
+def on_record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: int = None, exit_price: float = None):
     """记录平仓结局结果到 V6 数据库。"""
     record_close_outcome(
         signal_id=signal_id,
@@ -26,6 +26,8 @@ def on_record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_
         exit_reason=exit_reason,
         max_fwd=max_fwd,
         max_adv=max_adv,
+        exit_timestamp=exit_timestamp,
+        exit_price=exit_price,
     )
 
 

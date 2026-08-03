@@ -2491,6 +2491,13 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     entry = float(pos.get("entry") or 0.0)
     sl = float(pos.get("current_sl") or pos.get("sl") or 0.0)
     signal_id = pos.get("signal_id") or ""
+    try:
+        # 平仓后允许同一 K 线的相同形态信号重新触发（不再永久拦截）
+        if signal_id:
+            signal_deduper.unmark_processed(signal_id)
+            slog.info(f"[{symbol}] 已释放去重标记: {signal_id}")
+    except Exception as _um_e:
+        slog.error(f"[{symbol}] 释放信号去重标记失败: {_um_e}")
 
     pnl_r = 0.0
     risk = abs(entry - sl) if sl and entry else 0.0

@@ -109,6 +109,15 @@ class SignalDeduper:
             self._cleanup_unlocked()
             self._save()
 
+    def unmark_processed(self, signal_id: str) -> None:
+        """信号已平仓/止损离场后，从已处理记录中移除，允许同形态信号重新触发。"""
+        if not signal_id:
+            return
+        with self._lock:
+            popped = self._processed.pop(signal_id, None)
+            if popped is not None:
+                self._save()
+
     def should_process(self, signal_id: str) -> bool:
         """True=首次可处理并已标记；False=已处理过应跳过。"""
         if not signal_id:

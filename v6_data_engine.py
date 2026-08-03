@@ -193,17 +193,19 @@ def expand_v6_table_for_smc():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS smc_structure_tracker (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER,
-            symbol TEXT,
-            timeframe TEXT,
-            structure_type TEXT,
-            direction TEXT,
-            price_level REAL,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            structure_type TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            price_level REAL NOT NULL,
             is_mitigated INTEGER DEFAULT 0,
             outcome INTEGER DEFAULT NULL,
             regime TEXT
         )
     """)
+    # 常用查询索引：按品种、周期及是否被吸收/缓解快速过滤
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_smc_symbol_tf ON smc_structure_tracker (symbol, timeframe, is_mitigated)")
     conn.commit()
     conn.close()
 
@@ -248,9 +250,9 @@ def init_v6_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS trade_snapshots (
             signal_id TEXT PRIMARY KEY,
-            timestamp INTEGER,
-            symbol TEXT,
-            direction TEXT,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,
             regime TEXT,
             vol_state TEXT,
             adx_14 REAL,
@@ -275,7 +277,7 @@ def init_v6_database():
             sqz_volume_confirmed INTEGER DEFAULT 0,
             mode TEXT DEFAULT 'NORMAL',
             exit_reason TEXT DEFAULT 'OPEN',
-            exit_timestamp REAL DEFAULT NULL,
+            exit_timestamp INTEGER DEFAULT NULL,
             exit_price REAL DEFAULT NULL,
             pnl_r REAL DEFAULT NULL,
             max_forward_r REAL DEFAULT 0.0,
@@ -288,6 +290,10 @@ def init_v6_database():
     _ensure_column(cursor, "trade_snapshots", "sqz_vol_ratio", "REAL DEFAULT 1.0")
     _ensure_column(cursor, "trade_snapshots", "sqz_volume_confirmed", "INTEGER DEFAULT 0")
     _ensure_column(cursor, "trade_snapshots", "mode", "TEXT DEFAULT 'NORMAL'")
+    # 常用索引：按品种、开仓时间快速检索
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_symbol_time ON trade_snapshots (symbol, timestamp)")
+    # 快速查找未平仓的单子 (exit_reason = 'OPEN')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_open_orders ON trade_snapshots (exit_reason) WHERE exit_reason = 'OPEN'")
     conn.commit()
     conn.close()
     expand_v6_table_for_smc()
@@ -357,7 +363,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     except Exception as e:
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
-def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: float = None, exit_price: float = None):
+def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: int = None, exit_price: float = None):
     """横向拼接真实结局标签"""
     if not signal_id:
         return
@@ -368,7 +374,7 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
             UPDATE trade_snapshots 
             SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
             WHERE signal_id = ?
-        """, (exit_reason, exit_timestamp or int(time.time()), exit_price or 0.0, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
+        """, (exit_reason, int(exit_timestamp or int(time.time())), exit_price or 0.0, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
         conn.commit()
         conn.close()
         slog.info(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
