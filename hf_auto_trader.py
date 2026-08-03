@@ -2481,7 +2481,7 @@ stage={action_plan.get('stage')}
                 )
             except Exception:
                 slog.error(f"[check_trailing] exit_logger.log_exit 失败: {symbol}")
-            _trigger_stop_loss(symbol, pos, current_price, reason="TRAIL_STOP")
+            _trigger_stop_loss(symbol, pos, current_price, reason=action_plan.get('reason') or 'CLOSE_ALL')
         elif action_plan["action"] == "HOLD":
             pass
     except Exception as e:
