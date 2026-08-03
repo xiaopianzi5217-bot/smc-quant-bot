@@ -1643,10 +1643,11 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             "stage": 0,
             "sl_hit": False,
             "last_sl_msg": "",
-            "open_score": result.get("v6_final_score", score),
-            "open_confidence": result.get("confidence", 0.5),
-            "open_regime": str(result.get("regime", "UNKNOWN")),
-            "open_features": result.get("_feedback_features", []),
+            "score": result.get("v6_final_score", score),
+            "confidence": result.get("confidence", 0.5),
+            "regime": str(result.get("regime", "UNKNOWN")),
+            "features": result.get("_feedback_features", []),
+            "ev": ev,
             "signal_id": sig_id,
             "atr": float(result.get("atr") or 0.0),
             "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
@@ -2132,10 +2133,12 @@ def check_and_open(result: dict | None) -> bool:
         "stage": 0,
         "sl_hit": False,
         "last_sl_msg": "",
-        "open_score": score,  # 【闭环】用于平仓时回传 Calibrator
-        "open_confidence": result.get("confidence", 0.5),  # 【闭环】
-        "open_regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
-        "open_features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
+        "score": score,  # 【闭环】用于平仓时回传 Calibrator
+        "confidence": result.get("confidence", 0.5),  # 【闭环】
+        "regime": str(result.get("regime", "UNKNOWN")),  # 【闭环】用于平仓时更新 RegimeFeatureStats
+        "features": result.get("_feedback_features", []),  # 【闭环】用于平仓时更新
+        "ev": ev,
+        "trade_id": (position_manager.get(symbol) or {}).get("trade_id") or str(uuid.uuid4()),
         "signal_id": _db_signal_id,
         "atr": float(result.get("atr") or 0.0),
         "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),

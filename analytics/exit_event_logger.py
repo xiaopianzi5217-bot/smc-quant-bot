@@ -297,6 +297,15 @@ class ExitEventLogger:
         try:
             entry_price = float(position.get("entry") or position.get("entry_price") or 0)
             side = position.get("side", position.get("direction", "UNKNOWN"))
+            # 确保包含必需字段，避免后续 TrainingValidator 拒绝样本
+            trade_id = position.get("trade_id") or str(uuid.uuid4())
+            # 支持不同位置字段命名：优先 plain keys，其次 open_* 前缀
+            features = position.get("features") or position.get("open_features") or {}
+            regime = position.get("regime") or position.get("open_regime") or {}
+            score = position.get("score") or position.get("open_score") or 0.0
+            ev_val = position.get("ev") or position.get("open_ev") or 0.0
+            confidence = position.get("confidence") or position.get("open_confidence") or 0.0
+
             event = {
                 "event": "OPEN",
                 "schema_version": "58.7",
@@ -304,13 +313,13 @@ class ExitEventLogger:
                 "timestamp": datetime.utcnow().isoformat(),
                 "symbol": symbol,
                 "side": side,
-                "trade_id": position.get("trade_id"),
+                "trade_id": trade_id,
                 "entry_price": entry_price,
-                "features": position.get("features", {}),
-                "regime": position.get("regime", {}),
-                "score": position.get("open_score", position.get("score")),
-                "ev": position.get("ev"),
-                "confidence": position.get("confidence"),
+                "features": features,
+                "regime": regime,
+                "score": score,
+                "ev": ev_val,
+                "confidence": confidence,
             }
             self._write(event)
             return event
