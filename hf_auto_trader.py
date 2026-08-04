@@ -730,7 +730,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
         tp1 = entry_price - 1.00 * _stop_dist
         tp2 = entry_price - 1.80 * _stop_dist
         tp3 = entry_price - 2.80 * _stop_dist
-    rr = round(float(best.get("estimated_rr", 1.82)), 2)
+    # 【修复20260826】真实预期 RR：由实际 TP1/SL/Entry 计算，不再读取回测引擎的 realized_rr 伪 RR
+    # (v56_5_stable_engine._execute_one_v565 把已实现RR写入了 estimated_rr 字段，导致 RR 显示为 0.07 等瞬时值)
+    _stop_for_rr = abs(entry_price - sl)
+    if _stop_for_rr > 1e-12:
+        rr = round(abs(tp1 - entry_price) / _stop_for_rr, 2)
+    else:
+        rr = round(float(best.get("estimated_rr", 1.0)), 2)
+    rr = max(0.1, min(rr, 5.0))
     score = float(best.get("score", 0))
     ev = float(best.get("model_ev", 0))
     slog.info(f"[{symbol}] V56.5 SL/TP 重算: direction={direction} entry={entry_price:.2f} sl={sl:.2f} tp1={tp1:.2f} tp2={tp2:.2f} tp3={tp3:.2f} stop_dist={_stop_dist:.2f} atr={_atr_val:.2f}")
