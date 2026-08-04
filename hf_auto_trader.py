@@ -1678,6 +1678,15 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                     slog.error(f"[StateRecovery] save_positions failed: {_sp_e}")
             except Exception:
                 pass
+
+            # ===== [修复20260826] V6 路由实盘激活也需记录 v6_research.db =====
+            # 之前只有 RESEARCH_SILENT 分支会记录，LIVE_FULL_TRADE / LIVE_HALF_TRADE
+            # 缺失 record_open_snapshot 调用，导致实盘开单不进入研究数据库
+            try:
+                async_background_task(async_record_snapshot_and_push(result, kelly_size=trade_size))
+                slog.info(f"[V6路由] {symbol} 实盘开单快照已记录入 v6_research.db")
+            except Exception as _snap_e:
+                slog.error(f"[V6路由] 实盘开单快照记录失败: {_snap_e}")
         except Exception:
             pass
     except Exception as _pm_e:
