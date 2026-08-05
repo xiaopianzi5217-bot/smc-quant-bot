@@ -328,68 +328,74 @@ def check_partial_close_and_trail(
     # ============================
 
     if stage >=2:
+            # V59.4: 分阶段追踪止损
+            # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免小回调被扫）
+            # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个目标利润，开始收紧）
+            # 之前统一 0.5R 太紧：15m 趋势品种正常 0.6~0.8R 回撤会被连续扫掉
+            if stage == 2:
+                trail_distance = risk * 1.0
+            else:
+                trail_distance = risk * 0.7
 
-        trail_distance = risk * 0.5
+            if str(side or "").lower().startswith("long"):
 
-        if str(side or "").lower().startswith("long"):
+                new_sl = (
+                    current_price -
+                    trail_distance
+                )
 
-            new_sl = (
-                current_price -
-                trail_distance
-            )
+                if new_sl > sl:
 
-            if new_sl > sl:
+                    return {
 
-                return {
+                        "action":
+                            "MOVE_SL",
 
-                    "action":
-                        "MOVE_SL",
+                        "new_sl":
+                            new_sl,
 
-                    "new_sl":
-                        new_sl,
+                        "reason":
+                            "TRAILING_STOP",
 
-                    "reason":
-                        "TRAILING_STOP",
+                        "stage":
+                            3,
 
-                    "stage":
-                        3,
+                        "profit_r":
+                            round(
+                                profit_r,
+                                3
+                            )
+                    }
 
-                    "profit_r":
-                        round(
-                            profit_r,
-                            3
-                        )
-                }
+            else:
 
-        else:
+                new_sl = (
+                    current_price +
+                    trail_distance
+                )
 
-            new_sl = (
-                current_price +
-                trail_distance
-            )
+                if new_sl < sl:
 
-            if new_sl < sl:
+                    return {
 
-                return {
+                        "action":
+                            "MOVE_SL",
 
-                    "action":
-                        "MOVE_SL",
+                        "new_sl":
+                            new_sl,
 
-                    "new_sl":
-                        new_sl,
+                        "reason":
+                            "TRAILING_STOP",
 
-                    "reason":
-                        "TRAILING_STOP",
+                        "stage":
+                            3,
 
-                    "stage":
-                        3,
-
-                    "profit_r":
-                        round(
-                            profit_r,
-                            3
-                        )
-                }
+                        "profit_r":
+                            round(
+                                profit_r,
+                                3
+                            )
+                    }
 
     # ============================
     # 5. TP2全部退出

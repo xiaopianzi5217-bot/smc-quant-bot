@@ -2249,6 +2249,31 @@ def check_and_open(result: dict | None) -> bool:
     # 1. TradeJournal（日志审计）
     _order_id = None
     try:
+        # V59.5: 构造质量门快照（供 TradeJournal 复盘: 什么条件导致亏损）
+        # 优先使用 runner 注入的 gate_snapshot，缺失时用 result 字段构造
+        _gate_snapshot = str(result.get("gate_snapshot", "{}"))
+        if not _gate_snapshot or _gate_snapshot == "{}":
+            try:
+                _gate_snapshot = str(result.get("decision", {}).get("gate_snapshot", "{}"))
+            except Exception:
+                _gate_snapshot = "{}"
+        if not _gate_snapshot or _gate_snapshot == "{}":
+            _gate_override = False
+            try:
+                _gate_override = bool(result.get("decision", {}).get("gate_snapshot_override", False)) or bool(result.get("gate_overridden", False))
+            except Exception:
+                pass
+            _gate_snapshot = (
+                '{"score":%.1f,"min_score_required":%.1f,"override":%s,"adx":%.1f,"regime":"%s","ev":%.4f}'
+                % (
+                    float(score),
+                    float(result.get("min_score_required", 72.0)),
+                    "true" if _gate_override else "false",
+                    float(result.get("adx", 0)),
+                    str(result.get("regime", "mixed")),
+                    float(ev),
+                )
+            )
         _order_id = trade_journal.open_trade(
             symbol=symbol,
             direction=direction,
@@ -2262,6 +2287,7 @@ def check_and_open(result: dict | None) -> bool:
             regime=result.get("regime", ""),
             volume=size,
             note=f"ev={ev:.4f}_adx={result.get('adx',0):.1f}_atr={result.get('atr',0):.1f}_tier={_debug_tier}",
+            gate_snapshot=_gate_snapshot,  # V59.5 质量门快照
         )
         # 把 order_id 存入 position_manager，供后续平仓追溯
         if _order_id:
@@ -2588,6 +2614,43 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     except Exception:
         pass
 
+    # ===== V59.5: 平仓后激活 DailyPanel + FeedbackLoop（历史从未调用，日报数据一直为空） =====
+    # pos 中已保存 score/confidence/regime/features/ev（开仓时注入），此处直接读取
+    _close_score = float(pos.get("score", 0) or 0)
+    _close_conf = float(pos.get("confidence", 0.5) or 0.5)
+    _close_regime = str(pos.get("regime", "UNKNOWN"))
+    _close_features = pos.get("features", []) or []
+    _close_ev = float(pos.get("ev", 0) or 0)
+    try:
+        _panel.on_trade_closed(
+            regime=_close_regime,
+            features=_close_features,
+            score=_close_score,
+            confidence=_close_conf,
+            pnl_r=float(pnl_r),
+            direction=dir(pos).get("direction", "") if direction is None else str(direction),
+        )
+    except Exception as _panel_err:
+        slog.error(f"[{symbol}] DailyPanel 平仓记录失败: {_panel_err}")
+
+    try:
+        _feedback.on_trade_closed(
+            regime=_close_regime,
+            features=_close_features,
+            score=_close_score,
+            confidence=_close_conf,
+            pnl_r=float(pnl_r),
+            direction=str(direction),
+        )
+    except Exception as _fb_err:
+        slog.error(f"[{symbol}] FeedbackLoop 平仓记录失败: {_fb_err}")
+
+    # 每日凌晨跨日时自动推送日报（仅一次）
+    try:
+        _panel.try_send_report(_safe_send_impl, _panel_today_sent)
+    except Exception as _report_err:
+        slog.error(f"[{symbol}] DailyPanel 日报推送失败: {_report_err}")
+
     global _last_stop_loss_time
     _last_stop_loss_time[symbol] = time.time()
     try:
@@ -2606,9 +2669,13 @@ async def main_loop():
     try:
         if not _RECOVERED_POSITIONS and ENABLE_RUNTIME_RECOVERY:
             try:
-                _report = position_reconciler.startup_recover(do_exchange=True)
+                _report = position_reconciler.startup_recover(do_exchange=True, sync_local_from_exchange=True)
                 _n = len(getattr(_report, "recovered_symbols", None) or [])
-                slog.info(f"[main_loop] reconciler 启动恢复完成: recovered={_n} mode={getattr(_report, 'mode', '?')}")
+                _diffs = getattr(_report, "diffs", None) or []
+                _issues = [d for d in _diffs if getattr(d, "kind", "ok") != "ok"]
+                slog.info(f"[main_loop] reconciler 启动恢复完成: recovered={_n} mode={getattr(_report, 'mode', '?')} issues={len(_issues)}")
+                for _d in _issues:
+                    slog.info(f"[main_loop] reconciler diff: {getattr(_d, 'kind', '?')} {getattr(_d, 'symbol', '?')} {getattr(_d, 'detail', '')}")
             except Exception as _rec_e:
                 slog.error(f"[main_loop] reconciler 失败，回退磁盘恢复: {_rec_e}")
                 try:

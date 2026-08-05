@@ -104,7 +104,7 @@ class PositionReconciler:
         except Exception:
             pass
 
-    def startup_recover(self, do_exchange: bool = True) -> ReconcileReport:
+    def startup_recover(self, do_exchange: bool = True, sync_local_from_exchange: bool = True) -> ReconcileReport:
         report = ReconcileReport()
         try:
             recovered = position_manager.recover_from_disk()
@@ -114,11 +114,22 @@ class PositionReconciler:
             report.errors.append(f"disk recover: {exc}")
 
         if do_exchange and _is_live_ready():
-            sub = self.reconcile_once(sync_local_from_exchange=False)
+            # 启动恢复必须把「交易所有、本地无」的仓位真正导入 position_manager，
+            # 否则重启后系统无法感知交易所真实持仓（如 BTC 开仓后服务器重启）
+            sub = self.reconcile_once(sync_local_from_exchange=sync_local_from_exchange)
             report.mode = sub.mode
             report.exchange_count = sub.exchange_count
             report.diffs.extend(sub.diffs)
             report.errors.extend(sub.errors)
+            if sync_local_from_exchange:
+                # 导入成功的仓位（source=exchange_reconcile）计入恢复列表
+                try:
+                    for _sym, _pos in (position_manager.get() or {}).items():
+                        if (_pos or {}).get("source") == "exchange_reconcile":
+                            if _sym not in report.recovered_symbols:
+                                report.recovered_symbols.append(_sym)
+                except Exception:
+                    pass
         else:
             report.mode = "local_only"
             for sym, pos in (position_manager.get() or {}).items():
@@ -137,7 +148,6 @@ class PositionReconciler:
             self._notify_msg(report.summary_text())
         print(report.summary_text())
         return report
-
     def reconcile_once(
         self,
         symbols: Optional[List[str]] = None,

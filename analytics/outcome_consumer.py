@@ -152,8 +152,30 @@ def process_events_once():
     except Exception:
         pass
 
-    # 处理 EXIT 事件，使用 OPEN 缓存补全 fields
+    # 处理 EXIT 与 FORCE_CLOSE_UNKNOWN 事件，使用 OPEN 缓存补全 fields
     for ev in events:
+        # P0: 完全隔离异常交易 —— 必须在 feature_hash / OutcomeDB / Learning 之前拦截
+        # FORCE_CLOSE_UNKNOWN 可能以两种形式出现：
+        #   1) event = "FORCE_CLOSE_UNKNOWN"（open_cache 过期清理自动生成）
+        #   2) event = "EXIT" 且 reason = "FORCE_CLOSE_UNKNOWN"（外部平仓带异常原因）
+        reason = ev.get("reason")
+        if ev.get('event') == 'FORCE_CLOSE_UNKNOWN' or reason == 'FORCE_CLOSE_UNKNOWN':
+            trade_id = ev.get('trade_id')
+            dedupe_key = trade_id or ev.get('event_id')
+            logger.warning(f"[Outcome] Skip abnormal close {trade_id}: reason={reason or 'FORCE_CLOSE_UNKNOWN'}")
+            # 彻底移除 open_cache 条目，不写入 OutcomeDB/学习
+            try:
+                if trade_id and trade_id in open_cache:
+                    del open_cache[trade_id]
+                    OPEN_CACHE_FILE.write_text(json.dumps(open_cache, ensure_ascii=False), encoding='utf-8')
+            except Exception:
+                pass
+            if dedupe_key:
+                new_processed.add(dedupe_key)
+                processed_count += 1
+            continue
+
+        # 仅处理 EXIT 事件
         if ev.get('event') != 'EXIT':
             continue
         trade_id = ev.get('trade_id')
@@ -166,37 +188,39 @@ def process_events_once():
         if trade_id and trade_id in open_cache:
             merged.update(open_cache[trade_id])
         merged.update(ev)
-
-        # P0: 防止异常关闭污染学习（FORCE_CLOSE_UNKNOWN 来自 open_cache 过期清理）
+        # 合并后二次防御：即使 EXIT 里 reason 合法但 OPEN 缓存被毒化，也拦截
         if merged.get('event') == 'FORCE_CLOSE_UNKNOWN' or merged.get('reason') == 'FORCE_CLOSE_UNKNOWN':
-            logger.warning(f"[Outcome] skip learning unknown close: {dedupe_key}")
-            # 移除 open_cache 条目（如果存在），但不写入 OutcomeDB/学习
+            logger.warning(f"[Outcome] skip learning unknown close (post-merge): {dedupe_key}")
             try:
                 if trade_id and trade_id in open_cache:
                     del open_cache[trade_id]
                     OPEN_CACHE_FILE.write_text(json.dumps(open_cache, ensure_ascii=False), encoding='utf-8')
             except Exception:
                 pass
-        else:
-            # 训练样本质量校验
-            if not validate_trade_sample(merged):
-                logger.warning(f"[Outcome] sample rejected by TrainingValidator: {dedupe_key}")
-            else:
-                # 计算 feature hash 并写入 OutcomeDatabase
-                features = merged.get('features') or {}
-                feature_hash = generate_feature_hash(features) if isinstance(features, dict) else generate_feature_hash({})
-                profit_r = float(merged.get('profit_r') or merged.get('pnl_r') or 0.0)
-                try:
-                    db.update(feature_hash, profit_r, mode=merged.get('mode','NORMAL'))
-                except Exception as e:
-                    print(f"OutcomeDB update failed: {e}")
+            if dedupe_key:
+                new_processed.add(dedupe_key)
+                processed_count += 1
+            continue
 
-                # 同步触发学习模块更新（携带学习版本号）
-                try:
-                    learner = OutcomeLearner()
-                    learner.update_from_trade(merged.get('features') or {}, profit_r, mode=merged.get('mode','NORMAL'), learning_version=LEARNING_VERSION)
-                except Exception as e:
-                    print(f"OutcomeLearner update failed: {e}")
+        # 训练样本质量校验
+        if not validate_trade_sample(merged):
+            logger.warning(f"[Outcome] sample rejected by TrainingValidator: {dedupe_key}")
+        else:
+            # 计算 feature hash 并写入 OutcomeDatabase
+            features = merged.get('features') or {}
+            feature_hash = generate_feature_hash(features) if isinstance(features, dict) else generate_feature_hash({})
+            profit_r = float(merged.get('profit_r') or merged.get('pnl_r') or 0.0)
+            try:
+                db.update(feature_hash, profit_r, mode=merged.get('mode','NORMAL'))
+            except Exception as e:
+                print(f"OutcomeDB update failed: {e}")
+
+            # 同步触发学习模块更新（携带学习版本号）
+            try:
+                learner = OutcomeLearner()
+                learner.update_from_trade(merged.get('features') or {}, profit_r, mode=merged.get('mode','NORMAL'), learning_version=LEARNING_VERSION)
+            except Exception as e:
+                print(f"OutcomeLearner update failed: {e}")
 
         if dedupe_key:
             new_processed.add(dedupe_key)
@@ -208,7 +232,6 @@ def process_events_once():
                     OPEN_CACHE_FILE.write_text(json.dumps(open_cache, ensure_ascii=False), encoding='utf-8')
             except Exception:
                 pass
-
     # 持久化已处理 id
     if new_processed:
         processed.update(new_processed)

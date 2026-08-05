@@ -107,9 +107,10 @@ def _get_adaptive_min_score(
     rt = table.get(regime_lower, table.get("mixed", {}))
     dynamic_val = float(rt.get(int(hour), rt.get("__default__", 72.0)))
 
-    # 如果配置传了 min_score 且动态值比配置值还高 → 用配置值（宽松化）
-    if fallback is not None and dynamic_val > fallback:
-        return fallback
+    # V59.3 修复: 动态门槛优先。配置 min_score 只能作为下限提高硬性要求,
+    # 不能再把 78 拉低到 55 让 MUD/RANGE 垃圾信号通过。
+    if fallback is not None:
+        return max(dynamic_val, fallback)
 
     return dynamic_val
 
@@ -142,6 +143,8 @@ def v565_quality_gate(
     regime = str(row.get("regime", "mixed")).lower().strip()
     model_ev = float(row.get("model_ev", -999.0))
     setup_type_str = str(row.get("setup_type", "")).upper()
+    # V59.3: 补充 adx 字段供 STRUCTURE_OVERRIDE 环境过滤使用
+    adx = float(row.get("adx", 0))
 
         # ========================================================
     # 0. Structure Override（特权通道）⚡ 优先级最高
@@ -194,7 +197,28 @@ def v565_quality_gate(
         bool(row.get("has_top_div", False))
     )
 
-    if strong_structure and score >= 41 and model_ev > -0.50 and not _override_disabled:
+    # V59.3 修复: STRUCTURE_OVERRIDE 降权——结构信号不能绕过环境过滤。
+    # 之前：OB/FVG/CHOCH + score>=41 + EV>-0.5 就直接通过,
+    # 导致大量 RANGE/低ADX 假突破成交。现在需要同时满足:
+    #   - score >= 70
+    #   - model_ev >= 0.30
+    #   - regime 不是 range/mud/chop/sideways
+    #   - ADX >= 18
+    if strong_structure and score >= 70 and model_ev >= 0.30 and not _override_disabled:
+        # 环境过滤: RANGE/MUD 状态时禁止 override 通行（避免假突破）
+        if regime in ("range", "mud", "chop", "sideways", "ranging"):
+            meta["blocked"] = True
+            meta["reason"] = "STRUCTURE_OVERRIDE_BAD_REGIME"
+            meta["failed_checks"].append("override_regime_blocked")
+            return False, "STRUCTURE_OVERRIDE_BAD_REGIME", meta
+
+        # 趋势强度过滤: ADX < 18 时没有明确趋势, 结构信号多为假突破
+        if adx < 18:
+            meta["blocked"] = True
+            meta["reason"] = "STRUCTURE_OVERRIDE_LOW_ADX"
+            meta["failed_checks"].append("override_low_adx")
+            return False, "STRUCTURE_OVERRIDE_LOW_ADX", meta
+
         meta["override"] = True
         meta["size_mult"] = 0.96
         meta["reason"] = "Optimized High Structure"
@@ -227,9 +251,12 @@ def v565_quality_gate(
     # 2. 动态分数门槛
     # ========================================================
     # config.min_score 作为 fallback：如果动态表的值比它高，优先用 config 值
-    _config_min_score = cfg.get("min_score")
+        _config_min_score = cfg.get("min_score")
     _config_min_score_f = float(_config_min_score) if _config_min_score is not None else None
     min_score = _get_adaptive_min_score(regime, hour, cfg.get("regime_hour_min_score"), fallback=_config_min_score_f)
+    # V59.5: 记录实际门槛供 gate_snapshot 使用（事后复盘: 哪个条件导致亏损）
+    meta["min_score_required"] = round(min_score, 1)
+    meta["override"] = False  # 默认非 override，override 路径会改为 True
     if score < min_score:
         reasons.append(f"SCORE_LOW_{score:.1f}<{min_score:.0f}_REGIME={regime}_HOUR={hour}")
         meta["failed_checks"].append("score")
@@ -250,21 +277,18 @@ def v565_quality_gate(
     # ========================================================
     # 3. 低分信号（score<80）额外检查
     # ========================================================
-    if score < 80:
-        # ⚡ 20260830修复: 保守强化——对低分信号不再硬拦截
-        # 移除 hard_block_hours 和 trend_extreme 硬拒绝，改为软缩减+通道增强
-        # 3a. 低分 + 不利小时 → 软缩减（不拒绝，降仓位）
-        hard_hours = set(cfg.get("hard_block_hours", {4, 6, 7, 23}))
-        if hour in hard_hours:
-            meta["failed_checks"].append("hour_blocked")
-            meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.70)  # 降至70%仓位，不拒单
-            meta["blocked"] = False  # ⚡ 不再硬拒绝
-
-        # 3b. 低分 + trend_strength 极端 → 软缩减
-        trend_strength = float(row.get("trend_strength", 0.0))
-        if abs(trend_strength) > 1.8:
-            meta["failed_checks"].append("trend_extreme")
-            meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.80)  # 降至80%仓位
+    # V59.3 修复: 取消软缩减通行——低质量信号不能通过"减少仓位"继续交易。
+    # 负EV就是负EV, 减半仓仍然亏钱。size_penalty 只能用于已通过质量门但
+    # 风险稍高的优质信号, 不能救活不合格信号。
+    if score < 78:
+        # 硬拒绝: 低分信号不再放行
+        meta["blocked"] = True
+        meta["failed_checks"].append("sub_grade_hard_reject")
+        reasons.append(f"SUB_GRADE_SCORE_{score:.1f}<78")
+    elif score < 80:
+        # 78~80 区间: 通过但标记需注意（接近阈值, 仓位微缩减至90%）
+        meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.90)
+        meta["passed_checks"].append("near_threshold_pass")
     else:
         # 高分信号（score>=80）：加分
         meta["passed_checks"].append("high_score_bonus")

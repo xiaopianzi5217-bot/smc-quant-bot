@@ -7,6 +7,7 @@ Run: python tests/test_outcome_pipeline.py
 import json
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,13 +60,13 @@ def case1_normal_trade():
         "features": {"smc": 8, "momentum": 7},
         "regime": "TREND",
         "confidence": 0.85,
-        "timestamp": "2026-08-02T00:00:00"
+        "timestamp": datetime.utcnow().isoformat()
     }
     exit_ev = {
         "event": "EXIT",
         "trade_id": "test_win_001",
         "profit_r": 2.1,
-        "timestamp": "2026-08-02T00:01:00",
+        "timestamp": (datetime.utcnow() + timedelta(minutes=1)).isoformat(),
         "ev": 1.8
     }
     write_events([open_ev, exit_ev])
@@ -91,7 +92,7 @@ def case2_force_close_unknown():
         "event": "FORCE_CLOSE_UNKNOWN",
         "trade_id": "unknown_001",
         "profit_r": 0,
-        "timestamp": "2026-08-02T01:00:00"
+        "timestamp": (datetime.utcnow() + timedelta(minutes=2)).isoformat()
     }
     write_events([ev])
     n = process_events_once()
@@ -112,13 +113,13 @@ def case3_bad_data():
         "trade_id": "bad_001",
         "symbol": "ETH/USDT",
         # missing features, score, regime
-        "timestamp": "2026-08-02T02:00:00"
+        "timestamp": (datetime.utcnow() + timedelta(minutes=3)).isoformat()
     }
     exit_ev = {
         "event": "EXIT",
         "trade_id": "bad_001",
         "profit_r": 1.0,
-        "timestamp": "2026-08-02T02:05:00",
+        "timestamp": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
     }
     write_events([open_ev, exit_ev])
     n = process_events_once()

@@ -44,6 +44,8 @@ FIELD_NAMES = [
     "mae_r",             # 最大不利波动 R
     "max_r_before_stop", # 止前最高 R
     "note",              # 备注
+    # V59.5: 记录入场时质量门快照（用于事后复盘: 什么条件导致亏损）
+    "gate_snapshot",     # 质量门快照 JSON 字符串: {"score":82,"min_score":78,"override":false,"adx":25,"regime":"TREND","ev":1.5}
 ]
 
 JOURNAL_DIR = Path("logs")
@@ -102,6 +104,7 @@ class TradeJournal:
         volume: float = 0,
         note: str = "",
         mode: str = "REGULAR",  # 【P1 20260730】新增 mode 参数
+        gate_snapshot: str = "",  # 【V59.5】质量门快照 JSON 字符串
     ) -> str:
         """记录开仓。返回 order_id。"""
         order_id = self._next_id()
@@ -131,6 +134,7 @@ class TradeJournal:
             "mae_r": "",
             "max_r_before_stop": "",
             "note": note,
+            "gate_snapshot": gate_snapshot,  # 【V59.5】保存质量门快照
         }
         self._append_rows([row])
         logger.info(f"[TradeJournal] 开仓 {order_id}: {symbol} {direction} @ {open_price}")
@@ -176,6 +180,8 @@ class TradeJournal:
             "mae_r": round(mae_r, 4) if mae_r else "",
             "max_r_before_stop": round(max_r_before_stop, 4) if max_r_before_stop else "",
             "note": note,
+            # V59.5: 平仓行继承开仓时的 gate_snapshot，确保复盘时有完整信息
+            "gate_snapshot": open_row.get("gate_snapshot", "") if open_row else "",
         }
         self._append_rows([row])
         logger.info(f"[TradeJournal] 平仓 {order_id}: {exit_reason} @ {close_price} R={pnl_r:.2f}")

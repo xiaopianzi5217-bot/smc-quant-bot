@@ -215,12 +215,16 @@ def send_report_via_telegram(target_date: datetime = None):
     except Exception:
         pass
 
+    from utils.structured_logger import slog
     if send_telegram:
         try:
             send_telegram("📊 SMC BOT DAILY REPORT\n\n" + report)
+            slog.info("[REPORT] Telegram report sent")
             return True
-        except Exception:
+        except Exception as _e:
+            slog.warning(f"[REPORT] Telegram report send failed: {_e}")
             return False
+    slog.warning("[REPORT] Telegram report skipped (send_telegram not available)")
     return False
 
 
@@ -228,8 +232,11 @@ def start_daily_report_scheduler():
     import threading
     import time as _time
     from datetime import datetime as _dt, timedelta as _td
+    from utils.structured_logger import slog
+    slog.info("[REPORT] Daily report scheduler started")
 
     def _worker():
+        slog.info("[REPORT] Daily report worker loop started (next send at UTC 00:00)")
         while True:
             now = _dt.utcnow()
             # 下一个 UTC 零点

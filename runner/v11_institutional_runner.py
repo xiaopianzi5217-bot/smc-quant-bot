@@ -129,7 +129,7 @@ def evaluate_symbol(symbol, cfg):
     wvf = params.get("wvf_std_mult", 2.0)
 
     # 根据 data_mode 决定使用真实数据还是模拟数据
-    data_mode = str(cfg.get("data_mode", "live")).lower()
+    data_mode = str(cfg.get("data_mode", "sample_data")).lower()
     if data_mode == "live":
         # 分别获取 exec 和 macro 数据，各自处理失败情况
         try:
@@ -348,9 +348,13 @@ def evaluate_symbol(symbol, cfg):
     except Exception as _pd_err:
         slog.error(f"[{symbol}] PushDiary observer 记录失败: {_pd_err}")
 
-            # ===== V56.5 质量门：前置过滤假信号（在 V9 决策之前拦截弱信号） =====
+    # ===== V56.5 质量门：前置过滤假信号（在 V9 决策之前拦截弱信号） =====
     # 如果门禁启用且信号未通过，直接 return HOLD，不走 V9 决策流程
     _v565_cfg = cfg.get("v565_gate", {})
+    # V59.5: 预初始化 gate 变量，避免 enabled=False 时未定义
+    _gate_passed = True
+    _gate_meta: dict = {}
+    _gate_snapshot = "{}"
     if _v565_cfg.get("enabled", True):
         _score_for_gate = l_score if direction == "Long" else s_score
         _ev_for_gate = long_ev if direction == "Long" else short_ev
@@ -363,6 +367,9 @@ def evaluate_symbol(symbol, cfg):
             "trend_strength": float(curr.get("trend_strength", 0)),
             "mitigation_strength": float(exec_ctx.get("mitigation_strength", 0)),
             "liquidity_sweep_confirmed": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
+            # V59.3: 补充 adx/direction 供 STRUCTURE_OVERRIDE 环境过滤使用
+            "adx": float(curr.get("adx", 0)),
+            "direction": direction,
         }
         _gate_passed, _gate_reason, _gate_meta = v565_quality_gate(_gate_row, _v565_cfg)
         if not _gate_passed:
@@ -385,7 +392,25 @@ def evaluate_symbol(symbol, cfg):
                 "reason": _gate_reason, "decision": decision,
             }
 
-# ===== V9 决策（入口统一，不再区分 V56.5 gate 是否启用） =====
+    # V59.5: 构造质量门快照（供 TradeJournal 复盘: 什么条件导致亏损）
+    # 格式: {"score":82,"min_score_required":78,"override":false,"adx":25,"regime":"TREND","ev":1.5}
+    try:
+        if _v565_cfg.get("enabled", True) and _gate_passed:
+            _gate_snapshot = (
+                '{"score":%.1f,"min_score_required":%.1f,"override":%s,"adx":%.1f,"regime":"%s","ev":%.4f}'
+                % (
+                    _score_for_gate,
+                    float(_gate_meta.get("min_score_required", 0)),
+                    "true" if _gate_meta.get("override", False) else "false",
+                    float(curr.get("adx", 0)),
+                    str(macro_ctx.get("regime", "mixed")),
+                    _ev_for_gate,
+                )
+            )
+    except Exception:
+        _gate_snapshot = "{}"
+
+    # ===== V9 决策（入口统一，不再区分 V56.5 gate 是否启用） =====
     kernel = V9DecisionKernel(params=cfg)
     decision = kernel.decide(
         curr=curr,
@@ -423,6 +448,7 @@ def evaluate_symbol(symbol, cfg):
     decision["htf_allowed"] = htf_allowed
     decision["exec_ctx"] = dict(exec_ctx)
     decision["exec_ctx"]["htf_allowed"] = htf_allowed
+    decision["gate_snapshot"] = _gate_snapshot  # V59.5: 质量门快照供 hf_auto_trader 保存
 
     # Strategy filters are post-decision guards: they may only downgrade/block
     # an already approved decision. They must never turn HOLD into approved.
@@ -452,18 +478,30 @@ def evaluate_symbol(symbol, cfg):
         decision["reason"] = "; ".join(portfolio_reasons) or "组合风控不允许开仓"
         decision["reason_cn"] = decision["reason"]
 
-                    # 推送逻辑已剥离到调用方（hf_auto_trader.py），在 V37 Gate 全部通过后才触发。
-    # 避免微信收到 Gate 通过但实际被风控拦截的假警报。
-    # 标记待推送，由调用方在确认开单成功后统一发送
-    if decision.get("approved"):
-        decision["pending_notify"] = True
-        decision["snapshot"] = snapshot
+    if decision.get("approved") and dispatch_strategy_decision and cfg.get("telegram", {}).get("send_approved", False):
+        try:
+            result = dispatch_strategy_decision(snapshot, decision)
+            slog.info(f"[{symbol}] Strategy 消息发送结果: {result}")
+            try:
+                from state.push_diary import push_logger as _pd2
+                _pd2.record(
+                    symbol=symbol, channel="telegram", msg_type="strategy_approved",
+                    direction=direction, score=l_score if direction == "Long" else s_score,
+                    ev=long_ev if direction == "Long" else short_ev, price=price,
+                    msg_preview=str(result)[:120] if result else "sent", status="sent",
+                )
+            except Exception as _pd2_err:
+                slog.error(f"[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
+        except Exception as e:
+            slog.error(f"[{symbol}] Strategy 消息发送异常: {e}")
+    elif decision.get("approved"):
+        slog.info(f"[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")
+    else:
+        slog.info(f"[{symbol}] 决策未批准: {decision.get('reason', '未知原因')}")
 
-    slog.info(f"[{symbol}] 决策结果: approved={decision.get('approved')}, reason={decision.get('reason', '未知原因')}")
-
-    slog.info(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
-             f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
-             f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
+        slog.info(f"[{symbol}] DIAG: score={l_score:.1f}/{s_score:.1f} | dir={direction} | EV={long_ev:.4f}/{short_ev:.4f} | "
+              f"edge=±{abs(l_score-s_score):.1f} | HTF={htf_allowed} | vol_ratio={volume_ratio:.2f} | "
+              f"ADX={float(curr.get('adx',0)):.1f} | squeeze={curr.get('squeeze','none')}")
 
     try:
         from state.signal_diary import diary as _sd
@@ -528,6 +566,7 @@ def evaluate_symbol(symbol, cfg):
                 rr=rr, score=l_score if direction == "Long" else s_score,
                 regime=str(exec_ctx.get("regime", "")),
                 note=f"adx={round(float(curr.get('adx',0)),1)} atr={round(atr,1)} vol_ratio={round(volume_ratio,2)}",
+                gate_snapshot=_gate_snapshot,  # V59.5 质量门快照
             )
         except Exception as _tj_err:
             slog.error(f"[{symbol}] TradeJournal 写入失败: {_tj_err}")
@@ -545,6 +584,7 @@ def evaluate_symbol(symbol, cfg):
         "state": marked.get("state") or marked.get("state_name"),
         "reason": marked.get("reason") or marked.get("reason_cn"),
         "decision": marked,
+        "gate_snapshot": _gate_snapshot,  # V59.5: 顶层快照，确保 hf_auto_trader 可读取
     }
 
 

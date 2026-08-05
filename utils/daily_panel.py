@@ -61,6 +61,8 @@ class DailyPanel:
             "feature_regime_losses": defaultdict(int),
             "feature_regime_total_r": defaultdict(float),
             "regime_trades": defaultdict(lambda: {"wins": 0, "losses": 0, "r": 0.0}),
+            # V59.5: Score 区间统计（亏损集中分析）
+            "score_bucket_stats": defaultdict(lambda: {"wins": 0, "losses": 0, "total": 0, "r": 0.0}),
         }
 
     def _save(self):
@@ -157,7 +159,7 @@ class DailyPanel:
             d["feature_regime_losses"][feat_regime_key] = d["feature_regime_losses"].get(feat_regime_key, 0) + 1
         d["feature_regime_total_r"][feat_regime_key] = d["feature_regime_total_r"].get(feat_regime_key, 0.0) + pnl_r
 
-        # Regime 统计
+                # Regime 统计
         reg = d["regime_trades"].get(regime, {"wins": 0, "losses": 0, "r": 0.0})
         reg["r"] += pnl_r
         if pnl_r > 0.2:
@@ -165,6 +167,33 @@ class DailyPanel:
         elif pnl_r < -0.2:
             reg["losses"] += 1
         d["regime_trades"][regime] = reg
+
+        # V59.5: Score 区间统计（亏损集中分析）
+        # 区间划分: 0-60, 60-70, 70-75, 75-78, 78-80, 80-85, 85-90, 90-100
+        _score_floor = 0
+        if score >= 60: _score_floor = 60
+        if score >= 70: _score_floor = 70
+        if score >= 75: _score_floor = 75
+        if score >= 78: _score_floor = 78
+        if score >= 80: _score_floor = 80
+        if score >= 85: _score_floor = 85
+        if score >= 90: _score_floor = 90
+        _bucket_key = f"{_score_floor}-{_score_floor + 5 if _score_floor < 90 else 100}"
+        if _score_floor == 60: _bucket_key = "60-70"
+        elif _score_floor == 70: _bucket_key = "70-75"
+        elif _score_floor == 75: _bucket_key = "75-78"
+        elif _score_floor == 78: _bucket_key = "78-80"
+        elif _score_floor == 80: _bucket_key = "80-85"
+        elif _score_floor == 85: _bucket_key = "85-90"
+        elif _score_floor == 90: _bucket_key = "90-100"
+        b = d["score_bucket_stats"].get(_bucket_key, {"wins": 0, "losses": 0, "total": 0, "r": 0.0})
+        b["total"] += 1
+        b["r"] += pnl_r
+        if pnl_r > 0.2:
+            b["wins"] += 1
+        elif pnl_r < -0.2:
+            b["losses"] += 1
+        d["score_bucket_stats"][_bucket_key] = b
 
         # 概率准确度
         bin_key = str(int(score // 10) * 10)
@@ -260,6 +289,74 @@ class DailyPanel:
 
         regime_text = "\n".join(regime_lines) if regime_lines else "  无"
 
+        # ===== V59.5: Score 区间亏损集中度分析 =====
+        # 输出: 哪个 score 区间亏损最集中 → 决定是否继续优化该区间信号
+        score_bucket_lines = []
+        _buckets = d.get("score_bucket_stats", {})
+        # 筛选有足够样本量的区间 (>=2 笔)
+        _from_closed_rows = False
+        if not _buckets:
+            # 从 trade_journal 兜底读取今日已平仓记录，避免日报无数据
+            try:
+                from state.trade_journal import journal as _tj_local
+                _closes = [r for r in _tj_local.load_all() if r.get("status") == "CLOSE" and str(r.get("close_time", ""))[:10] == d.get("date", "")]
+                if _closes:
+                    _from_closed_rows = True
+                    from collections import defaultdict as _dd
+                    _buckets = _dd(lambda: {"wins": 0, "losses": 0, "total": 0, "r": 0.0})
+                    for _r in _closes:
+                        try:
+                            _sc = float(_r.get("score", 0) or 0)
+                        except (ValueError, TypeError):
+                            _sc = 0
+                        _pnl_r_local = float(_r.get("pnl_r", 0) or 0)
+                        # 同上方区间逻辑
+                        _floor = 0
+                        if _sc >= 60: _floor = 60
+                        if _sc >= 70: _floor = 70
+                        if _sc >= 75: _floor = 75
+                        if _sc >= 78: _floor = 78
+                        if _sc >= 80: _floor = 80
+                        if _sc >= 85: _floor = 85
+                        if _sc >= 90: _floor = 90
+                        _bk = f"{_floor}-{_floor + 5 if _floor < 90 else 100}"
+                        if _floor == 60: _bk = "60-70"
+                        elif _floor == 70: _bk = "70-75"
+                        elif _floor == 75: _bk = "75-78"
+                        elif _floor == 78: _bk = "78-80"
+                        elif _floor == 80: _bk = "80-85"
+                        elif _floor == 85: _bk = "85-90"
+                        elif _floor == 90: _bk = "90-100"
+                        _b = _buckets[_bk]
+                        _b["total"] += 1
+                        _b["r"] += _pnl_r_local
+                        if _pnl_r_local > 0.2: _b["wins"] += 1
+                        elif _pnl_r_local < -0.2: _b["losses"] += 1
+            except Exception:
+                pass
+        if _buckets:
+            # 计算各区间亏损率，排序输出
+            _bucket_analysis = []
+            for _bk_name, _bd in _buckets.items():
+                _bt = _bd.get("total", 0)
+                if _bt == 0:
+                    continue
+                _bl = _bd.get("losses", 0)
+                _bw = _bd.get("wins", 0)
+                _loss_rate = _bl / max(_bt, 1) * 100
+                _br = _bd.get("r", 0.0)
+                _bucket_analysis.append((_bk_name, _bt, _bw, _bl, _loss_rate, _br))
+            if _bucket_analysis:
+                # 按亏损率降序排序 → 亏损最集中的区间排最前
+                _bucket_analysis.sort(key=lambda x: -x[4])
+                score_bucket_lines.append("**V59.3 今日交易质量:**")
+                                # 区间明细已足够，直接输出
+                for _bk_name, _bt, _bw, _bl, _loss_rate, _br in _bucket_analysis:
+                    _marker = " 🎯亏损集中" if _loss_rate >= 50 and _bt >= 2 else ""
+                    score_bucket_lines.append(
+                        f"  {_bk_name}: {_bt}笔(盈{_bw}/亏{_bl}) 亏损率{_loss_rate:.0f}% R={_br:+.2f}{_marker}"
+                    )
+
         # 构建消息
         msg_lines = [
             f"📊 【日交易面板】{d.get('date', '?')}",
@@ -275,9 +372,12 @@ class DailyPanel:
             msg_lines.append(f"🏆 最佳特征+行情: {best_feat_regime}")
         if worst_feat_regime != "N/A":
             msg_lines.append(f"⚠️ 最差特征+行情: {worst_feat_regime}")
-        msg_lines.append("")
+            msg_lines.append("")
         msg_lines.append(f"🎯 概率预测准确率: {prob_acc}% ({total_correct}/{total_prob})")
-        msg_lines.append("")
+        # ===== V59.5: Entry Quality Report 亏损集中分析 =====
+        if score_bucket_lines:
+            msg_lines.extend(score_bucket_lines)
+            msg_lines.append("")
         msg_lines.append(f"📈 行情分布:")
         msg_lines.append(regime_text)
         msg_lines.append("")
