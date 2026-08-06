@@ -1,0 +1,24 @@
+======== DAILY REPORT ========
+Date: 2026-08-05
+
+交易: 1
+胜: 1
+败: 0
+WinRate: 100.0%
+PF: N/A
+
+最佳 Regime: UNKNOWN
+最佳 Feature: N/A
+最大亏损: 0.0R
+平均MFE: N/AR
+平均MAE: N/AR
+==============================
+
+Top 赚钱组合（symbol, regime, feature）:
+UNK | UNKNOWN | NONE -> total_R=2.1 count=1
+
+亏损最多组合：
+UNK | UNKNOWN | NONE -> total_R=2.1 count=1
+
+EV -> 性能摘要:
+EV=1-2: samples=1 winrate=100.0% avg_R=2.1 avg_EV=1.8 EV_error=0.3

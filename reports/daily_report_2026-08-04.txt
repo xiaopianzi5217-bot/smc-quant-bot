@@ -1,0 +1,23 @@
+======== DAILY REPORT ========
+Date: 2026-08-04
+
+交易: 0
+胜: 0
+败: 0
+WinRate: 0.0%
+PF: N/A
+
+最佳 Regime: N/A
+最佳 Feature: N/A
+最大亏损: 0.0R
+平均MFE: N/AR
+平均MAE: N/AR
+==============================
+
+Top 赚钱组合（symbol, regime, feature）:
+N/A
+
+亏损最多组合：
+N/A
+
+EV -> 性能摘要:
