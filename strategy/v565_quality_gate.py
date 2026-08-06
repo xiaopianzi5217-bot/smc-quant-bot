@@ -10,7 +10,8 @@ V56.5 原生高质量入场过滤器
 设计原则：
   - 只使用 V56.5 候选信号已有字段（score, hour, regime, setup_type, model_ev）
   - 不引入旧系统依赖（smc_quality, ob_valid, dmi 等）
-  - 硬拒绝 + 软缩减双轨并用
+  - 低质量分数（score < HARD_REJECT_SCORE）硬拒绝，直接 return
+  - 通过质量门后统一做风险调整（近阈值 + 流动性），合成 size_penalty
 
 用法：
   from strategy.v565_quality_gate import v565_quality_gate
@@ -40,12 +41,12 @@ DEFAULT_REGIME_HOUR_MIN_SCORE: Dict[str, Dict[int, float]] = {
         3: 66.0,    # hour=3 PF=3.73 -> 放松
         17: 66.0,   # hour=17 PF=1.84 -> 放松
         21: 66.0,   # hour=21 PF=2.51 -> 放松
-        # 低分时段（PF<1.0）：收紧
-        4: 78.0,    # hour=4 PF=0.98
-        6: 78.0,    # hour=6 PF=0.97
-        7: 78.0,    # hour=7 PF=0.99
-        16: 78.0,   # hour=16 PF=1.10
-        23: 78.0,   # hour=23 PF=0.93
+        # 低分时段（PF<1.0）：收紧（V59.6.1: 78→75 微调）
+        4: 75.0,    # hour=4 PF=0.98
+        6: 75.0,    # hour=6 PF=0.97
+        7: 75.0,    # hour=7 PF=0.99
+        16: 75.0,   # hour=16 PF=1.10
+        23: 75.0,   # hour=23 PF=0.93
         # 默认
         "__default__": 72.0,
     },
@@ -55,11 +56,11 @@ DEFAULT_REGIME_HOUR_MIN_SCORE: Dict[str, Dict[int, float]] = {
         3: 66.0,
         17: 66.0,
         21: 66.0,
-        4: 78.0,
-        6: 78.0,
-        7: 78.0,
-        16: 78.0,
-        23: 78.0,
+        4: 75.0,    # V59.6.1: 78→75
+        6: 75.0,    # V59.6.1: 78→75
+        7: 75.0,    # V59.6.1: 78→75
+        16: 75.0,   # V59.6.1: 78→75
+        23: 75.0,   # V59.6.1: 78→75
         "__default__": 74.0,
     },
     "range": {
@@ -68,11 +69,11 @@ DEFAULT_REGIME_HOUR_MIN_SCORE: Dict[str, Dict[int, float]] = {
         3: 66.0,
         17: 66.0,
         21: 66.0,
-        4: 78.0,
-        6: 78.0,
-        7: 78.0,
-        16: 78.0,
-        23: 78.0,
+        4: 75.0,    # V59.6.1: 78→75
+        6: 75.0,    # V59.6.1: 78→75
+        7: 75.0,    # V59.6.1: 78→75
+        16: 75.0,   # V59.6.1: 78→75
+        23: 75.0,   # V59.6.1: 78→75
         "__default__": 72.0,
     },
 }
@@ -88,6 +89,12 @@ BLOCKED_HOURS: Tuple[int, ...] = ()
 # ⚙️ model_ev 最低要求（hard floor）
 # ============================================================
 MIN_MODEL_EV: float = -0.28
+
+
+# ============================================================
+# ⚙️ V59.6.1: 低分硬拒绝阈值（原 78 → 75 微调）
+# ============================================================
+HARD_REJECT_SCORE: float = 75.0
 
 
 # ============================================================
@@ -278,27 +285,34 @@ def v565_quality_gate(
         meta["passed_checks"].append("score")
 
     # ========================================================
-    # 3. 低分信号（score<80）额外检查
+    # 3. 低质量分数硬拒绝（score < HARD_REJECT_SCORE）
     # ========================================================
     # V59.3 修复: 取消软缩减通行——低质量信号不能通过"减少仓位"继续交易。
     # 负EV就是负EV, 减半仓仍然亏钱。size_penalty 只能用于已通过质量门但
     # 风险稍高的优质信号, 不能救活不合格信号。
-    if score < 78:
-        # 硬拒绝: 低分信号不再放行
+    # V59.6.1+: 硬拒绝直接 return，不再进入 Step 4 风险调整流程。
+    if score < HARD_REJECT_SCORE:
         meta["blocked"] = True
         meta["failed_checks"].append("sub_grade_hard_reject")
-        reasons.append(f"SUB_GRADE_SCORE_{score:.1f}<78")
-    elif score < 80:
-        # 78~80 区间: 通过但标记需注意（接近阈值, 仓位微缩减至90%）
-        meta["size_penalty"] = min(meta.get("size_penalty", 1.0), 0.90)
+        meta["size_penalty"] = 0.0
+        return False, f"SUB_GRADE_SCORE_{score:.1f}<{HARD_REJECT_SCORE:.0f}", meta
+
+    # 3b. 通过质量门后的风险因子收集（统一用于 size_penalty 合成）
+    risk_penalties: Dict[str, float] = {}
+
+    # 近阈值风险（HARD_REJECT_SCORE <= score < 80 → 微降仓 10%）
+    if score < 80:
+        risk_penalties["near_threshold"] = 0.10
         meta["passed_checks"].append("near_threshold_pass")
+        meta["score_headroom"] = round(score - min_score, 1)
     else:
         # 高分信号（score>=80）：加分
         meta["passed_checks"].append("high_score_bonus")
 
-        # ========================================================
-    # 4. 流动性惩罚（硬惩罚——降 quality_score，不拒绝）
     # ========================================================
+    # 4. 流动性风险惩罚（通过质量门后的风险调整——不拒绝，只减仓）
+    # ========================================================
+    # V59.6.1+: 与 Step 3b 的近阈值风险统一合成 size_penalty
     liquidity_penalty: float = 0.0
     direction = str(row.get("direction", ""))
     setup_type = str(row.get("setup_type", "")).upper()
@@ -354,13 +368,19 @@ def v565_quality_gate(
     liquidity_penalty = min(liquidity_penalty, 0.90)  # 上限
     meta["liquidity_penalty"] = round(liquidity_penalty, 4)
 
-    # 应用惩罚：缩小 quality_score（不拒绝，只降分）
-    # quality_score 降到 < min_score 时会拒绝，但我们不改变 score
-    # 而是通过 size_penalty 降仓位
+    # 流动性风险 → 统一记入 risk_penalties（每个惩罚点对应 8% 仓位缩减）
     if liquidity_penalty > 0:
-        # 每个惩罚点对应 10% 仓位缩减
-        liq_size_cut = 1.0 - liquidity_penalty * 0.80
-        meta["size_penalty"] = min(meta.get("size_penalty", 1.0), liq_size_cut)
+        risk_penalties["liquidity"] = liquidity_penalty * 0.80
+
+    # ========================================================
+    # 4e. 合成 size_penalty（统一风险调整层）
+    # -------------------------------------------------------
+    # 通过质量门的信号，只在这里合并近阈值风险和流动性风险
+    # 最终仓位 = 基础仓位 × size_penalty（1.0 = 不减仓）
+    # ========================================================
+    _total_risk_penalty = min(sum(risk_penalties.values()), 0.85)  # 上限 85% 缩减
+    meta["size_penalty"] = round(1.0 - _total_risk_penalty, 4)
+    meta["risk_penalties"] = {k: round(v, 4) for k, v in risk_penalties.items()}
 
     # 最终决策
     passed = len(reasons) == 0
