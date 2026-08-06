@@ -583,6 +583,10 @@ def _execute_one_v565(df: pd.DataFrame, s: pd.Series, cfg: V565Config) -> Dict[s
 
 def execute_v565(df: pd.DataFrame, selected: pd.DataFrame, cfg: Optional[V565Config] = None) -> pd.DataFrame:
     cfg = cfg or V565Config()
+    # 【修复20260806】select_v565_portfolio 可能返回无 idx 列的空 DataFrame
+    # （Quality Gate 全部拒绝 / 集群缩放全被跳过），直接返回空结果避免 KeyError: 'idx'
+    if selected is None or selected.empty:
+        return pd.DataFrame()
     rows: List[Dict[str, Any]] = []
     last_exit = -1
     for _, s in selected.sort_values("idx").iterrows():
