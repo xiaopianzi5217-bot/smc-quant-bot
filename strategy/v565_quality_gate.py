@@ -219,12 +219,15 @@ def v565_quality_gate(
             meta["failed_checks"].append("override_low_adx")
             return False, "STRUCTURE_OVERRIDE_LOW_ADX", meta
 
+
+
         meta["override"] = True
         meta["size_mult"] = 0.96
         meta["reason"] = "Optimized High Structure"
         meta["liquidity_penalty_estimate"] = round(_liq_penalty_estimate, 4)
         meta["passed_checks"].append("structure_override")
-        return True, "STRUCTURE_OVERRIDE", meta
+        # V59.6: 不再直接 return —— override 仅作为加分标记，
+        # 继续执行后续 gate（model_ev 地板、动态分数门槛、低分硬拒绝、流动性检查）
 
     # ========================================================
     # 1. model_ev 硬地板
@@ -256,7 +259,7 @@ def v565_quality_gate(
     min_score = _get_adaptive_min_score(regime, hour, cfg.get("regime_hour_min_score"), fallback=_config_min_score_f)
     # V59.5: 记录实际门槛供 gate_snapshot 使用（事后复盘: 哪个条件导致亏损）
     meta["min_score_required"] = round(min_score, 1)
-    meta["override"] = False  # 默认非 override，override 路径会改为 True
+    meta.setdefault("override", False)  # 默认非 override；Step 0 已设则保留
     if score < min_score:
         reasons.append(f"SCORE_LOW_{score:.1f}<{min_score:.0f}_REGIME={regime}_HOUR={hour}")
         meta["failed_checks"].append("score")
@@ -359,28 +362,12 @@ def v565_quality_gate(
         liq_size_cut = 1.0 - liquidity_penalty * 0.80
         meta["size_penalty"] = min(meta.get("size_penalty", 1.0), liq_size_cut)
 
-    # ========================================================
-    # 5. 分数软缩减（不拒绝但降仓位）
-    # ========================================================
-    if "size_penalty" not in meta:
-        size_penalty = 1.0
-        if score < 75:
-            size_penalty = 0.60
-        elif score < 78:
-            size_penalty = 0.80
-        meta["size_penalty"] = size_penalty
-    else:
-        # 已经有流动性惩罚或之前的缩减，再叠加分数缩减
-        existing = meta["size_penalty"]
-        if score < 75:
-            meta["size_penalty"] = min(existing, 0.60)
-        elif score < 78:
-            meta["size_penalty"] = min(existing, 0.80)
-
     # 最终决策
     passed = len(reasons) == 0
 
     if passed:
+        if meta.get("override"):
+            return True, "QUALITY_GATE_V565_PASSED_STRUCTURE", meta
         return True, "QUALITY_GATE_V565_PASSED", meta
     else:
         # blocked 的硬拒绝不参与软缩减

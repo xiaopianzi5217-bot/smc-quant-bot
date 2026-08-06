@@ -2647,7 +2647,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
 
     # 每日凌晨跨日时自动推送日报（仅一次）
     try:
-        _panel.try_send_report(_safe_send_impl, _panel_today_sent)
+        _panel.try_send_report(safe_send, _panel_today_sent)
     except Exception as _report_err:
         slog.error(f"[{symbol}] DailyPanel 日报推送失败: {_report_err}")
 
