@@ -53,6 +53,7 @@ from final_forge.v56_5_stable_engine import (
     load_ohlcv,
 )
 from strategy.v565_quality_gate import v565_quality_gate
+from analytics.trade_funnel import trade_funnel  # V59.7 漏斗统计
 from decision.v37_gate import v37_final_gate
 
 # ---------- 优化模块：增强决策管线 ----------
@@ -574,9 +575,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
     df_v56.attrs["symbol"] = symbol
 
     # Step 1: generate_candidates
+    trade_funnel.add("scan")  # V59.7 漏斗统计：扫描开始
     candidates = _V56_ENGINE.generate_candidates(df_v56)
     from analytics.daily_report import daily_report
     daily_report.record_candidate()
+    trade_funnel.add("candidate")  # V59.7 漏斗统计
     if candidates is None or candidates.empty:
         slog.info(f"[{symbol}] V56.5 引擎无候选信号")
         get_reject_audit().log(
@@ -2289,6 +2292,9 @@ def check_and_open(result: dict | None) -> bool:
             note=f"ev={ev:.4f}_adx={result.get('adx',0):.1f}_atr={result.get('atr',0):.1f}_tier={_debug_tier}",
             gate_snapshot=_gate_snapshot,  # V59.5 质量门快照
         )
+        # V59.7 漏斗统计：实际开仓成功
+        if _order_id:
+            trade_funnel.add("opened")
         # 把 order_id 存入 position_manager，供后续平仓追溯
         if _order_id:
             _pos_data = position_manager.get(symbol)
@@ -2564,6 +2570,8 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         priority="TRADE",
     )
 
+    # V59.7 漏斗统计：平仓完成
+    trade_funnel.add("closed")
     # ===== 数据闭环：回写 trade_snapshots.pnl_r / exit_reason =====
     if signal_id:
         try:

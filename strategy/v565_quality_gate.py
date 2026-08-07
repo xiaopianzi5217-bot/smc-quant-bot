@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from analytics.reject_analytics import reject_analytics
+from analytics.trade_funnel import trade_funnel  # V59.7 漏斗统计
 
 
 # ============================================================
@@ -92,9 +93,9 @@ MIN_MODEL_EV: float = -0.28
 
 
 # ============================================================
-# ⚙️ V59.6.1: 低分硬拒绝阈值（原 78 → 75 微调）
+# ⚙️ 低分硬拒绝阈值（V59.6.1 原 75 → 下调至 12 以匹配实盘信号分数量级）
 # ============================================================
-HARD_REJECT_SCORE: float = 75.0
+HARD_REJECT_SCORE: float = 12.0
 
 
 # ============================================================
@@ -217,6 +218,17 @@ def v565_quality_gate(
             meta["blocked"] = True
             meta["reason"] = "STRUCTURE_OVERRIDE_BAD_REGIME"
             meta["failed_checks"].append("override_regime_blocked")
+            # V59.7 RejectAnalytics 记录
+            reject_analytics.record(
+                symbol=row.get("symbol", ""),
+                signal_id=row.get("signal_id", ""),
+                stage="REGIME",
+                reason="STRUCTURE_OVERRIDE_BAD_REGIME",
+                score=score,
+                confidence=row.get("confidence"),
+                regime=regime,
+                extra={"setup_type": setup_type_str, "adx": round(adx, 1), "model_ev": round(model_ev, 4)},
+            )
             return False, "STRUCTURE_OVERRIDE_BAD_REGIME", meta
 
         # 趋势强度过滤: ADX < 18 时没有明确趋势, 结构信号多为假突破
@@ -224,6 +236,17 @@ def v565_quality_gate(
             meta["blocked"] = True
             meta["reason"] = "STRUCTURE_OVERRIDE_LOW_ADX"
             meta["failed_checks"].append("override_low_adx")
+            # V59.7 RejectAnalytics 记录
+            reject_analytics.record(
+                symbol=row.get("symbol", ""),
+                signal_id=row.get("signal_id", ""),
+                stage="REGIME",
+                reason="STRUCTURE_OVERRIDE_LOW_ADX",
+                score=score,
+                confidence=row.get("confidence"),
+                regime=regime,
+                extra={"setup_type": setup_type_str, "adx": round(adx, 1), "model_ev": round(model_ev, 4)},
+            )
             return False, "STRUCTURE_OVERRIDE_LOW_ADX", meta
 
 
@@ -295,6 +318,17 @@ def v565_quality_gate(
         meta["blocked"] = True
         meta["failed_checks"].append("sub_grade_hard_reject")
         meta["size_penalty"] = 0.0
+        # V59.7 RejectAnalytics 记录
+        reject_analytics.record(
+            symbol=row.get("symbol", ""),
+            signal_id=row.get("signal_id", ""),
+            stage="SCORE",
+            reason="SUB_GRADE_HARD_REJECT",
+            score=score,
+            confidence=row.get("confidence"),
+            regime=regime,
+            extra={"hard_reject_score": HARD_REJECT_SCORE, "hour": hour},
+        )
         return False, f"SUB_GRADE_SCORE_{score:.1f}<{HARD_REJECT_SCORE:.0f}", meta
 
     # 3b. 通过质量门后的风险因子收集（统一用于 size_penalty 合成）
@@ -386,6 +420,8 @@ def v565_quality_gate(
     passed = len(reasons) == 0
 
     if passed:
+        # V59.7 漏斗统计：质量门通过
+        trade_funnel.add("gate_pass")
         if meta.get("override"):
             return True, "QUALITY_GATE_V565_PASSED_STRUCTURE", meta
         return True, "QUALITY_GATE_V565_PASSED", meta
