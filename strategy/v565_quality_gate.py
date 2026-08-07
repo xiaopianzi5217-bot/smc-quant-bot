@@ -93,7 +93,11 @@ MIN_MODEL_EV: float = -0.28
 
 
 # ============================================================
-# ⚙️ 低分硬拒绝阈值（V59.6.1 原 75 → 下调至 12 以匹配实盘信号分数量级）
+
+# ⚙️ 低分硬拒绝阈值
+# 注意：实盘 V56 引擎 score 量级为 30~55（非 0-100），
+# 实测 trade_journal 最高 54.3、主流 34~54。
+# HARD_REJECT_SCORE=25 用于排除最低质量记录，但不会误杀正常信号。
 # ============================================================
 HARD_REJECT_SCORE: float = 12.0
 
@@ -151,13 +155,10 @@ def v565_quality_gate(
     regime = str(row.get("regime", "mixed")).lower().strip()
     model_ev = float(row.get("model_ev", -999.0))
     setup_type_str = str(row.get("setup_type", "")).upper()
-    # V59.3: 补充 adx 字段供 STRUCTURE_OVERRIDE 环境过滤使用
-    adx = float(row.get("adx", 0))
-
         # ========================================================
-    # 0. Structure Override（特权通道）⚡ 优先级最高
-    # - 任何满足 override 条件的信号直接通过
-    # - 不执行后续过滤检查（包括 model_ev 硬地板和 score 门槛）
+    # 0. Structure Enhancement（高分结构信号）⚡ 优先级最高
+    # - 高质量结构信号可作为"加分标记"（meta['override']=True）
+    # - 但不再直接通过：仍需通过环境过滤（regime/ADX）和后续质量门检查
     # ========================================================
     #
     # 0a. 流动性惩罚预估算（用于阻止 Override 绕过流动风险）
