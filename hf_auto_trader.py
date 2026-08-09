@@ -620,13 +620,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 },
             )
             return None
-
-        # 🔒 信号排重
+        # 🔒 信号排重（只读查询，不在这里标记）
         seen_signal_ids = set()
         deduped_rows = []
         for _, signal in candidates.iterrows():
             sig_id = _candidate_signal_id(signal)
-            if sig_id in seen_signal_ids or _is_signal_processed(sig_id):
+            if sig_id in seen_signal_ids or _is_signal_already_processed(sig_id):
                 slog.warning(f"[{symbol}] 信号 {sig_id} 之前已执行过，跳过排重。")
                 continue
             seen_signal_ids.add(sig_id)
@@ -1903,7 +1902,7 @@ def check_and_open(result: dict | None) -> bool:
             return False
 
     sig_id = _signal_id(result)
-    if _is_signal_processed(sig_id):
+    if _is_signal_already_processed(sig_id):
         slog.info(f"[{symbol}] signal {sig_id} already processed")
         return False
 
@@ -2173,7 +2172,17 @@ def check_and_open(result: dict | None) -> bool:
     except Exception:
         pass
 
-        # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
+    # 🔒 真正开单成功后才标记已处理（避免被 Quality Gate 拒绝后仍占用排重）
+    try:
+        signal_deduper.mark_processed(sig_id)
+        try:
+            position_manager.mark_signal_processed(sig_id)
+        except Exception:
+            pass
+    except Exception as _m_e:
+        slog.warning(f"[{symbol}] mark_processed failed: {_m_e}")
+
+    # 🟢 钩子 2：瞬间拍摄并锁定高维开单特征快照
 
     # ===== V2 智能仓位计算器 + 熔断器乘数 =====
     try:

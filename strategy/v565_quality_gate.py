@@ -36,46 +36,46 @@ from analytics.trade_funnel import trade_funnel  # V59.7 漏斗统计
 # ============================================================
 DEFAULT_REGIME_HOUR_MIN_SCORE: Dict[str, Dict[int, float]] = {
     "trend": {
-        # 高分时段（PF>1.5）：降低门槛
-        0: 66.0,    # hour=0 PF=2.63 -> 放松
-        2: 66.0,    # hour=2 PF=1.98 -> 放松
-        3: 66.0,    # hour=3 PF=3.73 -> 放松
-        17: 66.0,   # hour=17 PF=1.84 -> 放松
-        21: 66.0,   # hour=21 PF=2.51 -> 放松
-        # 低分时段（PF<1.0）：收紧（V59.6.1: 78→75 微调）
-        4: 75.0,    # hour=4 PF=0.98
-        6: 75.0,    # hour=6 PF=0.97
-        7: 75.0,    # hour=7 PF=0.99
-        16: 75.0,   # hour=16 PF=1.10
-        23: 75.0,   # hour=23 PF=0.93
+        # 高分时段（PF>1.5）：放松（对齐实盘 30~55 分数量级）
+        0: 48.0,
+        2: 48.0,
+        3: 48.0,
+        17: 48.0,
+        21: 48.0,
+        # 低分时段：稍紧
+        4: 55.0,
+        6: 55.0,
+        7: 55.0,
+        16: 55.0,
+        23: 55.0,
         # 默认
-        "__default__": 72.0,
+        "__default__": 52.0,
     },
     "mixed": {
-        0: 66.0,
-        2: 66.0,
-        3: 66.0,
-        17: 66.0,
-        21: 66.0,
-        4: 75.0,    # V59.6.1: 78→75
-        6: 75.0,    # V59.6.1: 78→75
-        7: 75.0,    # V59.6.1: 78→75
-        16: 75.0,   # V59.6.1: 78→75
-        23: 75.0,   # V59.6.1: 78→75
-        "__default__": 74.0,
+        0: 48.0,
+        2: 48.0,
+        3: 48.0,
+        17: 48.0,
+        21: 48.0,
+        4: 55.0,
+        6: 55.0,
+        7: 55.0,
+        16: 55.0,
+        23: 55.0,
+        "__default__": 52.0,
     },
     "range": {
-        0: 66.0,
-        2: 66.0,
-        3: 66.0,
-        17: 66.0,
-        21: 66.0,
-        4: 75.0,    # V59.6.1: 78→75
-        6: 75.0,    # V59.6.1: 78→75
-        7: 75.0,    # V59.6.1: 78→75
-        16: 75.0,   # V59.6.1: 78→75
-        23: 75.0,   # V59.6.1: 78→75
-        "__default__": 72.0,
+        0: 48.0,
+        2: 48.0,
+        3: 48.0,
+        17: 48.0,
+        21: 48.0,
+        4: 55.0,
+        6: 55.0,
+        7: 55.0,
+        16: 55.0,
+        23: 55.0,
+        "__default__": 52.0,
     },
 }
 
@@ -117,12 +117,12 @@ def _get_adaptive_min_score(
     table = score_table or DEFAULT_REGIME_HOUR_MIN_SCORE
     regime_lower = regime.lower().strip()
     rt = table.get(regime_lower, table.get("mixed", {}))
-    dynamic_val = float(rt.get(int(hour), rt.get("__default__", 72.0)))
+    dynamic_val = float(rt.get(int(hour), rt.get("__default__", 52.0)))
 
-    # V59.3 修复: 动态门槛优先。配置 min_score 只能作为下限提高硬性要求,
-    # 不能再把 78 拉低到 55 让 MUD/RANGE 垃圾信号通过。
+    # 修复：config.min_score 作为最终门槛（可降低也可提高）
+    # 之前 max(dynamic, fallback) 导致配置无法放宽
     if fallback is not None:
-        return max(dynamic_val, fallback)
+        return float(fallback)
 
     return dynamic_val
 

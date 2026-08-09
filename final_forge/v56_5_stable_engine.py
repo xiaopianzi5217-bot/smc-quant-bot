@@ -78,7 +78,7 @@ class V565Config:
     warmup_bars: int = 260
     annual_trade_target_min: int = 300
     annual_trade_target_max: int = 500
-    min_score: float = 65.0
+    min_score: float = 55.0
     extra_second_trade_days: int = 25
     allowed_hours: Tuple[int, ...] = (0, 1, 2, 3, 4, 6, 7, 16, 17, 18, 19, 21, 23)
     primary_setups: Tuple[str, ...] = ("LIQUIDITY_SWEEP",)

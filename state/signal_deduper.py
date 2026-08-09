@@ -22,7 +22,7 @@ from typing import Optional
 from utils.structured_logger import slog
 
 
-DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(86400 * 7)))
+DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(4 * 3600)))  # 临时 4 小时
 DEFAULT_SYMBOL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SYMBOL_COOLDOWN_SEC", "900"))
 DEFAULT_SAME_SETUP_COOLDOWN_SEC = int(os.getenv("SIGNAL_SAME_SETUP_COOLDOWN_SEC", str(5 * 75)))
 DEFAULT_SL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SL_COOLDOWN_SEC", "300"))
