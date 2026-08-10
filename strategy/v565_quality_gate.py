@@ -157,7 +157,8 @@ def v565_quality_gate(
     regime = str(row.get("regime", "mixed")).lower().strip()
     model_ev = float(row.get("model_ev", -999.0))
     setup_type_str = str(row.get("setup_type", "")).upper()
-        # ========================================================
+    adx = float(row.get("adx", row.get("ADX", row.get("adx_14", 0.0))) or 0.0)
+    # ========================================================
     # 0. Structure Enhancement（高分结构信号）⚡ 优先级最高
     # - 高质量结构信号可作为"加分标记"（meta['override']=True）
     # - 但不再直接通过：仍需通过环境过滤（regime/ADX）和后续质量门检查
