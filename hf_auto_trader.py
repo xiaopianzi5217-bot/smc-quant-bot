@@ -115,9 +115,9 @@ SCAN_INTERVAL = 300
 MAX_CANDLES = 320 
 
 # Strategy 推送阈值
-MIN_EV_FOR_PUSH = 0.01  # ⚠️ 20260706修复: 从0.15降到0.01，匹配实时model_ev实际分布（通常在-0.2~0.08）
-MIN_SCORE_FOR_PUSH = 35 
-MIN_SCORE_GAP = 3.0  # 20260715修复: 从4.0降到3.0，V56.5 Short信号在BULL趋势下long_score较高但仍可开单
+MIN_EV_FOR_PUSH = 0.02  # 20260905: 实盘 model_ev 通常在 -0.2~0.08，取 0.02 过滤负EV
+MIN_SCORE_FOR_PUSH = 45  # 20260905: 实盘 score 量级 30~55，45 属优质区（约前25%）
+MIN_SCORE_GAP = 3.5  # 20260905: 加大方向噪音过滤
 
 # ----- 止损冷却 -----
 STOP_LOSS_COOLDOWN = 300
@@ -157,12 +157,12 @@ _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open�
 
 # ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
 _V56_ENGINE = V56_5_Engine(V565Config(
-    min_score=55.0,
-    allowed_hours=tuple(range(24)),
-    # 【修复20260816】允许 Tier2 信号（WEAK_BOS / TREND_PULLBACK / FVG_TOUCH 等）
-    # 只要 score >= 55 即通过，消除"69.5分候选直接全被过滤"的白名单问题
+    min_score=45.0,
+    allowed_hours=(0, 1, 2, 3, 4, 6, 7, 16, 17, 18, 19, 21, 23),
+    # 【20260905】实盘 score 量级为 30~55（trade_journal 92 笔均值 40.8、最高 54.3），
+    # 45 分 = 实盘优质区（约前 25%）；50 分 = Tier2 强信号阈值（实盘 top 10%）。
     allow_tier2_if_strong=True,
-    strong_tier2_score=55.0,
+    strong_tier2_score=50.0,
 ))
 _bucket_ev_path = Path("data/v56_5_bucket_ev.json")
 if _bucket_ev_path.exists():
