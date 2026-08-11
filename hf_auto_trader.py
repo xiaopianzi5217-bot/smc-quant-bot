@@ -1574,6 +1574,23 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         result["size"] = trade_size
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
+    # 【修复20260810】V6 路由实盘激活推送前必须经过统一冷却拦截。
+    # 根因：此前该函数推送开单通知时未调用 is_symbol_cooled，
+    #      且 sig_id 使用秒级时间戳导致 should_process 永远通过，
+    #      造成每根新 15min K 线都推送一次相同开单信号。
+    _route_direction = str(result.get("direction", ""))
+    _route_reason = str(route or "LIVE_ROUTE")
+    if signal_deduper.is_symbol_cooled(symbol, _route_direction, _route_reason):
+        slog.warning(f"[V6 分级路由 - 冷却拦截] {symbol} {level} {route} 方向={_route_direction} 仍在冷却中，跳过推送")
+        return False
+    # 记录一次信号指纹去重（兼容旧链路）
+    try:
+        if _is_signal_already_processed(sig_id):
+            slog.warning(f"[V6 分级路由 - 信号去重] {symbol} {sig_id} 已处理过，跳过推送")
+            return False
+        signal_deduper.should_process(sig_id)
+    except Exception:
+        pass
     slog.info(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
     try:
         event_logger.log_event("LIVE_TRADE", {
@@ -1635,6 +1652,11 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         f"说明: {reason_cn}",
         priority="TRADE",
     )
+    # 【修复20260810】推送成功后必须立即标记冷却，否则下一次扫描冷却检查永远通过
+    try:
+        signal_deduper.mark_symbol_fired(symbol, _route_direction, _route_reason)
+    except Exception as _mkr_e:
+        slog.error(f"[V6 分级路由] mark_symbol_fired 失败: {_mkr_e}")
 
     # ===== [修复20260825] V6 路由确认开仓后，必须写入持仓管理器 =====
     # 之前只发通知、返回 True，从不调用 position_manager.update()
