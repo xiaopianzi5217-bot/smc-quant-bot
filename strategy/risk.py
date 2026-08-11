@@ -167,7 +167,11 @@ def check_partial_close_and_trail(
     current_price
 ) -> dict:
     """
-    动态止盈止损管理 V58.7
+    动态止盈止损管理 V58.7 + V59.7 修复
+
+    【V59.7 修复两个致命bug】
+    1. TP1 部分止盈被保本逻辑抢先：到达 TP1 时返回 MOVE_SL 而非 PARTIAL_CLOSE
+    2. 保本后 risk=0 导致所有平仓信号失效（92条开仓、0条平仓）
 
     返回:
     {
@@ -208,246 +212,145 @@ def check_partial_close_and_trail(
         }
 
     # ============================
-    # 计算R
+    # 计算 risk（兼容保本后 sl == entry 的情况）
     # ============================
+    # 【V59.7 修复】保本后 current_sl == entry 时 risk=0，导致所有平仓信号失效。
+    # 方案：优先使用 initial_risk（开仓时保存），其次用 ATR fallback，
+    # 保证保本后 TP1/TP2/追踪止损仍能正确触发。
+    atr = float(position.get("atr") or position.get("ATRr_14") or 0)
+    if atr <= 0:
+        atr = entry * 0.01 if entry > 0 else 1.0  # fallback: 1% entry
 
-    risk = abs(entry - sl)
+    initial_risk = float(position.get("initial_risk") or position.get("risk") or 0)
+    risk_abs = abs(entry - sl)
+
+    if risk_abs > 0:
+        risk = risk_abs
+        # 首次计算时保存 initial_risk（便于保本后追溯）
+        if initial_risk <= 0:
+            initial_risk = risk_abs
+    elif initial_risk > 0:
+        risk = initial_risk
+    else:
+        # 保本后无初始风险记录，用 ATR 作为合理 fallback
+        risk = atr
 
     if risk <= 0:
-        return {
-            "action":"HOLD",
-            "reason":"INVALID_RISK"
-        }
+        risk = atr
 
+    # ============================
+    # 计算 R（基于实际 risk，保本后仍可正确计算）
+    # ============================
     if str(side or "").lower().startswith("long"):
         profit_r = (current_price - entry) / risk
     else:
         profit_r = (entry - current_price) / risk
 
     # ============================
-    # 1. 首先检查硬止损
+    # 1. 首先检查硬止损（无条件，即使保本后也能触发）
     # ============================
-
     if str(side or "").lower().startswith("long"):
         if current_price <= sl:
             return {
-                "action":
-                    "CLOSE_ALL",
-
-                "reason":
-                    "STOP_LOSS",
-
-                "profit_r":
-                    round(profit_r,3),
-
-                "stage":
-                    stage
+                "action": "CLOSE_ALL",
+                "reason": "STOP_LOSS",
+                "profit_r": round(profit_r, 3),
+                "stage": stage
             }
     else:
         if current_price >= sl:
             return {
-                "action":
-                    "CLOSE_ALL",
-
-                "reason":
-                    "STOP_LOSS",
-
-                "profit_r":
-                    round(profit_r,3),
-
-                "stage":
-                    stage
+                "action": "CLOSE_ALL",
+                "reason": "STOP_LOSS",
+                "profit_r": round(profit_r, 3),
+                "stage": stage
             }
 
     # ============================
-    # 2. 盈利0.8R 保本
+    # 2. TP2 全部退出（无条件，优先于保本/追踪）
+    # 【V59.7 修复】修复 TP2 被追踪止损抢先、或保本后 risk=0 导致 TP2 永不触发
     # ============================
-
-    if profit_r >= 0.8 and stage < 1:
-
-        return {
-
-            "action":
-                "MOVE_SL",
-
-            "new_sl":
-                entry,
-
-            "reason":
-                "BREAKEVEN_PROTECT",
-
-            "stage":
-                1,
-
-            "profit_r":
-                round(profit_r,3)
-
-        }
-
-    # ============================
-    # 3. TP1 部分止盈
-    # ============================
-
-    if stage < 2:
-
-        if str(side or "").lower().startswith("long"):
-
-            hit_tp1 = (
-                current_price >= tp1
-            )
-
-        else:
-
-            hit_tp1 = (
-                current_price <= tp1
-            )
-
-        if hit_tp1:
-
-            return {
-
-                "action":
-                    "PARTIAL_CLOSE",
-
-                "close_percent":
-                    50,
-
-                "reason":
-                    "TP1_HIT",
-
-                "stage":
-                    2,
-
-                "profit_r":
-                    round(profit_r,3)
-
-            }
-
-    # ============================
-    # 4. TP2 后启动追踪
-    # ============================
-
-    if stage >=2:
-            # V59.4: 分阶段追踪止损
-            # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免小回调被扫）
-            # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个目标利润，开始收紧）
-            # 之前统一 0.5R 太紧：15m 趋势品种正常 0.6~0.8R 回撤会被连续扫掉
-            if stage == 2:
-                trail_distance = risk * 1.0
-            else:
-                trail_distance = risk * 0.7
-
-            if str(side or "").lower().startswith("long"):
-
-                new_sl = (
-                    current_price -
-                    trail_distance
-                )
-
-                if new_sl > sl:
-
-                    return {
-
-                        "action":
-                            "MOVE_SL",
-
-                        "new_sl":
-                            new_sl,
-
-                        "reason":
-                            "TRAILING_STOP",
-
-                        "stage":
-                            3,
-
-                        "profit_r":
-                            round(
-                                profit_r,
-                                3
-                            )
-                    }
-
-            else:
-
-                new_sl = (
-                    current_price +
-                    trail_distance
-                )
-
-                if new_sl < sl:
-
-                    return {
-
-                        "action":
-                            "MOVE_SL",
-
-                        "new_sl":
-                            new_sl,
-
-                        "reason":
-                            "TRAILING_STOP",
-
-                        "stage":
-                            3,
-
-                        "profit_r":
-                            round(
-                                profit_r,
-                                3
-                            )
-                    }
-
-    # ============================
-    # 5. TP2全部退出
-    # ============================
-
     if str(side or "").lower().startswith("long"):
-
-        hit_tp2 = (
-            current_price>=tp2
-        )
-
+        hit_tp2 = (current_price >= tp2)
     else:
-
-        hit_tp2 = (
-            current_price<=tp2
-        )
+        hit_tp2 = (current_price <= tp2)
 
     if hit_tp2:
-
         return {
-
-            "action":
-                "CLOSE_ALL",
-
-            "reason":
-                "TP2_HIT",
-
-            "profit_r":
-                round(
-                    profit_r,
-                    3
-                ),
-
-            "stage":
-                4
-
+            "action": "CLOSE_ALL",
+            "reason": "TP2_HIT",
+            "profit_r": round(profit_r, 3),
+            "stage": 4
         }
 
+    # ============================
+    # 3. TP1 部分止盈（无条件，优先于保本）
+    # 【V59.7 修复】修复 TP1 到达时被 BREAKEVEN_PROTECT 抢先导致 PARTIAL_CLOSE 永不触发
+    # ============================
+    if stage < 2:
+        if str(side or "").lower().startswith("long"):
+            hit_tp1 = (current_price >= tp1)
+        else:
+            hit_tp1 = (current_price <= tp1)
+
+        if hit_tp1:
+            return {
+                "action": "PARTIAL_CLOSE",
+                "close_percent": 50,
+                "reason": "TP1_HIT",
+                "stage": 2,
+                "profit_r": round(profit_r, 3)
+            }
+
+    # ============================
+    # 4. 盈利 0.8R 保本（仅 stage < 1 时）
+    # ============================
+    if profit_r >= 0.8 and stage < 1:
+        return {
+            "action": "MOVE_SL",
+            "new_sl": entry,
+            "reason": "BREAKEVEN_PROTECT",
+            "stage": 1,
+            "profit_r": round(profit_r, 3)
+        }
+
+    # ============================
+    # 5. TP1 后启动追踪止损（stage >= 2）
+    # ============================
+    if stage >= 2:
+        # V59.4: 分阶段追踪止损
+        # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免小回调被扫）
+        # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个目标利润，开始收紧）
+        if stage == 2:
+            trail_distance = risk * 1.0
+        else:
+            trail_distance = risk * 0.7
+
+        if str(side or "").lower().startswith("long"):
+            new_sl = current_price - trail_distance
+            if new_sl > sl:
+                return {
+                    "action": "MOVE_SL",
+                    "new_sl": new_sl,
+                    "reason": "TRAILING_STOP",
+                    "stage": 3,
+                    "profit_r": round(profit_r, 3)
+                }
+        else:
+            new_sl = current_price + trail_distance
+            if new_sl < sl:
+                return {
+                    "action": "MOVE_SL",
+                    "new_sl": new_sl,
+                    "reason": "TRAILING_STOP",
+                    "stage": 3,
+                    "profit_r": round(profit_r, 3)
+                }
+
     return {
-
-        "action":
-            "HOLD",
-
-        "reason":
-            "WAIT",
-
-        "profit_r":
-            round(
-                profit_r,
-                3
-            ),
-
-        "stage":
-            stage
+        "action": "HOLD",
+        "reason": "WAIT",
+        "profit_r": round(profit_r, 3),
+        "stage": stage
     }
+

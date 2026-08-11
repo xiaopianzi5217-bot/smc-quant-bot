@@ -35,6 +35,33 @@ except ImportError:
     dispatch_observer_snapshot = None
     dispatch_strategy_decision = None
 
+# 【修复20260810】统一去重：runner 直接推送 Telegram 时也必须经过 signal_deduper，
+# 否则每个 15min K 线会重复推送同一信号（根因：runner 绕过了 hf_auto_trader 的去重）。
+try:
+    from state.signal_deduper import signal_deduper as _runner_deduper
+except ImportError:
+    _runner_deduper = None
+
+
+def _make_runner_signal_id(symbol: str, direction: str, exec_ctx: dict,
+                           decision: dict, score: float, ev: float,
+                           kline_dt) -> str:
+    """构建与 hf_auto_trader 一致的信号指纹，使用 K 线绝对时间戳。
+
+    【修复20260810】K线 datetime 是绝对时间戳，跨扫描批次恒定不变；
+    用 idx 会在每次 fetch 后变化导致去重失效。
+    """
+    setup_type = str(decision.get("signal", {}).get("setup_type", "")) or \
+        str(exec_ctx.get("setup_type", decision.get("reason", "UNKNOWN")))
+    sig_dt = str(kline_dt) if kline_dt not in (None, "") else "no_dt"
+    score_bucket = int(float(score or 0) / 10) if score is not None else -1
+    try:
+        ev_bucket = f"{float(ev or 0):+.3f}"[:6]
+    except (TypeError, ValueError):
+        ev_bucket = "+0.000"
+    regime = str(exec_ctx.get("regime", "UNKNOWN"))[:4]
+    return f"{symbol}_{direction}_{setup_type}_dt{sig_dt}_s{score_bucket}_ev{ev_bucket}_{regime}"
+
 
 def load_config(path="config/v11_full_config.json"):
     return load_runtime_config(path)
@@ -478,8 +505,36 @@ def evaluate_symbol(symbol, cfg):
         decision["reason"] = "; ".join(portfolio_reasons) or "组合风控不允许开仓"
         decision["reason_cn"] = decision["reason"]
 
+    # 【修复20260810】统一去重：真正推送 Telegram 前检查 signal_deduper。
+    # 同一 K 线、同一方向、同一 setup 的信号只允许推送一次，防止重复刷屏。
+    _runner_sig_id = ""
+    if decision.get("approved") and _runner_deduper is not None:
+        _runner_sig_id = _make_runner_signal_id(
+            symbol=symbol, direction=direction or "NONE",
+            exec_ctx=exec_ctx, decision=decision,
+            score=(l_score if direction == "Long" else s_score),
+            ev=(long_ev if direction == "Long" else short_ev),
+            kline_dt=curr.get("datetime", ""),
+        )
+        if _runner_deduper.is_processed(_runner_sig_id):
+            slog.info(f"[{symbol}] DEDUP 拦截重复推送: {_runner_sig_id}")
+            decision["approved"] = False
+            decision["decision_approved"] = False
+            decision["is_approved"] = False
+            decision["state"] = "DEDUP_BLOCKED"
+            decision["state_name"] = "重复信号拦截"
+            decision["reason"] = "同一K线同一模式信号已推送过，本次跳过"
+            decision["reason_cn"] = decision["reason"]
+
     if decision.get("approved") and dispatch_strategy_decision and cfg.get("telegram", {}).get("send_approved", False):
         try:
+            # 【修复20260810】推送前标记去重（should_process 原子返回 True=首次并已标记）
+            if _runner_deduper is not None and _runner_sig_id:
+                _runner_deduper.should_process(_runner_sig_id)
+                try:
+                    _runner_deduper.mark_symbol_fired(symbol, direction, "strategy_approved")
+                except Exception:
+                    pass
             result = dispatch_strategy_decision(snapshot, decision)
             slog.info(f"[{symbol}] Strategy 消息发送结果: {result}")
             try:
@@ -493,6 +548,12 @@ def evaluate_symbol(symbol, cfg):
             except Exception as _pd2_err:
                 slog.error(f"[{symbol}] PushDiary strategy 记录失败: {_pd2_err}")
         except Exception as e:
+            # 【修复20260810】推送异常时释放去重标记，允许下一次扫描重试
+            if _runner_deduper is not None and _runner_sig_id:
+                try:
+                    _runner_deduper.unmark_processed(_runner_sig_id)
+                except Exception:
+                    pass
             slog.error(f"[{symbol}] Strategy 消息发送异常: {e}")
     elif decision.get("approved"):
         slog.info(f"[{symbol}] 决策已批准但未发送 Telegram: dispatch_strategy_decision={'可用' if dispatch_strategy_decision else '不可用'}, send_approved={cfg.get('telegram', {}).get('send_approved', False)}")

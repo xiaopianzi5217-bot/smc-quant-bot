@@ -11,6 +11,13 @@ import time
 from datetime import datetime
 from utils.structured_logger import slog
 
+
+# V59.8: 延迟导入 trade_journal，避免循环依赖
+def _get_trade_journal():
+    from state.trade_journal import journal as _tj
+    return _tj
+
+
 POSITIONS_FILE = "state/managed_positions.json"
 BACKUP_DIR = "storage/position_backups"
 PROCESSED_SIGNALS_FILE = "state/processed_signals.json"
@@ -161,10 +168,40 @@ class PositionManager:
                 return copy.deepcopy(pos) if pos is not None else None
             return {k: copy.deepcopy(v) for k, v in self._positions.items()}
 
+
     def remove(self, symbol: str):
         with self._lock:
             self._positions.pop(symbol, None)
             self._mark_dirty()
+        self._daily_snapshot()
+        self._save()
+
+    def close(self, symbol: str, pnl_r=0.0, exit_reason='SL', exit_price=None):
+        """V59.8: 平仓 - 移除持仓并向 trade_journal 写入 CLOSE 记录"""
+        with self._lock:
+            pos = self._positions.pop(symbol, None)
+            if pos is None:
+                return
+            self._mark_dirty()
+
+        # 写入 trade_journal 平仓日志（延迟导入避免循环依赖）
+        try:
+            order_id = pos.get('order_id') or ''
+            close_px = float(exit_price) if exit_price else 0.0
+            if order_id:
+                tj = _get_trade_journal()
+                tj.close_trade(
+                    order_id=order_id,
+                    close_price=close_px,
+                    pnl_r=float(pnl_r or 0.0),
+                    exit_reason=str(exit_reason or 'SL'),
+                )
+                slog.info(f'[PositionManager.close] trade_journal CLOSE 已写入: {order_id} reason={exit_reason} pnl_r={pnl_r:.2f}')
+            else:
+                slog.warning(f'[PositionManager.close] {symbol} 无 order_id，跳过 trade_journal')
+        except Exception as e:
+            slog.error(f'[PositionManager.close] trade_journal 写入失败: {e}')
+
         self._daily_snapshot()
         self._save()
 
