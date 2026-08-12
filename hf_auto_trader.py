@@ -1591,6 +1591,89 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         signal_deduper.should_process(sig_id)
     except Exception:
         pass
+    # ===== 【修复20260826】持仓感知：同向加仓 / 反向平仓 =====
+    _existing_pos = position_manager.get(symbol)
+    if _existing_pos is not None:
+        _existing_direction = str(_existing_pos.get("direction", ""))
+        _new_direction = _route_direction
+        _existing_entry0 = float(_existing_pos.get("entry") or 0.0)
+        _existing_sl0 = float(_existing_pos.get("current_sl") or _existing_pos.get("sl") or 0.0)
+
+        # 同方向信号 → 加仓（合并均价、累加仓位）
+        if _existing_direction and _new_direction and _existing_direction == _new_direction:
+            _new_size = float(trade_size)
+            _old_size = float(_existing_pos.get("size") or 0.0)
+            if _old_size <= 0:
+                _old_size = _new_size
+            _combined_size = _old_size + _new_size
+            _new_entry_px = float(result.get("entry") or 0.0)
+            if _existing_entry0 > 0 and _new_entry_px > 0:
+                _avg_entry_px = (_existing_entry0 * _old_size + _new_entry_px * _new_size) / _combined_size
+            else:
+                _avg_entry_px = _new_entry_px if _new_entry_px > 0 else _existing_entry0
+            _new_sl0 = float(result.get("sl") or 0.0)
+            _final_sl = _existing_sl0
+            if _existing_direction in ("Long", "long") and _new_sl0 > _existing_sl0:
+                _final_sl = _new_sl0
+            elif _existing_direction in ("Short", "short") and 0 < _new_sl0 < _existing_sl0:
+                _final_sl = _new_sl0
+
+            _existing_pos["entry"] = _avg_entry_px
+            _existing_pos["current_sl"] = _final_sl
+            _existing_pos["size"] = _combined_size
+            _existing_pos["add_count"] = int(_existing_pos.get("add_count") or 0) + 1
+            _existing_pos["last_add_time"] = time.time()
+            _existing_pos["last_add_price"] = _new_entry_px
+            _existing_pos["signal_id"] = sig_id
+            position_manager.update(symbol, _existing_pos)
+            try:
+                from analytics.state_recovery import save_positions
+                save_positions(position_manager.get())
+            except Exception:
+                pass
+            slog.info(
+                f"[V6 分级路由 - 加仓] {symbol} {_new_direction} "
+                f"size={_old_size:.4f}+{_new_size:.4f}={_combined_size:.4f} "
+                f"avg_entry={_avg_entry_px:.2f} new_SL={_final_sl:.2f} "
+                f"add_count={_existing_pos['add_count']}"
+            )
+            safe_send(
+                f"🟢 加仓通知\n"
+                f"标的: {symbol} ({_new_direction})\n"
+                f"加仓: {_new_size:.4f} (原 {_old_size:.4f} → 总 {_combined_size:.4f})\n"
+                f"新均价: {_avg_entry_px:.2f}  SL: {_final_sl:.2f}",
+                priority="TRADE",
+            )
+            try:
+                signal_deduper.mark_symbol_fired(symbol, _new_direction, _route_reason)
+            except Exception as _mkr_e2:
+                slog.error(f"[V6 分级路由] mark_symbol_fired 失败: {_mkr_e2}")
+            return True
+
+        # 反方向信号 → 全平旧仓（不立即开反向新仓）
+        elif _existing_direction and _new_direction and _existing_direction != _new_direction:
+            _close_reason = f"REVERSE_SIGNAL_{_new_direction}"
+            _exit_price = float(result.get("entry") or result.get("price") or 0.0)
+            slog.warning(
+                f"[V6 分级路由 - 反向平仓] {symbol} 旧方向={_existing_direction} "
+                f"新信号方向={_new_direction}，全平旧仓并冷却"
+            )
+            try:
+                _close_px = _exit_price if _exit_price > 0 else _existing_sl0
+                _trigger_stop_loss(symbol, _existing_pos, _close_px, reason=_close_reason)
+            except Exception as _rev_e:
+                slog.error(f"[V6 分级路由 - 反向平仓失败] {symbol}: {_rev_e}")
+                return False
+            try:
+                signal_deduper.mark_symbol_fired(symbol, _new_direction, _route_reason)
+            except Exception as _mkr_e3:
+                slog.error(f"[V6 分级路由] mark_symbol_fired 失败: {_mkr_e3}")
+            return False
+
+        else:
+            slog.warning(f"[V6 分级路由] {symbol} 无法确定持仓方向，跳过")
+            return False
+
     slog.info(f"[V6 分级路由 - 实盘激活] {symbol} {level} 信号 ({score}分) | 分配仓位: {trade_size}")
     try:
         event_logger.log_event("LIVE_TRADE", {

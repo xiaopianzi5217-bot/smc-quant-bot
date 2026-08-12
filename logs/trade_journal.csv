@@ -89,3 +89,5 @@ order_id,symbol,direction,status,open_time,open_price,sl,tp1,tp2,tp3,rr,score,re
 260629162408088,ETH/USDT,Long,OPEN,2026-07-08T01:09:19.709952,1805.55,1786.57,1834.02,1843.51,1862.48,1.5,42.31,trend,0,,,,,,,,,adx=27.7 atr=9.5 vol_ratio=0.37
 260629162408089,BTC/USDT,Long,OPEN,2026-07-08T01:11:28.555801,64037.7,63501.95,64841.33,65109.21,65644.96,1.5,42.33,mud,0,,,,,,,,,adx=18.8 atr=267.9 vol_ratio=0.42
 260629162408090,BTC/USDT,Long,OPEN,2026-07-08T01:14:07.121137,64027.1,63491.35,64830.73,65098.61,65634.36,1.5,42.21,mud,0,,,,,,,,,adx=18.8 atr=267.9 vol_ratio=0.46
+260629162408091,BTC/USDT,Long,OPEN,REGULAR,2026-08-07T14:11:12.876764,64346.5,64138.29,64658.82,64762.92,64971.14,1.5,33.53,mud,0,,,,,,,,,adx=14.7 atr=104.1 vol_ratio=0.64,"{""score"":33.5,""min_score_required"":12.0,""override"":false,""adx"":14.7,""regime"":""mixed"",""ev"":-0.0054}"
+260629162408092,ETH/USDT,Long,OPEN,REGULAR,2026-08-07T14:11:22.571714,1901.25,1893.61,1912.71,1916.53,1924.17,1.5,17.62,mud,0,,,,,,,,,adx=16.3 atr=3.8 vol_ratio=0.42,"{""score"":17.6,""min_score_required"":12.0,""override"":false,""adx"":16.3,""regime"":""mixed"",""ev"":-0.0490}"
