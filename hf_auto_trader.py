@@ -1602,6 +1602,18 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         # 同方向信号 → 加仓（合并均价、累加仓位）
         if _existing_direction and _new_direction and _existing_direction == _new_direction:
             _new_size = float(trade_size)
+            # 【修复20260904】P1：验证期限制加仓，防止仓位叠加过大
+            # 最多加仓 1 次（add_count=1），总 size 上限 0.08
+            _MAX_ADD_COUNT = 1
+            _MAX_TOTAL_SIZE = 0.08
+            _cur_add_count = int(_existing_pos.get("add_count") or 0)
+            _cur_size = float(_existing_pos.get("size") or 0.0)
+            if _cur_add_count >= _MAX_ADD_COUNT or (_cur_size + _new_size) > _MAX_TOTAL_SIZE:
+                slog.warning(
+                    f"[V6 分级路由 - 加仓拦截] {symbol} add_count={_cur_add_count} "
+                    f"size={_cur_size:.4f}+{_new_size:.4f} 超限（max_add={_MAX_ADD_COUNT}, max_size={_MAX_TOTAL_SIZE}），跳过加仓"
+                )
+                return False
             _old_size = float(_existing_pos.get("size") or 0.0)
             if _old_size <= 0:
                 _old_size = _new_size
@@ -1624,7 +1636,10 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             _existing_pos["add_count"] = int(_existing_pos.get("add_count") or 0) + 1
             _existing_pos["last_add_time"] = time.time()
             _existing_pos["last_add_price"] = _new_entry_px
-            _existing_pos["signal_id"] = sig_id
+            # 【修复20260904】加仓必须复用持仓原 signal_id，禁止换新 id
+            # 否则平仓时 signal_id 在 trade_snapshots 无对应开仓行 → UPDATE 0 行假回写
+            if not _existing_pos.get("signal_id"):
+                _existing_pos["signal_id"] = sig_id
             position_manager.update(symbol, _existing_pos)
             try:
                 from analytics.state_recovery import save_positions
@@ -2618,7 +2633,7 @@ stage={action_plan.get('stage')}
                 save_positions(position_manager.get())
             except Exception:
                 pass
-            safe_send(f"部分平仓: {symbol} {direction} @{current_price:.2f} new_sl={action_plan.get('new_sl'):.2f}", priority="TRADE")
+            safe_send(f"部分平仓: {symbol} {direction} @{current_price:.2f} new_sl={action_plan.get('new_sl') or 0.0:.2f}", priority="TRADE")
         elif action_plan.get("action") == "MOVE_SL" and action_plan.get('new_sl') is not None:
             pos["current_sl"] = action_plan.get('new_sl')
             pos["stage"] = action_plan.get("stage", pos.get('stage', 0))

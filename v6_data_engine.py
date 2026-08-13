@@ -375,9 +375,17 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
             SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
             WHERE signal_id = ?
         """, (exit_reason, int(exit_timestamp or int(time.time())), exit_price or 0.0, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
+        # 【修复20260904】先读取 rowcount 再 commit，避免假「已回写」
+        _rows = cursor.rowcount
         conn.commit()
         conn.close()
-        slog.info(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
+        if _rows == 0:
+            slog.warning(
+                f"[V6 DataEngine] ⚠️ 平仓回写未命中开仓行（signal_id 错位或无对应 OPEN）"
+                f" -> {signal_id} | {pnl_r:+.2f}R | reason={exit_reason}"
+            )
+        else:
+            slog.info(f"[V6 DataEngine] 真实标签拼接成功 -> {signal_id} | {pnl_r:+.2f}R")
 
         if IS_HF_SPACE:
             request_push_database_to_hub()
