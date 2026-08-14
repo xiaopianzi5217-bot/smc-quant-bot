@@ -64,6 +64,8 @@ from state.position_manager import position_manager
 from state.position_reconciler import position_reconciler
 from state.trade_journal import journal as trade_journal
 from utils.safe_extract import safe_get, safe_get_str, safe_get_float
+from utils.event_bus import emit
+import utils.v6_event_hooks
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
@@ -614,6 +616,24 @@ stage={action_plan.get('stage')}
                     msg = f"🛑 [{sym}] 触发止损全平 {_dir} @{curr_price:.2f} pnl_r={_pnl_r:.2f}"
                     safe_send_telegram(msg)
                     slog.info(f"[Monitor] {msg} signal_id={_sig_id}")
+                    # ===== [修复] V6 outcome 回写：与 _trigger_stop_loss 主路径同闭环，避免幽灵 OPEN =====
+                    if _sig_id:
+                        try:
+                            emit(
+                                "record_close_outcome",
+                                signal_id=_sig_id,
+                                pnl_r=float(_pnl_r),
+                                exit_reason=str(action_plan.get('reason') or 'SL_MONITOR'),
+                                max_fwd=float(pos.get('mfe') or 0.0),
+                                max_adv=float(pos.get('mae') or 0.0),
+                                exit_timestamp=time.time(),
+                                exit_price=float(curr_price),
+                            )
+                            slog.info(f"[Monitor] V6 outcome 已回写: {_sig_id} {_pnl_r:+.2f}R reason=SL_MONITOR")
+                        except Exception as _oc_e:
+                            slog.error(f"[Monitor] V6 outcome 回写失败: {_oc_e}")
+                    else:
+                        slog.warning(f"[Monitor] {sym} 平仓无 signal_id，跳过 trade_snapshots 回写")
                     # exit event will be logged from trading core (hf_auto_trader), avoid duplicate logging here
                     try:
                         _oid = pos.get('order_id') or pos.get('tracker_signal_id') or ''
