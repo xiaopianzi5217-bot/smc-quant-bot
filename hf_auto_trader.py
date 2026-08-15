@@ -1835,7 +1835,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         return '；'.join(parts)
 
     reason_cn = _translate_reason(reason)
-    _short_id = _open_short_id
+    _short_id = _short_signal_id(sig_id)
     safe_send(
         f"🟢 开单 #{_short_id} {symbol} ({result.get('direction','?')})\n"
         f"级别: {level} ({score:.1f}分) | 仓位: {trade_size:.4f}\n"
