@@ -341,6 +341,102 @@ _OBSERVER_LAST_BY_KEY: dict = {}  # event_key -> ts
 _OBSERVER_BURST_TIMES: list = []  # 最近成功推送时间戳
 
 
+def _short_signal_id(signal_id: str) -> str:
+    """从完整 signal_id 生成可搜索的短号。
+
+    V6_BTCUSDT_1786636761 -> BTC-6761
+    RES_BTCUSDT_1786636761 -> BTC-6761
+    同一持仓生命周期内开单/加仓/移损/平仓推送复用同一短号。
+    """
+    if not signal_id:
+        return ""
+    try:
+        _sid = str(signal_id).strip()
+        _parts = _sid.split("_")
+        if len(_parts) >= 3:
+            _sym = _parts[1]
+            if str(_sym).endswith("USDT"):
+                _sym = str(_sym)[:-4]
+            _ts = _parts[2] if len(_parts) > 2 else ""
+            if _ts and str(_ts).isdigit():
+                _suffix = str(_ts)[-4:] if len(str(_ts)) >= 4 else str(_ts)
+                return f"{_sym}-{_suffix}"
+        _raw = str(_sid)[-6:]
+        return f"#{_raw}" if _raw else ""
+    except Exception:
+        return ""
+
+
+
+
+
+_reason_cn_map = {
+    "STOP_LOSS": ("🔴", "止损"),
+    "TP1_HIT": ("🟡", "止盈TP1"),
+    "TP2_HIT": ("✅", "止盈TP2"),
+    "BREAKEVEN_PROTECT": ("🛡️", "保本"),
+    "TRAILING_STOP": ("🛡️", "追踪"),
+    "TRAIL_SL": ("🛡️", "追踪止损"),
+    "CLOSE_ALL": ("🔴", "平仓"),
+    "SL": ("🔴", "止损"),
+    "TP": ("✅", "止盈"),
+}
+
+def _exit_reason_cn(reason: str) -> str:
+    """把英文退出原因映射为中文分类标签。
+
+    输入: STOP_LOSS / TP1_HIT / TP2_HIT / BREAKEVEN_PROTECT / TRAILING_STOP
+    输出: 止损 / 止盈TP1 / 止盈TP2 / 保本 / 追踪
+    """
+    if not reason:
+        return "平仓"
+    _r = str(reason).upper()
+    if _r.startswith("REVERSE_SIGNAL"):
+        return "反手平仓"
+    if _r in _reason_cn_map:
+        return _reason_cn_map[_r][1]
+    # fallback: 原样返回
+    return reason
+
+
+_exit_reason_alias = {
+    "SL": "STOP_LOSS",
+    "TRAIL": "TRAIL_SL",
+    "TRAILING_STOP": "TRAIL_SL",
+    "TP": "TP2_HIT",
+    "TP1": "TP1_HIT",
+    "TP2": "TP2_HIT",
+    "BREAKEVEN": "BREAKEVEN_PROTECT",
+    "BREAKEVEN_PROTECT": "BREAKEVEN_PROTECT",
+    "REVERSE_SIGNAL_LONG": "REVERSE_SIGNAL_LONG",
+    "REVERSE_SIGNAL_SHORT": "REVERSE_SIGNAL_SHORT",
+    "REVERSE_SIGNAL": "REVERSE_SIGNAL",
+    "CLOSE_ALL": "CLOSE_ALL",
+    "TIME_OUT": "TIME_OUT",
+    "NO_RISK": "NO_RISK",
+}
+
+def _normalize_exit_reason(reason: str) -> str:
+    """把旧枚举归一化到和推送一致的枚举，保证库里/推送/统计对得上。
+
+    SL      -> STOP_LOSS
+    TRailing-> TRAIL_SL
+    TP1_HIT -> TP1_HIT
+    TP2_HIT -> TP2_HIT
+    BREAKEVEN_PROTECT -> BREAKEVEN_PROTECT
+    REVERSE_SIGNAL_*  -> 原样
+    """
+    if not reason:
+        return "CLOSE_ALL"
+    _r = str(reason).upper().strip()
+    if _r in _exit_reason_alias:
+        return _exit_reason_alias[_r]
+    if _r.startswith("REVERSE_SIGNAL"):
+        return _r
+    return _r
+
+
+
 def safe_send(msg: str, priority: str = "AUTO") -> str:
     global _LAST_SAFE_SEND_TIME, _OBSERVER_BURST_TIMES
     now = time.time()
@@ -1652,9 +1748,9 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                 f"avg_entry={_avg_entry_px:.2f} new_SL={_final_sl:.2f} "
                 f"add_count={_existing_pos['add_count']}"
             )
+            _short_id = _existing_pos.get("short_id") or _short_signal_id(_existing_pos.get("signal_id") or sig_id)
             safe_send(
-                f"🟢 加仓通知\n"
-                f"标的: {symbol} ({_new_direction})\n"
+                f"🟢 加仓 #{_short_id} {symbol} ({_new_direction})\n"
                 f"加仓: {_new_size:.4f} (原 {_old_size:.4f} → 总 {_combined_size:.4f})\n"
                 f"新均价: {_avg_entry_px:.2f}  SL: {_final_sl:.2f}",
                 priority="TRADE",
@@ -1739,11 +1835,10 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         return '；'.join(parts)
 
     reason_cn = _translate_reason(reason)
+    _short_id = _open_short_id
     safe_send(
-        f"🟢 开单通知\n"
-        f"级别: {level} ({score:.1f}分)\n"
-        f"标的: {symbol} ({result.get('direction','?')})\n"
-        f"仓位: {trade_size:.4f}\n"
+        f"🟢 开单 #{_short_id} {symbol} ({result.get('direction','?')})\n"
+        f"级别: {level} ({score:.1f}分) | 仓位: {trade_size:.4f}\n"
         f"入场: {entry:.2f}  SL: {sl:.2f}  TP1: {tp1:.2f}  TP2: {tp2:.2f}  TP3: {tp3:.2f}\n"
         f"评分: {score:.1f} | EV: {ev:.4f} | RR: {rr:.2f}\n"
         f"原因: {reason}\n"
@@ -1762,8 +1857,11 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     try:
         # 生成 trade_id 并保存到 position，供 ExitEventLogger 与 Outcome 去重使用
         _trade_id = str(uuid.uuid4())
+        _open_short_id = _short_signal_id(sig_id)
         position_manager.update(symbol, {
             "direction": result.get("direction", "Long"),
+            "short_id": _open_short_id,
+            "signal_id": sig_id,
             "entry": entry,
             "current_sl": sl,
             "tp1": tp1,
@@ -2633,7 +2731,11 @@ stage={action_plan.get('stage')}
                 save_positions(position_manager.get())
             except Exception:
                 pass
-            safe_send(f"部分平仓: {symbol} {direction} @{current_price:.2f} new_sl={action_plan.get('new_sl') or 0.0:.2f}", priority="TRADE")
+            _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id") or "")
+            _partial_reason_cn = _exit_reason_cn(action_plan.get("reason") or "TP1_HIT")
+            _partial_r = action_plan.get("profit_r", 0.0) or 0.0
+            _partial_sl_txt = f" | SL推至 {action_plan.get('new_sl')}" if action_plan.get('new_sl') else ""
+            safe_send(f"🟡 部分{_partial_reason_cn} #{_short_id} {symbol} {direction} | 入场 {entry:.2f} → 现价 {current_price:.2f} | {_partial_r:+.2f}R{_partial_sl_txt}", priority="TRADE")
         elif action_plan.get("action") == "MOVE_SL" and action_plan.get('new_sl') is not None:
             pos["current_sl"] = action_plan.get('new_sl')
             pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
@@ -2643,15 +2745,18 @@ stage={action_plan.get('stage')}
                 save_positions(position_manager.get())
             except Exception:
                 pass
-            safe_send(f"🛡️ [{symbol}] 追踪/保本止损已推移至 {action_plan.get('new_sl')}", priority="TRADE")
-        
+            _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id"))
+            _trail_suffix = f" | 浮盈 {action_plan.get('profit_r', 0.0):+.2f}R" if action_plan.get('profit_r') is not None else ""
+            _move_reason_cn = _exit_reason_cn(action_plan.get("reason") or "MOVE_SL")
+            safe_send(f"🛡️ {_move_reason_cn} #{_short_id} {symbol} {direction} | 新SL {action_plan.get('new_sl')}{_trail_suffix}", priority="TRADE")
+
         elif action_plan["action"] == "CLOSE_ALL":
             try:
                 exit_logger.log_exit(
                     symbol=symbol,
                     position=pos,
                     exit_price=current_price,
-                    reason=action_plan.get('reason') or 'CLOSE_ALL',
+                    reason=_normalize_exit_reason(action_plan.get('reason') or 'CLOSE_ALL'),
                     action='CLOSE_ALL',
                     mfe=pos.get('mfe'),
                     mae=pos.get('mae')
@@ -2694,8 +2799,11 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         f"[{symbol}] 平仓触发: {reason} direction={direction} "
         f"entry={entry:.2f} price={current_price:.2f} pnl_r={pnl_r:.2f} signal_id={signal_id}"
     )
+    _short_id = pos.get("short_id") or _short_signal_id(signal_id)
+    _close_reason_cn = _exit_reason_cn(reason)
+    _close_emoji = "🔴" if pnl_r < 0 else ("✅" if pnl_r >= 1.0 else "🟡")
     safe_send(
-        f"平仓: {symbol} {direction} {reason} pnl_r={pnl_r:.2f} price={current_price:.2f}",
+        f"{_close_emoji} {_close_reason_cn} #{_short_id} {symbol} {direction} | {reason} 入场 {entry:.2f} → 出场 {current_price:.2f} | {pnl_r:+.2f}R",
         priority="TRADE",
     )
 
@@ -2708,7 +2816,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
                 "record_close_outcome",
                 signal_id=signal_id,
                 pnl_r=float(pnl_r),
-                exit_reason=str(reason or "SL"),
+                exit_reason=_normalize_exit_reason(reason or "CLOSE_ALL"),
                 max_fwd=max_fwd,
                 max_adv=max_adv,
                 exit_timestamp=time.time(),
@@ -2724,7 +2832,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     try:
         if hasattr(position_manager, "close"):
             position_manager.close(
-                symbol, pnl_r=pnl_r, exit_reason=reason, exit_price=current_price
+                symbol, pnl_r=pnl_r, exit_reason=_normalize_exit_reason(reason or "CLOSE_ALL"), exit_price=current_price
             )
         else:
             position_manager.remove(symbol)
