@@ -609,6 +609,8 @@ stage={action_plan.get('stage')}
                     _entry = float(pos.get('entry') or 0.0)
                     _sl = float(pos.get('current_sl') or pos.get('sl') or 0.0)
                     _risk = abs(_entry - _sl) if (_entry and _sl) else 0.0
+                    if _risk <= 0:
+                        _risk = float(pos.get('initial_risk') or 0.0)
                     _pnl_r = 0.0
                     if _risk > 0:
                         _pnl_r = (curr_price - _entry) / _risk if _dir == 'Long' else (_entry - curr_price) / _risk
@@ -629,7 +631,7 @@ stage={action_plan.get('stage')}
                                 exit_timestamp=time.time(),
                                 exit_price=float(curr_price),
                             )
-                            slog.info(f"[Monitor] V6 outcome 已回写: {_sig_id} {_pnl_r:+.2f}R reason=SL_MONITOR")
+                            slog.info(f"[Monitor] V6 outcome 已回写: {_sig_id} {_pnl_r:+.2f}R reason={action_plan.get('reason')}")
                         except Exception as _oc_e:
                             slog.error(f"[Monitor] V6 outcome 回写失败: {_oc_e}")
                     else:
@@ -642,7 +644,7 @@ stage={action_plan.get('stage')}
                                 order_id=str(_oid),
                                 close_price=float(curr_price),
                                 pnl_r=float(_pnl_r),
-                                exit_reason='SL_MONITOR',
+                                exit_reason=str(action_plan.get('reason') or 'SL_MONITOR'),
                             )
                     except Exception as _tj_e:
                         slog.error(f"[Monitor] journal 平仓写入失败: {_tj_e}")

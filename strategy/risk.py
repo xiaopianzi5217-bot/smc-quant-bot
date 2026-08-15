@@ -251,17 +251,19 @@ def check_partial_close_and_trail(
     # ============================
     if str(side or "").lower().startswith("long"):
         if current_price <= sl:
+            _sl_reason = "TRAIL_SL" if stage >= 2 else ("BREAKEVEN_PROTECT" if stage == 1 else "STOP_LOSS")
             return {
                 "action": "CLOSE_ALL",
-                "reason": "STOP_LOSS",
+                "reason": _sl_reason,
                 "profit_r": round(profit_r, 3),
                 "stage": stage
             }
     else:
         if current_price >= sl:
+            _sl_reason = "TRAIL_SL" if stage >= 2 else ("BREAKEVEN_PROTECT" if stage == 1 else "STOP_LOSS")
             return {
                 "action": "CLOSE_ALL",
-                "reason": "STOP_LOSS",
+                "reason": _sl_reason,
                 "profit_r": round(profit_r, 3),
                 "stage": stage
             }

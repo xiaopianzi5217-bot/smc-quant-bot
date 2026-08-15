@@ -1864,6 +1864,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             "signal_id": sig_id,
             "entry": entry,
             "current_sl": sl,
+            "initial_risk": abs(entry - sl) if sl and entry else 0.0,
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
@@ -2363,6 +2364,7 @@ def check_and_open(result: dict | None) -> bool:
         "direction": direction,
         "entry": entry,
         "current_sl": sl,
+        "initial_risk": abs(entry - sl) if sl and entry else 0.0,
         "tp1": tp1,
         "tp2": tp2,
         "tp3": tp3,
@@ -2699,6 +2701,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
             "direction": direction,
             "entry": entry,
             "current_sl": sl,
+            "initial_risk": float(pos.get("initial_risk") or 0.0),
             "tp1": tp1,
             "tp2": tp2,
             "stage": stage,
@@ -2786,6 +2789,8 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
 
     pnl_r = 0.0
     risk = abs(entry - sl) if sl and entry else 0.0
+    if risk <= 0:
+        risk = float(pos.get("initial_risk") or 0.0)
     if risk > 0:
         if direction == "Long":
             pnl_r = (current_price - entry) / risk
