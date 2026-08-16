@@ -5,10 +5,12 @@ Produces a human-readable summary for a given day (default: today).
 """
 from pathlib import Path
 import json
+import sqlite3
 from datetime import datetime, timedelta
 from analytics.outcome_db import OutcomeDatabase
 from analytics import data_quality_check
 from analytics.ev_monitor import EVMonitor
+from utils.structured_logger import slog
 try:
     from notifier.telegram import send_telegram
 except Exception:
@@ -25,6 +27,109 @@ def _parse_iso(ts: str):
             return None
 
 
+def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: datetime) -> list:
+    """从本地/云端 v6_research.db 读取目标日期已平仓记录，返回模拟 EXIT 事件 dict 列表。
+
+    数据源：HF 私有数据集 v6_research.db（trade_snapshots 表，真实结果）
+    策略：仅当本地 events.jsonl 无当日 EXIT 时才调用。
+          查询条件与 events.jsonl 相同的时间窗口 [start, end)，
+          过滤 exit_reason != 'OPEN' 且 pnl_r 非空。
+    防重：进程内 _backfilled 标记，仅首次执行一次，避免重复查询。
+    失败/无数据静默返回 []，不影响原逻辑。
+    """
+    if getattr(_backfill_from_cloud_v6_db, "_backfilled", False):
+        return []
+    _backfill_from_cloud_v6_db._backfilled = True
+
+    db_path = Path("data/v6_research.db")
+    try:
+        # 本地库缺失/为空时，尝试拉取云端最新
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            try:
+                from v6_data_engine import pull_database_from_hub
+                pull_database_from_hub()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        slog.warning("[DailyReport] 云端兜底跳过: v6_research.db 不存在或为空")
+        return []
+
+    try:
+        start_ts = int(start.timestamp())
+        end_ts = int(end.timestamp())
+    except Exception:
+        return []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT signal_id, symbol, direction, regime, mode,
+                   exit_reason, exit_timestamp, exit_price, pnl_r,
+                   confidence, p_win_calibrated, feature_hash,
+                   max_forward_r, max_adverse_r
+            FROM trade_snapshots
+            WHERE exit_reason IS NOT NULL
+              AND exit_reason != ''
+              AND exit_reason != 'OPEN'
+              AND pnl_r IS NOT NULL
+              AND exit_timestamp IS NOT NULL
+              AND exit_timestamp > 0
+              AND exit_timestamp >= ?
+              AND exit_timestamp < ?
+            ORDER BY exit_timestamp ASC
+            """,
+            (start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        slog.warning(f"[DailyReport] 云端 v6_research.db 兜底查询失败: {e}")
+        return []
+
+    if not rows:
+        slog.info("[DailyReport] 云端 v6_research.db 目标日期无已平仓记录")
+        return []
+
+    events = []
+    for row in rows:
+        try:
+            feats = {}
+            _fh = str(row["feature_hash"] or "")
+            if _fh:
+                feats["cloud_hash"] = _fh[-10:]
+            _mode = str(row["mode"] or "NORMAL")
+            if _mode and _mode != "NORMAL":
+                feats["mode"] = _mode
+            if not feats:
+                feats["cloud"] = True
+            ev = {
+                "event": "EXIT",
+                "timestamp": int(row["exit_timestamp"]),
+                "trade_id": row["signal_id"],
+                "symbol": row["symbol"],
+                "profit_r": float(row["pnl_r"] or 0.0),
+                "mfe": row["max_forward_r"],
+                "mae": row["max_adverse_r"],
+                "regime": row["regime"] or "UNKNOWN",
+                "features": feats,
+                "ev": row["p_win_calibrated"] if row["p_win_calibrated"] is not None else row["confidence"],
+                "cloud_backfill": True,
+            }
+            events.append(ev)
+        except Exception:
+            continue
+
+    if events:
+        slog.info(f"[DailyReport] 云端 v6_research.db 兜底读取 {len(events)} 笔已平仓记录")
+    return events
+
+
 def generate_daily_report(target_date: datetime = None) -> str:
     if target_date is None:
         target_date = datetime.utcnow()
@@ -33,10 +138,31 @@ def generate_daily_report(target_date: datetime = None) -> str:
     end = start + timedelta(days=1)
 
     event_file = Path("data/events.jsonl")
-    if not event_file.exists():
-        return "No events file found."
 
-    total = 0
+    # ---- 1) 优先读取本地 events.jsonl ----
+    all_events = []
+    if event_file.exists():
+        with event_file.open('r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                ts = _parse_iso(ev.get('timestamp') or ev.get('time') or '')
+                if not ts or not (start <= ts < end):
+                    continue
+                if ev.get('event') != 'EXIT':
+                    continue
+                all_events.append(ev)
+
+    # ---- 2) 本地无当日 EXIT → 云端 v6_research.db 兜底 ----
+    if not all_events:
+        all_events = _backfill_from_cloud_v6_db(target_date, start, end)
+
+        total = 0
     wins = 0
     losses = 0
     max_loss = 0.0
@@ -50,74 +176,61 @@ def generate_daily_report(target_date: datetime = None) -> str:
     group_counts = {}
     ev_monitor = EVMonitor()
 
-    with event_file.open('r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+    for ev in all_events:
+        total += 1
+        pr = float(ev.get('profit_r') or 0.0)
+        # feed EV monitor
+        try:
+            ev_val = ev.get('ev')
+            if ev_val is not None:
+                ev_monitor.update(ev_val, pr)
+        except Exception:
+            pass
+        if pr > 0:
+            wins += 1
+        else:
+            losses += 1
+        if pr < max_loss:
+            max_loss = pr
+        mfe = ev.get('mfe')
+        mae = ev.get('mae')
+        if mfe is not None:
             try:
-                ev = json.loads(line)
-            except Exception:
-                continue
-            ts = _parse_iso(ev.get('timestamp') or ev.get('time') or '')
-            if not ts or not (start <= ts < end):
-                continue
-            if ev.get('event') != 'EXIT':
-                continue
-            total += 1
-            pr = float(ev.get('profit_r') or 0.0)
-            # feed EV monitor
-            try:
-                ev_val = ev.get('ev')
-                if ev_val is not None:
-                    ev_monitor.update(ev_val, pr)
+                sum_mfe += float(mfe)
+                mfe_count += 1
             except Exception:
                 pass
-            if pr > 0:
-                wins += 1
-            else:
-                losses += 1
-            if pr < max_loss:
-                max_loss = pr
-            mfe = ev.get('mfe')
-            mae = ev.get('mae')
-            if mfe is not None:
-                try:
-                    sum_mfe += float(mfe)
-                    mfe_count += 1
-                except Exception:
-                    pass
-            if mae is not None:
-                try:
-                    sum_mae += float(mae)
-                    mae_count += 1
-                except Exception:
-                    pass
-            regime = ev.get('regime') or 'UNKNOWN'
-            regimes[regime] = regimes.get(regime, 0) + 1
-            features = ev.get('features') or {}
-            for k, v in (features.items() if isinstance(features, dict) else []):
-                fv = f"{k}={v}"
-                feature_counts[fv] = feature_counts.get(fv, 0) + 1
-            # 聚合用于质量排名：按 (symbol, regime, top_feature) 汇总 profit
-            sym = ev.get('symbol') or 'UNK'
-            rg = ev.get('regime') or 'UNKNOWN'
-            # 选取一个代表性 feature 名称（尽量挑布尔/标志类），否则第一个 key
-            top_feat = 'NONE'
-            if isinstance(features, dict) and features:
-                # 尝试找到值为 True 或非空字符串的 key
-                found = None
-                for kk, vv in features.items():
-                    if vv is True or (isinstance(vv, str) and vv):
-                        found = kk
-                        break
-                if not found:
-                    # 选择第一个 key
-                    found = next(iter(features.keys()))
-                top_feat = found
-            combo = (sym, rg, top_feat)
-            group_sums[combo] = group_sums.get(combo, 0.0) + pr
-            group_counts[combo] = group_counts.get(combo, 0) + 1
+        if mae is not None:
+            try:
+                sum_mae += float(mae)
+                mae_count += 1
+            except Exception:
+                pass
+        regime = ev.get('regime') or 'UNKNOWN'
+        regimes[regime] = regimes.get(regime, 0) + 1
+        features = ev.get('features') or {}
+        for k, v in (features.items() if isinstance(features, dict) else []):
+            fv = f"{k}={v}"
+            feature_counts[fv] = feature_counts.get(fv, 0) + 1
+        # 聚合用于质量排名：按 (symbol, regime, top_feature) 汇总 profit
+        sym = ev.get('symbol') or 'UNK'
+        rg = ev.get('regime') or 'UNKNOWN'
+        # 选取一个代表性 feature 名称（尽量挑布尔/标志类），否则第一个 key
+        top_feat = 'NONE'
+        if isinstance(features, dict) and features:
+            # 尝试找到值为 True 或非空字符串的 key
+            found = None
+            for kk, vv in features.items():
+                if vv is True or (isinstance(vv, str) and vv):
+                    found = kk
+                    break
+            if not found:
+                # 选择第一个 key
+                found = next(iter(features.keys()))
+            top_feat = found
+        combo = (sym, rg, top_feat)
+        group_sums[combo] = group_sums.get(combo, 0.0) + pr
+        group_counts[combo] = group_counts.get(combo, 0) + 1
 
     win_rate = (wins / total * 100.0) if total > 0 else 0.0
     pf = "N/A"
