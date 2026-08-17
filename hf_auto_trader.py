@@ -758,6 +758,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
         slog.info(f"[{symbol}] V56.5 选择后无交易")
         # ── Observer-only 返回：即使无交易，也推送结构事件 ──
         curr = df_exec.iloc[-1]
+        # 【修复】_atr_val 需在无交易路径也预先赋值，避免 UnboundLocalError
+        _atr_val = max(float(curr.get("ATRr_14", exec_ctx.get("atr", 0))), float(curr["close"]) * 0.0025)
         regime_name = str(get_htf_regime_filter().analyze(df_macro).get("regime", "UNKNOWN")).upper().strip()
         long_score = float(exec_ctx.get("long_quality", 0))
         short_score = float(exec_ctx.get("short_quality", 0))

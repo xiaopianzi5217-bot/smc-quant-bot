@@ -100,6 +100,31 @@ def safe_send_telegram(msg):
         return True, send_telegram(msg)
     except Exception: return False, traceback.format_exc()
 
+def _short_signal_id(signal_id: str) -> str:
+    """从完整 signal_id 生成可搜索的短号。
+
+    V6_BTCUSDT_1786636761 -> BTC-6761
+    RES_BTCUSDT_1786636761 -> BTC-6761
+    同一持仓生命周期内开单/加仓/移损/平仓推送复用同一短号。
+    """
+    if not signal_id:
+        return ""
+    try:
+        _sid = str(signal_id).strip()
+        _parts = _sid.split("_")
+        if len(_parts) >= 3:
+            _sym = _parts[1]
+            if str(_sym).endswith("USDT"):
+                _sym = str(_sym)[:-4]
+            _ts = _parts[2] if len(_parts) > 2 else ""
+            if _ts and str(_ts).isdigit():
+                _suffix = str(_ts)[-4:] if len(str(_ts)) >= 4 else str(_ts)
+                return f"{_sym}-{_suffix}"
+        _raw = str(_sid)[-6:]
+        return f"#{_raw}" if _raw else ""
+    except Exception:
+        return ""
+
 def system_status():
     try:
         cfg = load_runtime_config()
@@ -545,6 +570,9 @@ def background_monitor_worker():
                 if curr_price is None:
                     continue
                 
+                # 提取短号供推送使用（与 hf_auto_trader 开单/加仓/平仓推送一致）
+                _pos_short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id") or "")
+                
                 # 更新 MFE/MAE（最大有利/不利波动）
                 try:
                     if str(pos.get('direction','')).lower().startswith('long'):
@@ -581,7 +609,7 @@ stage={action_plan.get('stage')}
                     pct = action_plan.get('close_percent') or action_plan.get('close_pct') or 0
                     # close_percent 以百分比表示 (eg. 50)
                     pct_display = f"{pct}%" if pct > 1 else f"{pct*100:.0f}%"
-                    msg = f"🎯 [{sym}] 到达目标位 平仓 {pct_display}，止损移至 {action_plan.get('new_sl')}"
+                    msg = f"🎯 [{sym} #{_pos_short_id}] 到达目标位 平仓 {pct_display}，止损移至 {action_plan.get('new_sl')}"
                     safe_send_telegram(msg)
                     if action_plan.get('new_sl') is not None:
                         pos['current_sl'] = action_plan.get('new_sl')
@@ -597,7 +625,7 @@ stage={action_plan.get('stage')}
                     if abs(pos.get('current_sl', 0) - new_sl) > curr_price * 0.001:
                         pos['current_sl'] = new_sl
                         pos['stage'] = action_plan.get('stage', pos.get('stage', 0))
-                        safe_send_telegram(f"🛡️ [{sym}] 止损已推移至 {new_sl}")
+                        safe_send_telegram(f"🛡️ [{sym} #{_pos_short_id}] 止损已推移至 {new_sl}")
                         try:
                             position_manager.update(sym, dict(pos))
                         except Exception as _pm_e:
@@ -615,7 +643,7 @@ stage={action_plan.get('stage')}
                     if _risk > 0:
                         _pnl_r = (curr_price - _entry) / _risk if _dir == 'Long' else (_entry - curr_price) / _risk
                     _sig_id = pos.get('signal_id') or ''
-                    msg = f"🛑 [{sym}] 触发止损全平 {_dir} @{curr_price:.2f} pnl_r={_pnl_r:.2f}"
+                    msg = f"🛑 [{sym} #{_pos_short_id}] 触发止损全平 {_dir} @{curr_price:.2f} pnl_r={_pnl_r:.2f}"
                     safe_send_telegram(msg)
                     slog.info(f"[Monitor] {msg} signal_id={_sig_id}")
                     # ===== [修复] V6 outcome 回写：与 _trigger_stop_loss 主路径同闭环，避免幽灵 OPEN =====
