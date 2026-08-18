@@ -1073,6 +1073,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
         slog.info(f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: setup={_setup_name} has_choch={has_choch} has_momentum={has_momentum}(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) score={_fl_final_score:.1f} -> 0")
         _fl_final_score = 0.0  # 分数归零，后续 ScoreGate 直接拦截
 
+    # ===== 【GATE-4 修复】HTF Regime 拦截同样需要分数归零 =====
+    if result_htf_blocked:
+        slog.info(f"[{symbol}] 🚫 HTF Regime 一票否决: 1H 方向不允许，score={_fl_final_score:.1f} -> 0")
+        _fl_final_score = 0.0  # 分数归零，让 approved=False, rejected=True
+
         # 构建兼容返回格式
     return {
         "_mud_cut": _mud_cut_override,  # mud regime 降仓系数
@@ -1612,6 +1617,11 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     if bool(result.get("rejected", False)) or float(result.get("score", 0.0) or 0.0) <= 0.0:
         _r_reason = "ONE_VETO_REJECT" if bool(result.get("rejected", False)) else "SCORE_ZERO"
         slog.warning(f"[V6 分级路由 - 否决拦截] {symbol} {_r_reason} score={result.get('score', 0.0)}，跳过路由与推送")
+        return False
+
+    # ===== 【GATE-4 修复】HTF Regime 宏观方向拦截（与旧 check_and_open 对齐）=====
+    if bool(result.get("htf_blocked", False)):
+        slog.warning(f"[V6 分级路由 - HTF拦截] {symbol} 1H 趋势方向不允许，跳过路由与推送")
         return False
 
     result = evaluate_signal_v6_routing(result)
