@@ -1989,8 +1989,8 @@ def check_and_open(result: dict | None) -> bool:
     
         # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
     if htf_blocked:
-        slog.info(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}, 但强信号(score={result.get('score',0):.1f} ev={blended_ev:.4f}) 允许继续")
-        # ⚠️ TEMP: 绕过 HTF 拦截以验证开单流程
+        slog.warning(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}: 1H 趋势方向不允许，直接拒绝")
+        return False
     
     # ===== 【优化5 - Statistical EV】使用 blended_ev 替代原始 ev =====
     # blended_ev = 历史实际 EV * 0.6 + model_ev * 0.4
@@ -2964,9 +2964,11 @@ async def main_loop():
                             if bool(result.get("rejected", False)) or float(result.get("score", 0.0) or 0.0) <= 0.0:
                                 slog.warning(f"[main_loop] {symbol} 信号已被风控否决（score={result.get('score', 0.0)}），跳过开单链路")
                             else:
+                                # 【修复20260913】禁止回退到旧 check_and_open
+                                # 旧函数没有 HTF/FeedbackLoop 熔断检查，导致拦截后仍强行开单
                                 opened = check_and_open_v6_with_routing(result)
                                 if not opened:
-                                    check_and_open(result)
+                                    slog.warning(f"[main_loop] {symbol} V6 路由拒绝开单（HTF/FeedbackLoop熔断），不调用旧链路")
                 except Exception as sym_e:
                     slog.error(f"[main_loop] {symbol} 处理异常: {sym_e}")
                     continue
