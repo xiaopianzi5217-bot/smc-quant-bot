@@ -156,35 +156,35 @@ class PositionManager:
     # ── 核心接口 ────────────────────────────────────────────
 
     def update(self, symbol: str, pos: dict):
-        """全量覆盖（兼容旧调用方）
+            """全量覆盖（兼容旧调用方）
 
-        注意：此方法会在锁内合并新旧字典，保留所有旧字段，
-        避免 EXIT_MANAGER 用旧快照覆盖主策略线程新增的字段（如 order_id）。
-        """
-        with self._lock:
-            existing = self._positions.get(symbol, {})
-            # 增量合并：existing 为基础，新 pos 字段覆盖同名旧值
-            merged = {**existing, **pos}
-            self._positions[symbol] = merged
-            self._mark_dirty()
-        self._save()
+            注意：此方法会在锁内合并新旧字典，保留所有旧字段，
+            避免 EXIT_MANAGER 用旧快照覆盖主策略线程新增的字段（如 order_id）。
+            """
+            with self._lock:
+                existing = self._positions.get(symbol, {})
+                # 增量合并：existing 为基础，新 pos 字段覆盖同名旧值
+                merged = {**existing, **pos}
+                self._positions[symbol] = merged
+                self._mark_dirty()
+            self._save()
 
-    def update_fields(self, symbol: str, **kwargs):
-        """【原子】仅更新指定字段，不覆盖其他字段。
+        def update_fields(self, symbol: str, **kwargs):
+            """【原子】仅更新指定字段，不覆盖其他字段。
 
-        适用于 EXIT_MANAGER 等后台线程，避免全量 update 导致幽灵覆盖。
-        """
-        if not kwargs:
-            return
-        with self._lock:
-            existing = self._positions.get(symbol)
-            if existing is None:
-                # 持仓不存在时直接创建（部分场景如持久化恢复）
-                self._positions[symbol] = dict(kwargs)
-            else:
-                self._positions[symbol] = {**existing, **kwargs}
-            self._mark_dirty()
-        self._save()
+            适用于 EXIT_MANAGER 等后台线程，避免全量 update 导致幽灵覆盖。
+            """
+            if not kwargs:
+                return
+            with self._lock:
+                existing = self._positions.get(symbol)
+                if existing is None:
+                    # 持仓不存在时直接创建（部分场景如持久化恢复）
+                    self._positions[symbol] = dict(kwargs)
+                else:
+                    self._positions[symbol] = {**existing, **kwargs}
+                self._mark_dirty()
+            self._save()
 
     def get(self, symbol: str = None):
         with self._lock:

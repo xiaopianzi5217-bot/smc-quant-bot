@@ -2689,7 +2689,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
                 pos["mfe"] = max(pos.get("mfe", 0), entry - current_price)
                 pos["mae"] = min(pos.get("mae", 0), entry - current_price)
             try:
-                position_manager.update(symbol, pos)
+                position_manager.update_fields(symbol, **pos)
                 try:
                     from analytics.state_recovery import save_positions
                     save_positions(position_manager.get())
@@ -2731,7 +2731,7 @@ stage={action_plan.get('stage')}
             if action_plan.get('new_sl') is not None:
                 pos["current_sl"] = action_plan.get("new_sl")
             pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
-            position_manager.update(symbol, pos)
+            position_manager.update_fields(symbol, **pos)
             try:
                 from analytics.state_recovery import save_positions
                 save_positions(position_manager.get())
@@ -2745,7 +2745,7 @@ stage={action_plan.get('stage')}
         elif action_plan.get("action") == "MOVE_SL" and action_plan.get('new_sl') is not None:
             pos["current_sl"] = action_plan.get('new_sl')
             pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
-            position_manager.update(symbol, pos)
+            position_manager.update_fields(symbol, **pos)
             try:
                 from analytics.state_recovery import save_positions
                 save_positions(position_manager.get())

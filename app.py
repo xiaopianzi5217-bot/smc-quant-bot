@@ -582,7 +582,7 @@ def background_monitor_worker():
                         pos['mfe'] = max(pos.get('mfe', 0), float(pos.get('entry') or pos.get('entry_price') or 0) - curr_price)
                         pos['mae'] = min(pos.get('mae', 0), float(pos.get('entry') or pos.get('entry_price') or 0) - curr_price)
                     try:
-                        position_manager.update(sym, dict(pos))
+                        position_manager.update_fields(sym, **pos)
                     except Exception:
                         pass
                 except Exception:
@@ -615,7 +615,7 @@ stage={action_plan.get('stage')}
                         pos['current_sl'] = action_plan.get('new_sl')
                     pos['stage'] = action_plan.get('stage', pos.get('stage', 0))
                     try:
-                        position_manager.update(sym, dict(pos))
+                        position_manager.update_fields(sym, **pos)
                     except Exception as _pm_e:
                         slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
@@ -627,7 +627,7 @@ stage={action_plan.get('stage')}
                         pos['stage'] = action_plan.get('stage', pos.get('stage', 0))
                         safe_send_telegram(f"🛡️ [{sym} #{_pos_short_id}] 止损已推移至 {new_sl}")
                         try:
-                            position_manager.update(sym, dict(pos))
+                            position_manager.update_fields(sym, **pos)
                         except Exception as _pm_e:
                             slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
