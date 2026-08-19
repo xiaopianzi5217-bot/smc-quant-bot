@@ -632,7 +632,26 @@ stage={action_plan.get('stage')}
                             slog.error(f"[Monitor] position_manager 回写失败: {_pm_e}")
 
                 elif action_plan['action'] == 'CLOSE_ALL':
-                    # ===== [修复20260825] 止损平仓真正触发：通知 + 回写 outcome + 清仓 =====
+                    # ===== [修复20260910] 止损平仓委托 hf_auto_trader._trigger_stop_loss 统一处理 =====
+                    # 避免 Monitor 与 hf_auto_trader.check_trailing 双路径重复平仓 / 重复 V6 回写 / 重复推送
+                    _tsl_func = None
+                    try:
+                        import sys as _sys_mod
+                        import hf_auto_trader as _hf_mod
+                        _tsl_func = getattr(_hf_mod, '_trigger_stop_loss', None)
+                    except Exception as _imp_e:
+                        slog.warning(f"[Monitor] hf_auto_trader 不可用（延迟导入阶段），走内联平仓: {_imp_e}")
+
+                    if _tsl_func is not None:
+                        try:
+                            # _trigger_stop_loss 内部会 position_manager.close() 移除持仓
+                            _tsl_func(sym, pos, curr_price, reason=str(action_plan.get('reason') or 'SL_MONITOR'))
+                            slog.info(f"[Monitor] 已委托 _trigger_stop_loss 处理 {sym} CLOSE_ALL")
+                            continue
+                        except Exception as _tsl_e:
+                            slog.error(f"[Monitor] _trigger_stop_loss 执行失败，回退内联平仓: {_tsl_e}")
+
+                    # ===== 回退路径：hf_auto_trader 未加载或 _trigger_stop_loss 异常 =====
                     _dir = pos.get('direction', 'Long')
                     _entry = float(pos.get('entry') or 0.0)
                     _sl = float(pos.get('current_sl') or pos.get('sl') or 0.0)

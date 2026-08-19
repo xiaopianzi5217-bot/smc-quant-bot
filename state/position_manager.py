@@ -194,6 +194,19 @@ class PositionManager:
             return {k: copy.deepcopy(v) for k, v in self._positions.items()}
 
 
+    def pop(self, symbol: str) -> dict | None:
+        """【原子】抢出持仓并立即从管理器移除。
+
+        仅调用方拿到非 None 结果才被授权执行平仓动作。
+        防止 Monitor 线程与主策略线程并发平仓同一持仓造成重复推送/回写。
+        """
+
+        with self._lock:
+            pos = self._positions.pop(symbol, None)
+            if pos is not None:
+                self._mark_dirty()
+        return pos
+
     def remove(self, symbol: str):
         with self._lock:
             self._positions.pop(symbol, None)

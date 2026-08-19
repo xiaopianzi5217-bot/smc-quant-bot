@@ -2787,7 +2787,37 @@ stage={action_plan.get('stage')}
 
 
 def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str = "SL"):
-    """触发止损/平仓：日志、推送、V6 outcome 回写、清持仓。"""
+    """触发止损/平仓：日志、推送、V6 outcome 回写、清持仓。
+
+    [修复20260910] 增加防重入保护：
+      app.py Monitor 线程与 hf_auto_trader 主循环可能同时触发同一持仓的 CLOSE_ALL，
+      通过持仓存在性检查避免重复推送 / 重复 V6 回写 / 重复 DailyPanel / 重复 Feedback。
+    """
+
+    # [修复20260910] 原子抢占持仓：仅抢到持仓的线程被授权执行平仓
+    # Monitor 线程与主策略线程可能同时触发同一持仓，原子 pop 确保只有一方成功
+    try:
+        _popped = position_manager.pop(symbol)
+        if _popped is None:
+            slog.warning(
+                f"[{symbol}] _trigger_stop_loss 原子抢占失败：持仓已被其他线程平仓"
+                f" reason={reason} price={current_price}"
+            )
+            # 已平仓则直接返回，不重复推送/回写/统计
+            return False
+        # 用最新数据覆盖传入的 stale pos（MFE/MAE/signal_id 等字段更完整）
+        pos = _popped
+    except Exception as _re_e:
+        slog.error(f"[{symbol}] _trigger_stop_loss 原子抢占异常，回退 get 检查: {_re_e}")
+        # 回退：position_manager 无 pop 方法时，用 get + 存在性检查兜底
+        try:
+            _current_store = position_manager.get(symbol)
+            if _current_store is None:
+                return False
+            pos = _current_store
+        except Exception:
+            pass
+
     direction = pos.get("direction", "Long")
     entry = float(pos.get("entry") or 0.0)
     sl = float(pos.get("current_sl") or pos.get("sl") or 0.0)
@@ -2846,14 +2876,36 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     else:
         slog.warning(f"[{symbol}] 平仓无 signal_id，跳过 trade_snapshots 回写")
 
-    # 本地持仓清理（无 close 则 fallback remove）
+    # 本地持仓清理：pop 已移除，仅确保快照/持久化 + trade_journal CLOSE 完成
     try:
-        if hasattr(position_manager, "close"):
+        if position_manager.get(symbol) is not None:
+            # 若仍存在（例如 pop 时为 None 走了回退路径），则完整 close（内部会写 trade_journal）
             position_manager.close(
                 symbol, pnl_r=pnl_r, exit_reason=_normalize_exit_reason(reason or "CLOSE_ALL"), exit_price=current_price
             )
         else:
-            position_manager.remove(symbol)
+            # 已 pop 移除：手动写 trade_journal CLOSE（原子抢占后需要）
+            _order_id = pos.get("order_id") or ""
+            if _order_id:
+                try:
+                    from state.trade_journal import journal as _tj
+                    _tj.close_trade(
+                        order_id=_order_id,
+                        close_price=float(current_price),
+                        pnl_r=float(pnl_r or 0.0),
+                        exit_reason=str(reason or "CLOSE_ALL"),
+                    )
+                    slog.info(f"[{symbol}] trade_journal CLOSE 已写入（原子抢占后）: {_order_id}")
+                except Exception as _tj_e:
+                    slog.error(f"[{symbol}] trade_journal 写入失败: {_tj_e}")
+            else:
+                slog.warning(f"[{symbol}] 无 order_id，跳过 trade_journal CLOSE")
+            # 手动做每日快照 + 持久化（close 内部逻辑的补偿）
+            try:
+                position_manager._daily_snapshot()
+                position_manager._save()
+            except Exception as _snap_e:
+                slog.error(f"[{symbol}] 快照/持久化补偿失败: {_snap_e}")
     except Exception as _pm_e:
         slog.error(f"[{symbol}] 清除持仓失败: {_pm_e}")
         try:
