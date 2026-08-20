@@ -164,14 +164,17 @@ _V56_ENGINE = V56_5_Engine(V565Config(
     allow_tier2_if_strong=True,
     strong_tier2_score=50.0,
 ))
-_bucket_ev_path = Path("data/v56_5_bucket_ev.json")
-if _bucket_ev_path.exists():
-    try:
-        _buckets = json.loads(_bucket_ev_path.read_text(encoding="utf-8"))
-        _V56_ENGINE.load_history_buckets(_buckets)
-        slog.info(f"[V56_5_Engine] 加载回测 bucket_ev 成功 ({len(_buckets)} 个分桶), 来自 {_bucket_ev_path}")
-    except Exception as e:
-        slog.error(f"[V56_5_Engine] 加载 bucket_ev 失败: {e}")
+# 【20260916】数据收集模式：注释掉回测 bucket_ev 加载
+# 原因：回测 HIGH 桶(score>=80) EV(+0.65~0.73) 与实盘 score(30~55) 严重脱节，
+# 加载会引入不匹配的加权偏差。数据收集阶段保持纯 model_ev 模式更干净。
+# _bucket_ev_path = Path("data/v56_5_bucket_ev.json")
+# if _bucket_ev_path.exists():
+#     try:
+#         _buckets = json.loads(_bucket_ev_path.read_text(encoding="utf-8"))
+#         _V56_ENGINE.load_history_buckets(_buckets)
+#         slog.info(f"[V56_5_Engine] 加载回测 bucket_ev 成功 ({len(_buckets)} 个分桶), 来自 {_bucket_ev_path}")
+#     except Exception as e:
+#         slog.error(f"[V56_5_Engine] 加载 bucket_ev 失败: {e}")
 
 def _compute_future_r(entry: float, sl: float, direction: str, tp1: float, tp2: float, future_df: 'pd.DataFrame | None',
                     max_bars: int = POSTHOC_FUTURE_BARS) -> tuple:
