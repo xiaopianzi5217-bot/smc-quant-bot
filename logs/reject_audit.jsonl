@@ -1,3 +1,4 @@
 {"ts": 1785592621.1581383, "symbol": "ETH/USDT", "gate": "DEDUPED_EMPTY", "score": 0.0, "ev": 0.0, "regime": "unknown", "vol_state": "unknown", "direction": "", "setup_type": "", "observer_events": []}
 {"ts": 1785592720.8880105, "symbol": "ETH/USDT", "gate": "DEDUPED_EMPTY", "score": 0.0, "ev": 0.0, "regime": "unknown", "vol_state": "unknown", "direction": "", "setup_type": "", "observer_events": []}
 {"ts": 1785592840.143932, "symbol": "ETH/USDT", "gate": "DEDUPED_EMPTY", "score": 0.0, "ev": 0.0, "regime": "unknown", "vol_state": "unknown", "direction": "", "setup_type": "", "observer_events": []}
+{"ts": 1787199016.727902, "symbol": "BTC/USDT", "gate": "HISTORY_ONLY", "score": 0.0, "ev": 0.0, "regime": "unknown", "vol_state": "unknown", "direction": "", "setup_type": "", "observer_events": [], "extra": {"lookback": 16, "full_count": 5, "idx_min": 260, "idx_max": 268, "last_idx": 319}}

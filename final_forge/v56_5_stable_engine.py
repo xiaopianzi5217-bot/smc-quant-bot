@@ -652,8 +652,6 @@ def summarize_v565(trades: pd.DataFrame) -> Dict[str, Any]:
         "tp1_touch_rate": round(float(trades.get("tp1_real_touch", pd.Series(False, index=trades.index)).astype(bool).mean()), 4),
         "tp2_touch_rate": round(float(trades.get("tp2_real_touch", pd.Series(False, index=trades.index)).astype(bool).mean()), 4),
         "tp3_touch_rate": round(float(trades.get("tp3_real_touch", pd.Series(False, index=trades.index)).astype(bool).mean()), 4),
-        "micro_profit_frequency_lt_0p2r": round(float(((pnl > 0) & (pnl < 0.2)).mean()), 4),
-        "micro_loss_frequency_gt_minus_0p2r": round(float(((pnl < 0) & (pnl > -0.2)).mean()), 4),
     }
 
 

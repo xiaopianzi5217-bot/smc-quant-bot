@@ -30,94 +30,82 @@
     "end": "2026-06-01 11:30:00"
   },
   "candidate_summary": {
-    "candidates": 7546,
+    "candidates": 10763,
     "selected_before_overlap_guard": 388,
-    "signal_density": 0.21535
+    "signal_density": 0.30716
   },
   "signal_entropy": {
-    "candidate_count": 7546,
+    "candidate_count": 10763,
     "setup_counts": {
+      "TREND_PULLBACK": 3719,
       "LIQUIDITY_SWEEP": 3455,
       "WEAK_BOS": 2459,
       "FVG_TOUCH": 846,
-      "TREND_PULLBACK": 502,
       "ORDERBLOCK_REACTION": 270,
       "REAL_CHOCH": 8,
       "ENHANCED_BUY": 6
     },
-    "entropy_bits": 1.8478,
-    "max_pattern_share": 0.4579,
+    "entropy_bits": 1.9781,
+    "max_pattern_share": 0.3455,
     "dominance_warning": false
   },
   "overall": {
-    "trades": 384,
-    "win_rate": 0.5208,
-    "pf": 0.7651,
-    "pnl": -45.8431,
-    "avg_r": -0.11938,
-    "max_dd_r": -54.735,
+    "trades": 387,
+    "win_rate": 0.5633,
+    "pf": 0.9057,
+    "pnl": -16.9132,
+    "avg_r": -0.0437,
+    "max_dd_r": -37.126,
     "max_win_r": 1.395,
     "max_loss_r": -1.07,
-    "tp1_touch_rate": 0.5208
+    "tp1_touch_rate": 0.5633
   },
   "temporal_stability": {
     "slices": [
       {
-        "trades": 96,
-        "win_rate": 0.5,
-        "pf": 0.6385,
-        "pnl": -18.0647,
-        "avg_r": -0.18817,
-        "max_dd_r": -19.7714,
-        "max_win_r": 1.395,
-        "max_loss_r": -1.07,
-        "tp1_touch_rate": 0.5
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
       },
       {
-        "trades": 96,
-        "win_rate": 0.5104,
-        "pf": 0.717,
-        "pnl": -14.2296,
-        "avg_r": -0.14823,
-        "max_dd_r": -20.6546,
-        "max_win_r": 1.395,
-        "max_loss_r": -1.07,
-        "tp1_touch_rate": 0.5104
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
       },
       {
-        "trades": 96,
-        "win_rate": 0.5729,
-        "pf": 1.0154,
-        "pnl": 0.6689,
-        "avg_r": 0.00697,
-        "max_dd_r": -8.2911,
-        "max_win_r": 1.395,
-        "max_loss_r": -1.07,
-        "tp1_touch_rate": 0.5729
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
       },
       {
-        "trades": 96,
-        "win_rate": 0.5,
-        "pf": 0.7232,
-        "pnl": -14.2177,
-        "avg_r": -0.1481,
-        "max_dd_r": -20.6927,
-        "max_win_r": 1.395,
-        "max_loss_r": -1.07,
-        "tp1_touch_rate": 0.5
+        "trades": 0,
+        "win_rate": 0.0,
+        "pf": 0.0,
+        "pnl": 0.0,
+        "avg_r": 0.0,
+        "max_dd_r": 0.0
       }
     ]
   },
   "compression": {
-    "trades": 384,
-    "win_rate": 0.5208,
-    "pf": 0.7056,
-    "pnl": -58.1493,
-    "avg_r": -0.15143,
-    "max_dd_r": -63.6998,
+    "trades": 387,
+    "win_rate": 0.5633,
+    "pf": 0.8353,
+    "pnl": -29.9199,
+    "avg_r": -0.07731,
+    "max_dd_r": -44.8542,
     "max_win_r": 1.3157,
     "max_loss_r": -1.1,
-    "tp1_touch_rate": 0.5208
+    "tp1_touch_rate": 0.5633
   },
   "target_gap": {
     "trade_count_ok": true,

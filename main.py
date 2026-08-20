@@ -70,19 +70,20 @@ import asyncio
 
 
 async def main():
-    print("🚀 SMC Bot V54+ 启动中...")
+    print("[SMC Bot V54+] 启动中...")
     _ensure_env()
 
     # 加载配置
     cfg = load_config()
-    print(f"✅ 配置加载完成，版本: {cfg.get('version', 'V54')}")
+
+    print(f"[OK] 配置加载完成，版本: {cfg.get('version', 'V54')}")
 
     # 运行一次扫描
     try:
         results = run_once(cfg=cfg)
-        print(f"✅ 单次扫描完成，信号数: {len(results)}")
+        print(f"[OK] 单次扫描完成，信号数: {len(results)}")
     except Exception as e:
-        print(f"❌ 运行异常: {e}")
+        print(f"[ERROR] 运行异常: {e}")
         import traceback
         traceback.print_exc()
 

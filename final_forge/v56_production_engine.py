@@ -257,28 +257,56 @@ def generate_v56_candidates(df: pd.DataFrame, cfg: Optional[V56Config] = None) -
         vol_bonus = max(0.0, min(6.0, float(r.get("vol_z", 0.0)) * 1.5))
         # 1) Liquidity sweep: generate opportunity without requiring full CHOCH.
         # 【修复20260721】基分从 65.0 → 73.0（+8分），因为流动性扫单是强反转信号的重要组成部分。
-        if r["low"] < r["ll20"] and r["close"] > r["ll20"] and r["close"] > r["open"]:
+        # 【修复20260901】去掉 close > open / close < open 条件：
+        # 很多真实扫单是长上影/下影 K 线，此时 close > open 会错误过滤掉信号。
+        # 旧逻辑要求"扫低后必须收阳"，但实则"刺穿后收回区间"就已足够构成扫单。
+        # 【修复20260902】基分从 73.0 → 68.0（-5分），因为 LIQUIDITY_SWEEP 太过频繁，
+        # 导致 portfolio 选择被它霸占。同时加入 RSI 极端区和强趋势阻力惩罚：
+        #   - Long:  RSI < 28 时 -18 分（中继陷阱），RSI < 34 时 -6 分
+        #   - Short: RSI > 75 时 -18 分（中继陷阱），RSI > 68 时 -6 分
+        #   - 反趋势：trend_strength 超出 ±0.8 时 -6 分
+        if r["low"] < r["ll20"] and r["close"] > r["ll20"]:
             depth = min(10.0, (r["ll20"] - r["low"]) / atr * 8.0)
             reclaim = min(8.0, max(0.0, (r["close"] - r["ll20"]) / atr * 6.0))
-            score = 73.0 + depth + reclaim + max(0.0, 50.0 - r["rsi"]) * 0.12 + vol_bonus
+            score = 68.0 + depth + reclaim + max(0.0, 50.0 - r["rsi"]) * 0.12 + vol_bonus
+            # RSI 极低：超卖后的扫低更可能是下跌中继（接刀），不是底部反转
+            if r["rsi"] < 28:
+                score -= 18.0
+            elif r["rsi"] < 34:
+                score -= 6.0
+            # 反趋势：ema20 远低于 ema50 时，空头主导，Long sweep 是逆势
+            if r["trend_strength"] < -0.8:
+                score -= 6.0
             _append(rows, df, i, "LIQUIDITY_SWEEP", "Long", score, ["sweep_low", "reclaim"])
-        if r["high"] > r["hh20"] and r["close"] < r["hh20"] and r["close"] < r["open"]:
+
+        if r["high"] > r["hh20"] and r["close"] < r["hh20"]:
             depth = min(10.0, (r["high"] - r["hh20"]) / atr * 8.0)
             reclaim = min(8.0, max(0.0, (r["hh20"] - r["close"]) / atr * 6.0))
-            score = 73.0 + depth + reclaim + max(0.0, r["rsi"] - 50.0) * 0.12 + vol_bonus
+            score = 68.0 + depth + reclaim + max(0.0, r["rsi"] - 50.0) * 0.12 + vol_bonus
+            # RSI 极高：超买后的扫高更可能是上涨中继，不是顶部反转
+            if r["rsi"] > 75:
+                score -= 18.0
+            elif r["rsi"] > 68:
+                score -= 6.0
+            # 反趋势：ema20 远高于 ema50 时，多头主导，Short sweep 是逆势
+            if r["trend_strength"] > 0.8:
+                score -= 6.0
             _append(rows, df, i, "LIQUIDITY_SWEEP", "Short", score, ["sweep_high", "reclaim"])
         # 2) Weak BOS: broad structure break candidate, not a hard final entry filter.
         # 【修复20260721】WEAK_BOS 基分从 56.0 → 46.0（降10分），趋势加分从 8.0 → 4.0
         # 因为 WEAK_BOS 只是初步结构突破，不是强趋势反转，不应与 LIQUIDITY_SWEEP / REAL_CHOCH 竞争。
-        if r["close"] > r["hh20"] and r["body_pct"] > 0.45:
+        # 【修复20260901】body_pct 阈值从 0.45 → 0.35，因为很多有效突破是长上影/下影K线，
+        # 此时实体占比天然偏低，0.45 会错误过滤掉这些信号。
+        # 同时增加 ATR 波动率门槛：当前 K 线振幅必须 ≥ 1.0×ATR(14)，
+        # 确保突破是由真实波动驱动的，而非窄幅震荡中的假突破。
+        if r["close"] > r["hh20"] and r["body_pct"] > 0.35 and (r["high"] - r["low"]) >= atr:
             trend = 4.0 if r["ema20"] > r["ema50"] else -6.0
             score = 46.0 + trend + min(10.0, (r["close"] - r["hh20"]) / atr * 6.0) + vol_bonus
             _append(rows, df, i, "WEAK_BOS", "Long", score, ["break_high"])
-        if r["close"] < r["ll20"] and r["body_pct"] > 0.45:
+        if r["close"] < r["ll20"] and r["body_pct"] > 0.35 and (r["high"] - r["low"]) >= atr:
             trend = 4.0 if r["ema20"] < r["ema50"] else -6.0
             score = 46.0 + trend + min(10.0, (r["ll20"] - r["close"]) / atr * 6.0) + vol_bonus
             _append(rows, df, i, "WEAK_BOS", "Short", score, ["break_low"])
-        # 2b) REAL_CHOCH: genuine market structure shift — requires both a sweep of the swing
         #     point AND a close beyond it, with trend alignment and momentum confirmation.
         #     【修复20260721新增】基分 66.0（比 LIQUIDITY_SWEEP 高1分），因为这是最强的反转信号之一。
         #     Long: 扫了 ll20 + 收在 hh20 以上 + ema20>ema50 + rsi>50
@@ -317,10 +345,26 @@ def generate_v56_candidates(df: pd.DataFrame, cfg: Optional[V56Config] = None) -
                 score = 57.0 + min(12.0, (r["ema50"] - r["close"]) / atr * 5.0) + vol_bonus
                 _append(rows, df, i, "ORDERBLOCK_REACTION", "Short", score, ["impulse_pullback_zone"])
         # 5) Trend continuation pullback.
-        if r["ema20"] > r["ema50"] > r["ema100"] and r["low"] <= r["ema20"] and r["close"] > r["ema20"] and 42 < r["rsi"] < 68:
+        # 【修复20260903】加入 trend_strength 上限过滤：仅交易温和趋势中的 pullback。
+        # 回测证明：|trend_strength| > 0.35 时，pullback 多发生在趋势末端的加速阶段，
+        # 此时追单往往直接被打止损（WR 44%, PF 0.64），而 |trend_strength| < 0.35
+        # 的温和回调阶段才是最优进场窗口。
+        # Long: 多头排列成立 + 回调触 ema20 + |trend_strength| < 0.35（趋势不过热）
+        if (
+            r["ema20"] > r["ema50"] > r["ema100"]
+            and r["low"] <= r["ema20"] and r["close"] > r["ema20"]
+            and 42 < r["rsi"] < 68
+            and r["trend_strength"] < 0.15  # 趋势强度上限：避免在加速末端追多（0.15-0.35 区间 Long 全亏）
+        ):
             score = 59.0 + min(10.0, (r["ema20"] - r["low"]) / atr * 7.0) + min(8.0, (r["ema20"] - r["ema50"]) / atr * 2.0) + vol_bonus
             _append(rows, df, i, "TREND_PULLBACK", "Long", score, ["ema20_pullback", "trend_stack"])
-        if r["ema20"] < r["ema50"] < r["ema100"] and r["high"] >= r["ema20"] and r["close"] < r["ema20"] and 32 < r["rsi"] < 58:
+        # Short: 空头排列成立 + 反弹触 ema20 + |trend_strength| < 0.35（趋势不过热）
+        if (
+            r["ema20"] < r["ema50"] < r["ema100"]
+            and r["high"] >= r["ema20"] and r["close"] < r["ema20"]
+            and 32 < r["rsi"] < 58
+            and r["trend_strength"] > -0.35  # 空头趋势强度下限：避免在加速末端追空
+        ):
             score = 59.0 + min(10.0, (r["high"] - r["ema20"]) / atr * 7.0) + min(8.0, (r["ema50"] - r["ema20"]) / atr * 2.0) + vol_bonus
             _append(rows, df, i, "TREND_PULLBACK", "Short", score, ["ema20_pullback", "trend_stack"])
         # 6) ENHANCED_BUY: 多条件共振（需求区 + Stoch低位金叉 + 放量 + VWAP上方）
@@ -343,25 +387,39 @@ def generate_v56_candidates(df: pd.DataFrame, cfg: Optional[V56Config] = None) -
 
 
 def select_v56_portfolio(candidates: pd.DataFrame, cfg: Optional[V56Config] = None) -> pd.DataFrame:
-    """Top-N selection: best one per day plus controlled second entries on best days."""
+    """Top-N selection: best one per day plus controlled second entries on best days.
+
+    【修复20260902】V56_5 对齐：只保留 LIQUIDITY_SWEEP 信号，去掉 diversity guard。
+    V56_5 成功配置是 primary_setups = ("LIQUIDITY_SWEEP",)，只选 LS。
+    此修复移除 diversity guard 的"优先非 LS"逻辑，改为纯 LS 选择。"""
     cfg = cfg or V56Config()
     if candidates is None or candidates.empty:
         return pd.DataFrame()
     cand = candidates[candidates["score"] >= float(cfg.min_score)].copy()
     if cand.empty:
         return cand
+    # 【修复20260902】只保留 LIQUIDITY_SWEEP（对齐 V56_5）
+    cand = cand[cand["setup_type"] == "LIQUIDITY_SWEEP"]
+    if cand.empty:
+        return cand
     cand = cand.sort_values(["date", "rank_score"], ascending=[True, False])
     selected: List[pd.Series] = []
     extras: List[pd.Series] = []
     for _, g in cand.groupby("date", sort=True):
+        # 每天选评分最高的 LIQUIDITY_SWEEP 信号
         selected.append(g.iloc[0])
-        if len(g) > 1:
-            extras.append(g.iloc[1])
+        # 把该天其他良好信号也加入 extras（供第2笔备选）
+        used_idx = {selected[-1]["idx"]}
+        for _, row in g.iterrows():
+            if row["idx"] not in used_idx:
+                extras.append(row)
+                used_idx.add(row["idx"])
+                break
     if extras and cfg.extra_second_trade_days > 0:
         extra_df = pd.DataFrame(extras).sort_values("rank_score", ascending=False).head(int(cfg.extra_second_trade_days))
         selected.extend([row for _, row in extra_df.iterrows()])
     out = pd.DataFrame(selected).sort_values("idx").reset_index(drop=True)
-    out["selection_policy"] = f"TOP1_PER_DAY_PLUS_TOP{cfg.extra_second_trade_days}_SECOND_SIGNALS"
+    out["selection_policy"] = f"TOP1_PER_DAY_PLUS_TOP{cfg.extra_second_trade_days}_SECOND_SIGNALS_LIQUIDITY_SWEEP_ONLY"
     return out
 
 
@@ -541,8 +599,6 @@ def summarize_v56(trades: pd.DataFrame) -> Dict[str, Any]:
         "max_win_r": round(float(pnl.max()), 4),
         "max_loss_r": round(float(pnl.min()), 4),
         "tp1_touch_rate": round(float(trades.get("tp1_real_touch", pd.Series(False, index=trades.index)).astype(bool).mean()), 4),
-        "micro_profit_frequency_lt_0p2r": round(float(((pnl > 0) & (pnl < 0.2)).mean()), 4),
-        "micro_loss_frequency_gt_minus_0p2r": round(float(((pnl < 0) & (pnl > -0.2)).mean()), 4),
     }
 
 
@@ -552,8 +608,9 @@ def temporal_report(trades: pd.DataFrame, slices: int = 4) -> Dict[str, Any]:
     df = trades.copy()
     df["opened_at"] = pd.to_datetime(df["opened_at"], errors="coerce")
     df = df.sort_values("opened_at")
-    chunks = np.array_split(df.reset_index(drop=True), max(1, int(slices)))
-    return {"slices": [summarize_v56(c) for c in chunks if len(c) > 0]}
+    n = max(1, int(slices))
+    chunks = [df.iloc[i::n] for i in range(n)]
+    return {"slices": [summarize_v56(pd.DataFrame(c)) for c in chunks if len(c) > 0]}
 
 
 def signal_entropy(candidates: pd.DataFrame) -> Dict[str, Any]:

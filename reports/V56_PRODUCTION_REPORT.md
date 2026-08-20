@@ -4,17 +4,15 @@
 
 ```json
 {
-  "trades": 382,
-  "win_rate": 0.5183,
-  "pf": 0.8049,
-  "pnl": -38.4138,
-  "avg_r": -0.10056,
-  "max_dd_r": -53.8056,
+  "trades": 384,
+  "win_rate": 0.5208,
+  "pf": 0.7651,
+  "pnl": -45.8431,
+  "avg_r": -0.11938,
+  "max_dd_r": -54.735,
   "max_win_r": 1.395,
   "max_loss_r": -1.07,
-  "tp1_touch_rate": 0.5183,
-  "micro_profit_frequency_lt_0p2r": 0.0,
-  "micro_loss_frequency_gt_minus_0p2r": 0.0
+  "tp1_touch_rate": 0.5208
 }
 ```
 
@@ -22,9 +20,9 @@
 
 ```json
 {
-  "candidates": 9250,
+  "candidates": 7546,
   "selected_before_overlap_guard": 388,
-  "signal_density": 0.26398
+  "signal_density": 0.21535
 }
 ```
 
@@ -32,16 +30,18 @@
 
 ```json
 {
-  "candidate_count": 9250,
+  "candidate_count": 7546,
   "setup_counts": {
-    "TREND_PULLBACK": 3719,
-    "WEAK_BOS": 2691,
-    "LIQUIDITY_SWEEP": 1724,
+    "LIQUIDITY_SWEEP": 3455,
+    "WEAK_BOS": 2459,
     "FVG_TOUCH": 846,
-    "ORDERBLOCK_REACTION": 270
+    "TREND_PULLBACK": 502,
+    "ORDERBLOCK_REACTION": 270,
+    "REAL_CHOCH": 8,
+    "ENHANCED_BUY": 6
   },
-  "entropy_bits": 1.9629,
-  "max_pattern_share": 0.4021,
+  "entropy_bits": 1.8478,
+  "max_pattern_share": 0.4579,
   "dominance_warning": false
 }
 ```
@@ -50,17 +50,15 @@
 
 ```json
 {
-  "trades": 382,
-  "win_rate": 0.5183,
-  "pf": 0.7431,
-  "pnl": -51.1581,
-  "avg_r": -0.13392,
-  "max_dd_r": -62.0013,
+  "trades": 384,
+  "win_rate": 0.5208,
+  "pf": 0.7056,
+  "pnl": -58.1493,
+  "avg_r": -0.15143,
+  "max_dd_r": -63.6998,
   "max_win_r": 1.3157,
   "max_loss_r": -1.1,
-  "tp1_touch_rate": 0.5183,
-  "micro_profit_frequency_lt_0p2r": 0.0314,
-  "micro_loss_frequency_gt_minus_0p2r": 0.0
+  "tp1_touch_rate": 0.5208
 }
 ```
 

@@ -1,11 +1,16 @@
 {
   "processed": {
-    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 18:45:00_s6_ev+0.035_rang": 1785593620.067399,
-    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 20:15:00_s6_ev+0.073_mixe": 1785593620.0703936,
-    "ETH/USDT_Short_TREND_PULLBACK_dt2026-08-01 20:30:00_s6_ev+0.066_rang": 1785593620.0733829,
-    "ETH/USDT_Long_FVG_TOUCH_dt2026-08-01 20:30:00_s5_ev+0.311_rang": 1785593620.0753775
+    "BTC/USDT_Long_ob_dt2026-08-20 23:15:00_s4_ev+0.017_tren": 1787239724.4765038,
+    "ETH/USDT_Long_ob_dt2026-08-20 23:15:00_s3_ev+0.004_mud": 1787239737.7117906
   },
-  "cooldowns": {},
+  "cooldowns": {
+    "BTC/USDT": 1787239724.4775019,
+    "BTC/USDT_Long": 1787239724.4775019,
+    "BTC/USDT_Long_strategy_approved": 1787239724.4775019,
+    "ETH/USDT": 1787239737.7137833,
+    "ETH/USDT_Long": 1787239737.7137833,
+    "ETH/USDT_Long_strategy_approved": 1787239737.7137833
+  },
   "sl_times": {},
-  "updated_at": 1785593620.0753775
+  "updated_at": 1787239737.7140427
 }
