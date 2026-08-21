@@ -383,6 +383,8 @@ _reason_cn_map = {
     "CLOSE_ALL": ("🔴", "平仓"),
     "SL": ("🔴", "止损"),
     "TP": ("✅", "止盈"),
+    "MAX_HOLD_TIMEOUT": ("⏰", "超时平仓"),
+    "TIME_OUT": ("⏰", "超时平仓"),
 }
 
 def _exit_reason_cn(reason: str) -> str:
@@ -1600,6 +1602,41 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
     elif 55.0 <= score < 70.0:
         result["v6_level"] = "B_GRADE"
         result["action_route"] = "LIVE_HALF_TRADE"
+        # ===== 趋势方向硬门槛：逆HTF趋势的B级信号降级为RESEARCH_SILENT（不开仓）=====
+        # 现象：55-70分B级信号中部分与1H趋势相反，开仓后逆势被反复扫止损
+        # 方案：取V56.5引擎输出的trend_direction（features.trend_direction），
+        #       支持 bool（True=顺势/False=逆势）与字符串（"Long"/"Short"/""）两种格式
+        try:
+            _tdir = result.get("trend_direction")
+            if _tdir is None:
+                _feats = result.get("features", {}) or {}
+                _tdir = _feats.get("trend_direction")
+            _sig_dir = str(result.get("direction", "")).lower()
+            _allow_route = True
+            # 情况1：bool 类型 — False 表示逆势
+            if _tdir is False:
+                _allow_route = False
+            # 情况2：str 类型 — 空值/未知保守降级，方向与信号相反时降级
+            elif isinstance(_tdir, str):
+                _tdir_l = _tdir.strip().lower()
+                if _tdir_l in ("", "false", "0", "no", "unknown"):
+                    _allow_route = False
+                elif _tdir_l in ("long", "bull", "up", "uptrend"):
+                    if _sig_dir == "short":
+                        _allow_route = False
+                elif _tdir_l in ("short", "bear", "down", "downtrend"):
+                    if _sig_dir == "long":
+                        _allow_route = False
+            if not _allow_route:
+                slog.warning(
+                    f"[V6 分级路由 - 趋势方向硬门槛] {result.get('symbol', '?')} "
+                    f"B_GRADE({score:.1f}分) trend_direction={_tdir}（逆HTF趋势），降级为 RESEARCH_SILENT"
+                )
+                result["v6_level"] = "OBSERVE_GRADE"
+                result["action_route"] = "RESEARCH_SILENT"
+                result["_trend_filter_downgrade"] = True
+        except Exception as _td_e:
+            slog.error(f"[V6 分级路由 - 趋势方向硬门槛异常]: {_td_e}")
     elif 45.0 <= score < 55.0:
         result["v6_level"] = "OBSERVE_GRADE"
         result["action_route"] = "RESEARCH_SILENT"
@@ -1895,8 +1932,10 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             "signal_id": sig_id,
             "atr": float(result.get("atr") or 0.0),
             "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
-            "ml_active": bool(result.get("ml_active", False)),
+                        "ml_active": bool(result.get("ml_active", False)),
             "trade_id": _trade_id,
+            "open_time": time.time(),     # 新增：持仓超时保护需要
+            "max_hold_seconds": 14400.0,  # 新增：4小时未到TP1强制平仓
         })
         slog.info(f"[V6路由] {symbol} 持仓已写入 position_manager: {position_manager.get(symbol)}")
         try:
@@ -2713,6 +2752,72 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         except Exception:
             pass
         
+                # ===== 浮盈回撤保护（ratchet 棘轮逻辑）=====
+        # 现象：单子浮盈已超 3R 但 TP1 未触达（TP1距离太远），随后深回调直接把 SL 扫掉，亏损 -1R
+        # 方案：MFE 每提升一个利润档位，SL 至少前移到锁盈利点位
+        try:
+            _stage_now = stage
+            _mfe_val = float(pos.get("mfe") or 0.0)
+            _init_risk = float(pos.get("initial_risk") or risk or 0.0)
+            if _init_risk > 0 and _stage_now < 2:
+                _lock_sl = None
+                if _mfe_val >= 3.5 * _init_risk:
+                    _lock_sl = entry + 2.0 * _init_risk if direction == "Long" else entry - 2.0 * _init_risk
+                elif _mfe_val >= 2.5 * _init_risk:
+                    _lock_sl = entry + 1.5 * _init_risk if direction == "Long" else entry - 1.5 * _init_risk
+                elif _mfe_val >= 1.8 * _init_risk:
+                    _lock_sl = entry + 1.0 * _init_risk if direction == "Long" else entry - 1.0 * _init_risk
+
+                if _lock_sl is not None:
+                    _sl_locked = float(pos.get("sl_protected") or 0.0)
+                    _new_lock = False
+                    if direction == "Long":
+                        _cap = current_price - 0.5 * _init_risk
+                        if _lock_sl > _cap:
+                            _lock_sl = _cap
+                        if _lock_sl > sl and _lock_sl > _sl_locked and _lock_sl < current_price:
+                            _new_lock = True
+                    else:
+                        _cap = current_price + 0.5 * _init_risk
+                        if _lock_sl < _cap:
+                            _lock_sl = _cap
+                        if _lock_sl < sl and (_lock_sl < _sl_locked or _sl_locked == 0) and _lock_sl > current_price:
+                            _new_lock = True
+
+                    if _new_lock:
+                        pos["current_sl"] = _lock_sl
+                        pos["sl_protected"] = _lock_sl
+                        sl = _lock_sl
+                        position_manager.update_fields(symbol, **pos)
+                        try:
+                            from analytics.state_recovery import save_positions
+                            save_positions(position_manager.get())
+                        except Exception:
+                            pass
+                        _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id") or "")
+                        safe_send(
+                            f"🔒 浮盈锁定 #{_short_id} {symbol} {direction} | "
+                            f"MFE {_mfe_val/_init_risk:.1f}R → SL 移至 {_lock_sl:.2f}（锁定 {abs(_lock_sl - entry)/_init_risk:.1f}R）",
+                            priority="TRADE",
+                        )
+        except Exception as _rat_e:
+            slog.error(f"[check_trailing] 浮盈棘轮保护异常 {symbol}: {_rat_e}")
+
+                # ===== 持仓超时保护：开仓超过 max_hold_seconds 仍未到TP1，强制平仓 =====
+        try:
+            _open_ts = float(pos.get("open_time") or pos.get("opened_at") or pos.get("created_at") or 0.0)
+            _max_hold = float(pos.get("max_hold_seconds") or 14400.0)  # 默认4小时
+            if _open_ts > 0 and stage < 2 and time.time() > _open_ts + _max_hold:
+                _hold_mins = (time.time() - _open_ts) / 60.0
+                slog.warning(
+                    f"[EXIT_MANAGER] {symbol} {direction} 已持仓 {_hold_mins:.1f}min"
+                    f" > 上限 {_max_hold/60.0:.1f}min，且未到TP1（stage={stage}），强制平仓"
+                )
+                _trigger_stop_loss(symbol, pos, current_price, reason="MAX_HOLD_TIMEOUT")
+                return
+        except Exception as _timeout_e:
+            slog.error(f"[check_trailing] 持仓超时保护异常 {symbol}: {_timeout_e}")
+
         pos_dict = {
             "direction": direction,
             "entry": entry,
