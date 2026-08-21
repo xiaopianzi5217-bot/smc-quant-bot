@@ -281,6 +281,22 @@ class ExitEventLogger:
                 event
             )
 
+            # ============================================================
+            # 【20260917】将真实平仓结果写入 OutcomeDatabase
+            # 让 StatisticalEV 能读取实时统计（而非依赖已断开的 events 流）
+            # ============================================================
+            try:
+                from analytics.outcome_db import OutcomeDatabase
+                from analytics.feature_hash import generate_feature_hash
+                
+                _features = position.get("features") or {}
+                if _features:
+                    _od = OutcomeDatabase()  # storage/outcome_stats.json
+                    _fh = generate_feature_hash(_features)
+                    _od.update(_fh, profit_r, mode="NORMAL")
+            except Exception as _db_err:
+                print(f"[ExitLogger OutcomeDB Failed] {_db_err}")
+
             return event
 
         except Exception as e:

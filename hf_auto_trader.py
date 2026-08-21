@@ -2770,18 +2770,6 @@ stage={action_plan.get('stage')}
             safe_send(f"🛡️ {_move_reason_cn} #{_short_id} {symbol} {direction} | 新SL {action_plan.get('new_sl')}{_trail_suffix}", priority="TRADE")
 
         elif action_plan["action"] == "CLOSE_ALL":
-            try:
-                exit_logger.log_exit(
-                    symbol=symbol,
-                    position=pos,
-                    exit_price=current_price,
-                    reason=_normalize_exit_reason(action_plan.get('reason') or 'CLOSE_ALL'),
-                    action='CLOSE_ALL',
-                    mfe=pos.get('mfe'),
-                    mae=pos.get('mae')
-                )
-            except Exception:
-                slog.error(f"[check_trailing] exit_logger.log_exit 失败: {symbol}")
             _trigger_stop_loss(symbol, pos, current_price, reason=action_plan.get('reason') or 'CLOSE_ALL')
         elif action_plan["action"] == "HOLD":
             pass
@@ -2931,6 +2919,20 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         _sizer_v2.record_outcome(pnl_r)
     except Exception:
         pass
+
+    # ===== V59.7: EXIT事件统一写入（从 check_trailing 移至此处，覆盖所有平仓路径） =====
+    try:
+        exit_logger.log_exit(
+            symbol=symbol,
+            position=pos,
+            exit_price=current_price,
+            reason=_normalize_exit_reason(reason or "CLOSE_ALL"),
+            action='CLOSE_ALL',
+            mfe=pos.get('mfe'),
+            mae=pos.get('mae')
+        )
+    except Exception as _el_err:
+        slog.error(f"[{symbol}] exit_logger.log_exit 失败: {_el_err}")
 
     # ===== V59.5: 平仓后激活 DailyPanel + FeedbackLoop（历史从未调用，日报数据一直为空） =====
     # pos 中已保存 score/confidence/regime/features/ev（开仓时注入），此处直接读取
