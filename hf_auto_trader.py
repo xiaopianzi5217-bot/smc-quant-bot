@@ -1692,6 +1692,13 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         return False
 
     if route == "RESEARCH_SILENT":
+        # ===== 【修复】RESEARCH_SILENT 也必须经过冷却检查 =====
+        # 根因：此前 RESEARCH_SILENT 分支不查询 is_symbol_cooled，
+        #       导致每次扫描时同币种即使无持仓也会反复拍快照入库（RES_ 开头的堆积单）
+        _rs_direction = str(result.get("direction", ""))
+        if signal_deduper.is_symbol_cooled(symbol, _rs_direction, "RESEARCH_SILENT"):
+            slog.warning(f"[V6 分级路由 - 科研观察冷却] {symbol} {_rs_direction} 仍在冷却中，跳过快照记录")
+            return False
         research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
@@ -1715,8 +1722,12 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         except Exception:
             pass
         async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+        # 【修复】记录 RESEARCH_SILENT 快照后也标记冷却，防止连续堆积
+        try:
+            signal_deduper.mark_symbol_fired(symbol, _rs_direction, "RESEARCH_SILENT")
+        except Exception:
+            pass
         return False
-
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
@@ -3129,6 +3140,12 @@ async def main_loop():
                         current_price = await _fetch_ticker_price(symbol)
                         if current_price is not None:
                             check_trailing(symbol, pos, current_price)
+                        # ===== 【关键修复】持仓互斥：已有未平仓持仓时直接跳过开仓扫描 =====
+                        # 根因：原逻辑在 pos 非空时只检查了 check_trailing，但没有阻止后续的
+                        #       _breaker.can_open() → scan_and_decide() → check_and_open_v6_with_routing()
+                        #       导致已有持仓时仍持续扫描信号、重复开新单/叠加RESEARCH快照
+                        slog.info(f"[main_loop] {symbol} 已有未平仓持仓({pos.get('direction','?')})，跳过开仓扫描")
+                        continue
                     if _breaker.can_open():
                         result = await scan_and_decide(symbol)
                         if result is not None:
