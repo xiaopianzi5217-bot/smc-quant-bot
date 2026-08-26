@@ -7,6 +7,10 @@ Outcome Consumer
 """
 
 import json
+import os
+import sys
+import threading
+import traceback
 from pathlib import Path
 from analytics.outcome_db import OutcomeDatabase
 from analytics.feature_hash import generate_feature_hash
@@ -15,6 +19,9 @@ from analytics.training_validator import validate_trade_sample
 import logging
 logger = logging.getLogger(__name__)
 import time
+
+# 线程文件锁（防止多线程同时操作 JSON 文件导致损坏）
+_file_lock = threading.Lock()
 
 # 学习版本号（便于后续比较不同版本学习结果）
 LEARNING_VERSION = "58.9"
@@ -43,8 +50,25 @@ def save_processed(s: set):
         pass
 
 
+
+
+
+
 def process_events_once():
-    db = OutcomeDatabase()
+    # 加文件锁，防止多线程同时操作 events.jsonl / outcome_stats.json
+    global _file_lock
+    with _file_lock:
+        return _process_events_once_locked()
+
+
+def _process_events_once_locked():
+    try:
+        db = OutcomeDatabase()
+    except Exception as e:
+        logger.error(f"[OutcomeConsumer] 创建 OutcomeDatabase 失败: {e}", exc_info=True)
+        return 0
+    
+        # ★★★ 关键修复：必须加载已处理的 trade_id 集合（之前错误地设为了 None）★★★
     processed = load_processed()
     if not EVENT_FILE.exists():
         return 0
@@ -162,6 +186,9 @@ def process_events_once():
         if ev.get('event') == 'FORCE_CLOSE_UNKNOWN' or reason == 'FORCE_CLOSE_UNKNOWN':
             trade_id = ev.get('trade_id')
             dedupe_key = trade_id or ev.get('event_id')
+            # ★ 去重检查：已处理过的异常关闭不再重复处理
+            if dedupe_key and dedupe_key in processed:
+                continue
             logger.warning(f"[Outcome] Skip abnormal close {trade_id}: reason={reason or 'FORCE_CLOSE_UNKNOWN'}")
             # 彻底移除 open_cache 条目，不写入 OutcomeDB/学习
             try:
@@ -239,17 +266,145 @@ def process_events_once():
     return processed_count
 
 
+
+
+
+
+
+
+
+
+
+
+
 def start_worker(poll_interval: float = 30.0):
-    """持续轮询 events.jsonl 并消费 EXIT 事件，适合在后台线程中运行"""
-    print(f"OutcomeConsumer worker started, polling every {poll_interval}s")
-    try:
-        while True:
+    """
+    持续轮询 events.jsonl 并消费 EXIT 事件，适合在后台线程中运行
+
+    关键修复（防止线程静默死亡）：
+    1. 全局 try...except 捕获所有异常并打印堆栈
+    2. 每轮输出心跳日志证明线程存活
+    3. 连续错误时自动增加等待时间避免疯狂重试
+    """
+    thread_name = threading.current_thread().name
+    logger.info(f"[OutcomeConsumer] 影子闭环轮询线程已启动 (thread={thread_name}, poll_interval={poll_interval}s)")
+    print(f"[OutcomeConsumer] worker started (thread={thread_name}, poll_interval={poll_interval}s)", flush=True)
+    
+    consecutive_errors = 0
+    max_consecutive_errors = 10  # 连续 10 次错误后降低轮询频率
+    
+    while True:
+        try:
+            # 核心业务逻辑
             n = process_events_once()
+            
             if n:
-                print(f"Consumed {n} EXIT events")
+                logger.info(f"[OutcomeConsumer] 消费了 {n} 个 EXIT 事件")
+                print(f"[OutcomeConsumer] Consumed {n} EXIT events", flush=True)
+            else:
+                # 心跳日志（每轮输出，证明线程活着）
+                logger.debug(f"[OutcomeConsumer] 本轮扫描完成，无新事件 (thread={thread_name})")
+            
+            # 重置错误计数
+            consecutive_errors = 0
+            
+        except KeyboardInterrupt:
+            logger.warning("[OutcomeConsumer] worker 被 KeyboardInterrupt 中断")
+            print("OutcomeConsumer worker stopped")
+            break
+            
+        except Exception as e:
+            # ★★★ 关键修复：捕获所有异常，绝不静默死亡 ★★★
+            consecutive_errors += 1
+            logger.error(
+                f"[OutcomeConsumer] 轮询过程发生严重异常 (第 {consecutive_errors} 次): {e}\\n"
+                f"堆栈:\\n{traceback.format_exc()}"
+            )
+            print(f"[OutcomeConsumer] ERROR: {e}", flush=True)
+            
+            # 如果连续出错，增加等待时间避免疯狂重试
+            if consecutive_errors >= max_consecutive_errors:
+                logger.critical(f"[OutcomeConsumer] 连续 {consecutive_errors} 次错误，延长等待时间至 60s")
+                time.sleep(60)
+                consecutive_errors = 0  # 重置，继续尝试
+                continue
+        
+        finally:
+            # 保持固定轮询间隔
             time.sleep(poll_interval)
-    except KeyboardInterrupt:
-        print("OutcomeConsumer worker stopped")
+
+
+def start_worker_with_monitor(poll_interval: float = 30.0):
+    """
+    启动 OutcomeConsumer worker 并附带监控保护
+    
+    监控线程每轮询间隔检查主线程是否存活，如果死亡则自动重启
+    返回: 启动的 worker 线程
+    """
+    global _worker_thread_ref
+    
+    # 主 worker 线程
+    worker_thread = threading.Thread(
+        target=start_worker,
+        args=(poll_interval,),
+        name="OutcomeConsumer",
+        daemon=True
+    )
+    worker_thread.start()
+    _worker_thread_ref = worker_thread
+    
+    logger.info(f"[OutcomeConsumer-Monitor] 主 worker 线程已启动: {worker_thread.name} (ID: {worker_thread.ident})")
+    
+    # 监控线程：检测 worker 死亡并自动重启
+    def _monitor():
+        monitor_name = threading.current_thread().name
+        logger.info(f"[OutcomeConsumer-Monitor] 监控线程启动: {monitor_name}")
+        
+        while True:
+            time.sleep(poll_interval)  # 每轮询间隔检查一次
+            
+            # 获取当前 worker 线程引用
+            global _worker_thread_ref
+            current = _worker_thread_ref
+            
+            # 检查主线程是否还活着
+            if current is not None and current.is_alive():
+                logger.debug(f"[OutcomeConsumer-Monitor] 主线程存活 (health check ok)")
+            else:
+                logger.critical(
+                    f"[OutcomeConsumer-Monitor] ★★★ 检测到 OutcomeConsumer 线程已死亡！立即重启... ★★★"
+                )
+                print(f"[OutcomeConsumer-Monitor] DETECTED THREAD DEATH - restarting...", flush=True)
+                
+                # 尝试重启新线程
+                try:
+                    new_thread = threading.Thread(
+                        target=start_worker,
+                        args=(poll_interval,),
+                        name="OutcomeConsumer-Restarted",
+                        daemon=True
+                    )
+                    new_thread.start()
+                    _worker_thread_ref = new_thread
+                    logger.info(f"[OutcomeConsumer-Monitor] 新线程已启动: {new_thread.name} (ID: {new_thread.ident})")
+                except Exception as e:
+                    logger.critical(f"[OutcomeConsumer-Monitor] 重启线程失败: {e}", exc_info=True)
+                
+                # 等待 5 秒后继续监控
+                time.sleep(5)
+    
+    monitor_thread = threading.Thread(
+        target=_monitor,
+        name="OutcomeConsumerMonitor",
+        daemon=True
+    )
+    monitor_thread.start()
+    
+    return worker_thread
+
+
+# 全局引用（用于监控线程检查）
+_worker_thread_ref = None
 
 
 if __name__ == '__main__':
