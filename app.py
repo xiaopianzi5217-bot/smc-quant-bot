@@ -797,23 +797,22 @@ def _start_hf_auto_trader():
             _feeder = None
             try:
                 # 启动 OutcomeConsumer 后台 worker（每 30s 消费一次 events.jsonl）
-                                #   ★ 修复：使用带监控的启动方式，防止线程静默死亡 ★
-                                try:
-                                    # 尝试使用带监控的版本（自动检测死亡并重启）
-                                    try:
-                                        from analytics.outcome_consumer import start_worker_with_monitor
-                                        t_worker = start_worker_with_monitor(30.0)
-                                    except ImportError:
-                                        # 回退到基础版本
-                                        t_worker = threading.Thread(target=start_outcome_worker, args=(30.0,), daemon=True)
-                                        t_worker.start()
-                                    slog.info(f"[HF] OutcomeConsumer 已启动 (thread: {t_worker.name}, ID: {t_worker.ident})")
-                                except Exception as _w_e:
-                                    slog.error(f"[HF] 无法启动 OutcomeWorker: {_w_e}")
-                                    # 补充日志：记录详细堆栈
-                                    import traceback as _tb
-                                    slog.error(f"[HF] OutcomeWorker 启动堆栈: {_tb.format_exc()}")
-                # 启动每日 UTC0 报表发送
+                # 启动 OutcomeConsumer 后台 worker（每 30s 消费一次 events.jsonl）
+                try:
+                    # 尝试使用带监控的版本（自动检测死亡并重启）
+                    try:
+                        from analytics.outcome_consumer import start_worker_with_monitor
+                        t_worker = start_worker_with_monitor(30.0)
+                    except ImportError:
+                        # 回退到基础版本
+                        t_worker = threading.Thread(target=start_outcome_worker, args=(30.0,), daemon=True)
+                        t_worker.start()
+                    slog.info(f"[HF] OutcomeConsumer 已启动 (thread: {t_worker.name}, ID: {t_worker.ident})")
+                except Exception as _w_e:
+                    slog.error(f"[HF] 无法启动 OutcomeWorker: {_w_e}")
+                    # 补充日志：记录详细堆栈
+                    import traceback as _tb
+                    slog.error(f"[HF] OutcomeWorker 启动堆栈: {_tb.format_exc()}")
                 try:
                     start_daily_report_scheduler()
                 except Exception as _dr_e:
