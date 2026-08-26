@@ -1722,6 +1722,23 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         except Exception:
             pass
         async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+        # ===== [V6-增强] 注册虚拟持仓追踪 =====
+        # 让 RESEARCH_SILENT 信号也能获得平仓结果（pnl_r / exit_reason）
+        # 成为 DynamicFeatureOptimizer 可学习的带标签数据
+        try:
+            from utils.research_tracker import get_research_tracker
+            _rt = get_research_tracker()
+            _rt.register(
+                signal_id=research_id,
+                symbol=symbol,
+                direction=_rs_direction,
+                entry_price=float(result.get("entry", 0.0)),
+                sl_price=float(result.get("sl", 0.0)),
+                tp1_price=float(result.get("tp1", 0.0)),
+            )
+        except Exception as _rt_e:
+            slog.error(f"[V6 RESEARCH_SILENT] 虚拟持仓注册失败: {_rt_e}")
+        # ===== [V6-增强] 注册虚拟持仓追踪 - 结束 =====
         # 【修复】记录 RESEARCH_SILENT 快照后也标记冷却，防止连续堆积
         try:
             signal_deduper.mark_symbol_fired(symbol, _rs_direction, "RESEARCH_SILENT")
@@ -3134,6 +3151,32 @@ async def main_loop():
                     slog.error(f"[main_loop] periodic_check: {_pe}")
             for symbol in SYMBOLS:
                 try:
+                    # ===== [V6-增强] 虚拟持仓价格检查 =====
+                    # 检查 RESEARCH_SILENT 虚拟持仓是否触发 SL/TP1/超时
+                    try:
+                        _vt_price = await _fetch_ticker_price(symbol)
+                        if _vt_price is not None and _vt_price > 0:
+                            from utils.research_tracker import get_research_tracker
+                            _rt = get_research_tracker()
+                            _triggers = _rt.update_price(symbol, _vt_price)
+                            for _trg in _triggers:
+                                try:
+                                    emit("record_close_outcome",
+                                         signal_id=_trg["signal_id"],
+                                         pnl_r=_trg["pnl_r"],
+                                         exit_reason=_trg["exit_reason"],
+                                         max_fwd=_trg["max_fwd"],
+                                         max_adv=_trg["max_adv"],
+                                         exit_timestamp=int(time.time()),
+                                         exit_price=_trg["exit_price"])
+                                    slog.info(f"[main_loop] 虚拟持仓回写: {_trg['signal_id']} "
+                                              f"pnl_r={_trg['pnl_r']:+.2f}R reason={_trg['exit_reason']}")
+                                except Exception as _trg_e:
+                                    slog.error(f"[main_loop] 虚拟持仓回写失败: {_trg_e}")
+                    except Exception as _vt_e:
+                        slog.error(f"[main_loop] 虚拟持仓检查异常: {_vt_e}")
+                    # ===== [V6-增强] 虚拟持仓价格检查 - 结束 =====
+
                     positions = position_manager.get()
                     pos = positions.get(symbol)
                     if pos is not None:
