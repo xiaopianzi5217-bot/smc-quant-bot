@@ -793,6 +793,30 @@ def _start_hf_auto_trader():
         except Exception as _db_e:
             slog.error(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
 
+        # == [cleanup] 清洗 8.26 修复前的历史悬空单 ==
+        try:
+            import sqlite3
+            from v6_data_engine import _get_db_path
+            legacy_ids = ("V6_BTCUSDT_1786873507", "V6_ETHUSDT_1786868110")
+            _cleanup_conn = sqlite3.connect(str(_get_db_path()))
+            _cleanup_cur = _cleanup_conn.cursor()
+            _cleanup_cur.execute(
+                f"""
+                UPDATE trade_snapshots 
+                SET exit_reason = 'MANUAL_CLEANUP_DEPRECATED' 
+                WHERE signal_id IN {legacy_ids} AND exit_reason = 'OPEN';
+                """
+            )
+            _updated_rows = _cleanup_cur.rowcount
+            _cleanup_conn.commit()
+            _cleanup_conn.close()
+            if _updated_rows > 0:
+                print(f"[System Cleanup] 成功清洗 {_updated_rows} 笔历史悬空单！")
+            else:
+                print("[System Cleanup] 无需清洗或目标单子已被处理。")
+        except Exception as _cleanup_e:
+            print(f"[System Cleanup] 清洗数据库时出错: {_cleanup_e}")
+
         async def _run_async_main():
             _feeder = None
             try:
