@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版
@@ -86,6 +86,9 @@ from utils.daily_panel import DailyPanel, get_daily_panel
 from utils.event_bus import emit
 import utils.v6_event_hooks
 
+# ---------- EVRealityGuard (ML EV Guard) ----------
+from utils.ev_reality_guard import EVRealityGuard
+
 # ---------- V58.6 统一事件日志与结果回填 ----------
 from analytics.event_schema import event_logger
 from analytics.outcome_db import OutcomeDatabase
@@ -164,6 +167,9 @@ _V56_ENGINE = V56_5_Engine(V565Config(
     allow_tier2_if_strong=True,
     strong_tier2_score=50.0,
 ))
+# ---------- EVRealityGuard / ML EV Guard ----------
+_EV_REALITY_GUARD = EVRealityGuard(model_dir="models")
+
 # 【20260916】数据收集模式：注释掉回测 bucket_ev 加载
 # 原因：回测 HIGH 桶(score>=80) EV(+0.65~0.73) 与实盘 score(30~55) 严重脱节，
 # 加载会引入不匹配的加权偏差。数据收集阶段保持纯 model_ev 模式更干净。
@@ -609,6 +615,79 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 320) -> 
     slog.error(f"[{symbol}] 3次重试均失败")
     return None
 
+
+def _build_ev_guard_ctx(best, exec_ctx, curr, df_macro=None) -> dict:
+    """构建 EVRealityGuard 上下文特征（统一与 ev_model_metadata.json feature_cols 对齐）"""
+    _st = str(best.get("setup_type", ""))
+    _dir = str(best.get("direction", ""))
+    _reg = str(best.get("regime", "range")).strip().lower()
+    _tier = int(best.get("tier", 2))
+    _hour = int(best.get("hour", 0))
+    _dow = int(best.get("dow", 0))
+
+    _score = float(best.get("score", 0.0))
+    _model_ev = float(best.get("model_ev", 0.0))
+    _win_prob = float(best.get("win_prob", best.get("win_prob_model", 0.5)))
+    _rr = float(best.get("expected_rr_model", best.get("estimated_rr", 1.82)))
+    _decision_score = float(best.get("decision_score", _score))
+    _bucket_ev = float(best.get("bucket_ev", _model_ev))
+    _cluster_score = float(best.get("cluster_score", 0.0))
+    _size_scale = float(best.get("size_scale", 1.0))
+    _rank_score = float(best.get("rank_score", _score))
+    _expected_value = float(best.get("expected_value", _model_ev))
+
+    _adx = float(exec_ctx.get("adx", curr.get("ADX_14", 0)))
+    _lq = float(exec_ctx.get("long_quality", 0))
+    _sq = float(exec_ctx.get("short_quality", 0))
+    _dir_score = _lq if _dir == "Long" else _sq
+    _opp_score = _sq if _dir == "Long" else _lq
+
+    _regime_factor = float(best.get("regime_factor", 1.0))
+    _session_factor = float(best.get("session_factor", 1.0))
+    _gate_passed = float(best.get("gate_passed", 1.0))
+
+    # 方向 => 1=Long, 0=Short
+    _dir_num = 1.0 if _dir == "Long" else 0.0
+
+    _regime_trend = 1.0 if ("trend" in _reg or _reg in ("bull", "bear", "strong_uptrend", "strong_downtrend")) else 0.0
+    _regime_range = 1.0 if "range" in _reg else 0.0
+    _regime_mixed = 1.0 if ("mixed" in _reg or _reg == "unknown") else 0.0
+
+    _rsi = float(curr.get("rsi", 50.0))
+    _vol_z = float(exec_ctx.get("vol_z", 0.0))
+    _body_pct = float(exec_ctx.get("body_pct", 0.0))
+
+    ctx = {
+        "rsi": _rsi,
+        "trend_strength": _regime_trend * float(exec_ctx.get("adx", 0)) / 50.0,
+        "vol_z": _vol_z,
+        "body_pct": _body_pct,
+        "hour": float(_hour),
+        "dow": float(_dow),
+        "tier": float(_tier),
+        "regime_factor": _regime_factor,
+        "session_factor": _session_factor,
+        "win_prob_model": _win_prob,
+        "expected_rr_model": _rr,
+        "model_ev": _model_ev,
+        "decision_score": _decision_score,
+        "bucket_ev": _bucket_ev,
+        "cluster_score": _cluster_score,
+        "size_scale": _size_scale,
+        "score": _score,
+        "rank_score": _rank_score,
+        "direction": _dir_num,
+        "regime_trend": _regime_trend,
+        "regime_range": _regime_range,
+        "regime_mixed": _regime_mixed,
+        "gate_passed": _gate_passed,
+        "win_prob": _win_prob,
+        "estimated_rr": _rr,
+        "expected_value": _expected_value,
+    }
+    return ctx
+
+
 async def scan_and_decide(symbol: str) -> dict | None:
     from runner.v11_institutional_runner import make_sample_ohlcv
 
@@ -1006,6 +1085,62 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
     if _blended_ev != ev:
         slog.info(f"[{symbol}] Statistical EV: model={ev:.4f} -> blended={_blended_ev:.4f}")
+
+    # ===== {V4.5} EVRealityGuard: ML EV Reality Check =====
+    _ev_guard_ctx = _build_ev_guard_ctx(best, exec_ctx, curr)
+    _guard_blocked = False
+    _guard_penalty = 0.0
+    _guard_win_prob = None
+    _guard_ml_ev = None
+    _guard_quality = "unknown"
+    _guard_reason = ""
+    try:
+        _ev_guard_result = _EV_REALITY_GUARD.evaluate(
+            signal={
+                "expected_value": float(best.get("model_ev", ev)),
+                "probability": float(best.get("win_prob", best.get("win_prob_model", 0.5))),
+                "score": score,
+                "direction": direction,
+            },
+            ctx=_ev_guard_ctx,
+        )
+        _guard_win_prob = _ev_guard_result.get("ml_win_prob", None)
+        _guard_ml_ev = _ev_guard_result.get("ml_predicted_ev", None)
+        _guard_quality = _ev_guard_result.get("signal_quality", "unknown")
+        _guard_should_enter = _ev_guard_result.get("should_enter", True)
+        _guard_reason = _ev_guard_result.get("reason", "")
+
+        if not _guard_should_enter:
+            _guard_blocked = True
+            slog.warning(
+                f"[{symbol}] EVRealityGuard BLOCK: score={score:.1f} ev={ev:.4f} "
+                f"ml_win_prob={_guard_win_prob:.4f} ml_ev={_guard_ml_ev:.4f} "
+                f"quality={_guard_quality} reason={_guard_reason}"
+            )
+            get_reject_audit().log(
+                symbol, "EV_REALITY_GUARD_BLOCK",
+                score=score, ev=ev, regime=_regime_name,
+                direction=direction or "",
+                setup_type=str(best.get("setup_type", "")),
+                extra={
+                    "ml_win_prob": round(_guard_win_prob, 4) if _guard_win_prob else None,
+                    "ml_ev": round(_guard_ml_ev, 4) if _guard_ml_ev else None,
+                    "quality": _guard_quality,
+                },
+            )
+        else:
+            # 非阻止……但保留 EV 调整（要求 ML EV >= 0）
+            if _guard_ml_ev is not None and _guard_ml_ev < 0:
+                _guard_penalty = min(0.5, abs(_guard_ml_ev) * 0.5)
+                slog.info(f"[{symbol}] EVRealityGuard negative EV: ml_ev={_guard_ml_ev:.4f}, penalty={_guard_penalty:.3f}")
+    except Exception as _ev_guard_err:
+        slog.warning(f"[{symbol}] EVRealityGuard error: {_ev_guard_err}")
+
+    if _guard_blocked:
+        return None
+
+    # ===== {V4.6} ProbabilityCalibrator Transform -> EV + Confidence =====
+
     # ===== 【闭环】ProbabilityCalibrator 校准评分 -> EV + Confidence (含regime校准+样本置信) =====
     _calibrated_prob = _calibrator.get_prob(score)
     _calibrated_prob = round(_calibrated_prob, 4)
@@ -1059,6 +1194,12 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _fl_weighted_score = get_feature_learner().get_weighted_score(_fb_raw_scores)
     _fl_final_score = score * 0.7 + _fl_weighted_score * 0.3 if _fl_weighted_score > 0 else score
     _fl_final_score = min(100.0, _fl_final_score)
+
+    # Apply EVRealityGuard penalty (soft downgrade when ML predicts negative EV)
+    if _guard_penalty > 0:
+        _fl_final_score_delta = _fl_final_score * 0.15  # 15% cap
+        _fl_final_score = max(0.0, _fl_final_score - _guard_penalty * _fl_final_score_delta)
+        slog.info(f"[{symbol}] EVRealityGuard penalty applied: ev={ev:.4f} penalty={_guard_penalty:.3f} score={_fl_final_score:.1f}")
     if _fl_final_score != score:
         slog.info(f"[{symbol}] FeatureLearning: score={score:.1f} -> adjusted={_fl_final_score:.1f} (weights={get_feature_learner().get_all_weights()})")
 
@@ -1088,7 +1229,8 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "_mud_cut": _mud_cut_override,  # mud regime 降仓系数
         "symbol": symbol,
         "direction": direction,
-        "expected_value": round(float(_fb_result["ev"]), 4),
+        # 【EVRealityGuard】归零逻辑：一票否决/风控归零后，EV 同步归零，防止下游误用
+        "expected_value": round(float(_fb_result["ev"]), 4) if _fl_final_score > 0 else 0.0,
         "score": round(float(_fb_result["weighted_score"]), 2),  # 风控否决/调整后的最终分
         "orig_score": round(score, 2),  # 原始进入 V56.5 / Calibration 评分，用于 V6 路由判断
         "final_score": round(float(_fb_result["weighted_score"]), 2),
@@ -1158,6 +1300,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "_feedback_result": _fb_result,  # 【闭环】全文决策统计
         "_feedback_ev": _fb_result["ev"],  # 【闭环】FeedbackLoop EV
         "_feature_learning_score": _fl_final_score,  # 【V21】FeatureLearning 调整后分数
+        "_ev_guard": {
+            "ml_win_prob": _guard_win_prob,
+            "ml_ev": _guard_ml_ev,
+            "quality": _guard_quality,
+            "blocked": _guard_blocked,
+            "penalty": _guard_penalty,
+        },
         #"confidence": _fb_result["confidence"],  # 【闭环】置信度
         "confidence": _calibrated_prob,  # 【闭环】校准后的信心分数
         "grade_result": None,  # check_and_open 中填充
