@@ -1,36 +1,18 @@
 {
   "feature_cols": [
+    "score",
     "rsi",
     "trend_strength",
     "vol_z",
     "body_pct",
     "hour",
     "dow",
-    "tier",
-    "regime_factor",
-    "session_factor",
-    "win_prob_model",
-    "expected_rr_model",
-    "model_ev",
-    "decision_score",
-    "bucket_ev",
-    "cluster_score",
-    "size_scale",
-    "score",
-    "rank_score",
-    "direction",
-    "regime_trend",
-    "regime_range",
-    "regime_mixed",
-    "gate_passed",
-    "win_prob",
+    "regime",
     "estimated_rr",
-    "expected_value"
+    "win_prob"
   ],
-  "trained_samples": 1046,
-  "baseline_win_rate": 0.5917782026768642,
-  "avg_pnl_r": 0.06439942638623326,
-  "avg_ev": 0.17723330305927343,
-  "model_type": "random_forest",
-  "features_used": "engineered_v2"
+  "train_samples": 2092,
+  "train_date": "2026-08-28 14:19:16",
+  "baseline_win_rate": 0.5611854684512428,
+  "model_type": "lightgbm_auto_trained"
 }

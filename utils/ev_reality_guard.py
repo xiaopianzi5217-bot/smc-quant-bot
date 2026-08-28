@@ -45,32 +45,133 @@ class EVRealityGuard:
         self.signal_gate = True           # 是否启用信号门控
     
     def _load_models(self):
-        """加载训练好的模型"""
+        """加载训练好的模型，如果模型文件不存在则自动训练"""
         model_dir = self.model_dir
         profit_path = os.path.join(model_dir, "ev_profit_model.pkl")
         ev_path = os.path.join(model_dir, "ev_value_model.pkl")
         meta_path = os.path.join(model_dir, "ev_model_metadata.json")
         
-        try:
-            if os.path.exists(profit_path):
+        # 模型文件都存在 - 直接加载
+        if os.path.exists(profit_path) and os.path.exists(ev_path) and os.path.exists(meta_path):
+            try:
                 self.profit_model = joblib.load(profit_path)
-                slog.info(f"[EVRealityGuard] 盈利分类器已加载")
-            else:
-                slog.warning(f"[EVRealityGuard] 盈利模型不存在: {profit_path}")
-            
-            if os.path.exists(ev_path):
                 self.ev_model = joblib.load(ev_path)
-                slog.info(f"[EVRealityGuard] EV回归器已加载")
-            else:
-                slog.warning(f"[EVRealityGuard] EV模型不存在: {ev_path}")
-            
-            if os.path.exists(meta_path):
                 with open(meta_path, "r") as f:
                     self.metadata = json.load(f)
                 self.feature_cols = self.metadata.get("feature_cols", [])
-                slog.info(f"[EVRealityGuard] 元数据已加载, 特征列数: {len(self.feature_cols)}")
+                slog.info(f"[EVRealityGuard] 模型已加载: {len(self.feature_cols)} 特征")
+                return
+            except Exception as e:
+                slog.error(f"[EVRealityGuard] 加载模型失败: {e}，尝试自动训练")
+        else:
+            slog.info(f"[EVRealityGuard] 模型文件不存在，尝试自动训练...")
+        
+        # 尝试自动训练
+        try:
+            import pandas as pd
+            import lightgbm as lgb
+            from sklearn.model_selection import train_test_split
+            
+            # 训练数据源 - 优先使用 ml/training_data (确保被推送到HF)
+            # 备选路径: 本地 data/ 目录 (在.gitignore中但本地可用)
+            data_files = []
+            for cand in [
+                "ml/training_data/backtest_v56_5_stable.csv",
+                "ml/training_data/backtest_v56_5.csv",
+                "ml/training_data/backtest_v56_production.csv",
+                "data/backtest_v56_5_stable.csv",
+                "data/backtest_v56_5.csv",
+                "data/backtest_v56_production.csv",
+            ]:
+                if os.path.exists(cand):
+                    data_files.append(cand)
+            
+            feature_cols = [
+                "score", "rsi", "trend_strength", "vol_z", "body_pct",
+                "hour", "dow", "regime", "estimated_rr", "win_prob",
+            ]
+            
+            frames = []
+            for fp in data_files:
+                if os.path.exists(fp):
+                    df = pd.read_csv(fp)
+                    if "pnl_r" in df.columns:
+                        for col in feature_cols:
+                            if col not in df.columns:
+                                df[col] = 0
+                        frames.append(df)
+                        slog.info(f"  加载 {fp}: {len(df)} 条")
+            
+            if not frames:
+                slog.error("[EVRealityGuard] 无可用训练数据")
+                return
+            
+            df = pd.concat(frames, ignore_index=True)
+            df = df.dropna(subset=["pnl_r"])
+            
+            # 特征编码
+            X = df[feature_cols].copy()
+            for col in X.columns:
+                if X[col].dtype == "object" or X[col].dtype == "category":
+                    unique_vals = X[col].unique()
+                    val_to_int = {v: i for i, v in enumerate(sorted(unique_vals, key=str))}
+                    X[col] = X[col].map(val_to_int).fillna(0).astype(int)
+                else:
+                    X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0).astype(float)
+            
+            y_binary = (df["pnl_r"] > 0.2).astype(int)
+            y_value = df["pnl_r"].clip(-3, 3)
+            
+            # 训练参数
+            params = {
+                "num_leaves": 8,
+                "max_depth": 3,
+                "learning_rate": 0.05,
+                "n_estimators": 200,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 10,
+                "random_state": 42,
+                "verbosity": -1,
+            }
+            
+            # 训练分类器
+            clf_params = dict(params)
+            clf_params["objective"] = "binary"
+            clf_params["metric"] = "auc"
+            self.profit_model = lgb.LGBMClassifier(**clf_params)
+            self.profit_model.fit(X, y_binary)
+            
+            # 训练回归器
+            reg_params = dict(params)
+            reg_params["objective"] = "regression"
+            reg_params["metric"] = "rmse"
+            self.ev_model = lgb.LGBMRegressor(**reg_params)
+            self.ev_model.fit(X, y_value)
+            
+            # 保存元数据
+            self.feature_cols = feature_cols
+            self.metadata = {
+                "feature_cols": feature_cols,
+                "train_samples": int(len(df)),
+                "train_date": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "baseline_win_rate": float(y_binary.mean()),
+                "model_type": "lightgbm_auto_trained",
+            }
+            
+            # 保存模型文件（供下次直接加载）
+            os.makedirs(model_dir, exist_ok=True)
+            joblib.dump(self.profit_model, profit_path)
+            joblib.dump(self.ev_model, ev_path)
+            with open(meta_path, "w") as f:
+                json.dump(self.metadata, f, indent=2)
+            
+            slog.info(f"[EVRealityGuard] 模型自动训练完成: {len(df)} 样本")
+            
         except Exception as e:
-            slog.error(f"[EVRealityGuard] 加载模型失败: {e}")
+            slog.error(f"[EVRealityGuard] 自动训练失败: {e}")
+            import traceback
+            slog.error(traceback.format_exc())
     
     def _build_feature_vector(self, ctx: dict) -> np.ndarray:
         """从上下文构建特征向量

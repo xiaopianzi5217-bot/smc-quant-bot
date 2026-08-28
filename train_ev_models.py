@@ -80,6 +80,16 @@ def preprocess(df: pd.DataFrame) -> tuple:
     # 输入特征
     X = df[FEATURE_COLS].copy()
 
+    # 处理类别特征：将 object/str 列转换为数值编码
+    for col in X.columns:
+        if X[col].dtype == "object" or X[col].dtype == "category":
+            print(f"  将 '{col}' 转为类别编码 (当前 {X[col].nunique()} 类)")
+            unique_vals = X[col].unique()
+            val_to_int = {v: i for i, v in enumerate(sorted(unique_vals, key=str))}
+            X[col] = X[col].map(val_to_int).fillna(0).astype(int)
+        else:
+            X[col] = pd.to_numeric(X[col], errors="coerce").fillna(0).astype(float)
+
     # 目标: 二元盈利 (pnl_r > 0.2) + 连续 EV (pnl_r)
     y_binary = (df[TARGET_COL] > WIN_THRESHOLD).astype(int)
     y_value = df[TARGET_COL].clip(-3, 3)  # 修剪异常值
@@ -316,11 +326,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-现在让我运行训练脚本来生成模型：
-
-```tool
-TOOL_NAME: run_terminal_command
-BEGIN_ARG: command
-"python train_ev_models.py"
