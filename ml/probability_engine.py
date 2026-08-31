@@ -97,8 +97,8 @@ class ProbabilityEngine:
             logger.info(f"正负样本不平衡: pos={n_pos} neg={n_neg}")
             return False
 
-        # 准备特征列
-        feature_cols = [c for c in df.columns if c != "label"]
+        # 准备特征列（排除 label 和 pnl_r，pnl_r 仅用于 EV 校准）
+        feature_cols = [c for c in df.columns if c not in ["label", "pnl_r"]]
         X = df[feature_cols].copy()
         y = df["label"].copy()
 
@@ -112,7 +112,7 @@ class ProbabilityEngine:
             # LightGBM 参数（针对小样本调优）
             params = {
                 "objective": "binary",
-                "metric": "auc",
+                "metric": "binary_logloss",  # 用 logloss 而非 auc（更稳定）
                 "boosting_type": "gbdt",
                 "num_leaves": min(15, max(3, n_samples // 20)),
                 "learning_rate": 0.05,
@@ -127,11 +127,27 @@ class ProbabilityEngine:
                 "min_gain_to_split": 0.01,
             }
 
-            # 训练
-            train_data = lgb.Dataset(X, label=y, feature_name=feature_cols)
+            # 分割训练/验证集（小样本时用 20% 做验证，样本 <20 时直接用训练集）
+            X_train, X_val, y_train, y_val = self._train_val_split(
+                X, y, test_size=0.2
+            )
+
+            # 创建数据集
+            train_data = lgb.Dataset(
+                X_train, label=y_train,
+                feature_name=feature_cols,
+            )
+            val_data = lgb.Dataset(
+                X_val, label=y_val,
+                reference=train_data,
+            )
+
+            # 训练（带验证集实现 early stopping）
             self._model = lgb.train(
                 params,
                 train_data,
+                valid_sets=[val_data],
+                valid_names=["valid"],
                 num_boost_round=200,
                 callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)],
             )
@@ -144,21 +160,51 @@ class ProbabilityEngine:
             # 计算 Feature Importance
             self._calc_importance()
 
-            # 计算 EV 校准
+            # 计算 EV 校准（用全部数据校准）
             self._calibrate_ev(df)
 
             # 保存模型
             self._save_model()
 
-            logger.info(f"LightGBM 训练完成: {n_samples} 样本, "
-                        f"auc={self._model.best_score['valid_0']['auc']:.4f}"
-                        if self._model.best_score else "")
+            # 日志：训练结果
+            best_iter = getattr(self._model, "best_iteration", "N/A")
+            logger.info(f"LightGBM 训练完成: {n_samples} 样本, best_iteration={best_iter}")
+
+            # 验证集上的准确率
+            try:
+                val_pred = self._model.predict(
+                    X_val, num_iteration=self._model.best_iteration
+                )
+                val_acc = float(((val_pred >= 0.5) == y_val).mean())
+                logger.info(f"  验证集准确率: {val_acc:.3f} ({len(X_val)} 样本)")
+            except Exception:
+                pass
 
             return True
 
         except Exception as e:
             logger.error(f"LightGBM 训练失败: {e}")
             return False
+
+    def _train_val_split(self, X: pd.DataFrame, y: pd.Series,
+                         test_size: float = 0.2):
+        """训练/验证分割（处理小样本特殊情况）。
+
+        样本 < 20 时：全部用于训练，验证集 = 训练集（LightGBM 警告但仍可训练）
+        样本 >= 20 时：按比例切分
+        """
+        n = len(X)
+        if n < 20:
+            # 样本太少，全部用于训练
+            return X, X, y, y
+
+        n_val = max(2, int(n * test_size))
+        n_train = n - n_val
+
+        X_train, X_val = X.iloc[:n_train], X.iloc[n_train:]
+        y_train, y_val = y.iloc[:n_train], y.iloc[n_train:]
+
+        return X_train, X_val, y_train, y_val
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """推理：返回 P(win) 概率数组。

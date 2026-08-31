@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Hugging Face 自动交易模块
 清理了二进制乱码的完整恢复版

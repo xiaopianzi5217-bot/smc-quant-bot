@@ -89,7 +89,7 @@ class WalkForwardValidator:
 
         df = df.sort_values("open_time").reset_index(drop=True)
 
-        feature_cols = [c for c in df.columns if c != "label"]
+        feature_cols = [c for c in df.columns if c not in ["label", "pnl_r"]]
         total = len(df)
 
         if total < self.window_size + 10:
@@ -121,7 +121,7 @@ class WalkForwardValidator:
             try:
                 params = {
                     "objective": "binary",
-                    "metric": "auc",
+                    "metric": "binary_logloss",
                     "boosting_type": "gbdt",
                     "num_leaves": min(15, max(3, len(train_df) // 20)),
                     "learning_rate": 0.05,
@@ -131,14 +131,24 @@ class WalkForwardValidator:
                     "verbose": -1,
                     "num_threads": 1,
                     "min_data_in_leaf": max(3, len(train_df) // 30),
+                    "lambda_l1": 0.1,
+                    "lambda_l2": 0.1,
+                    "min_gain_to_split": 0.01,
                 }
 
+                # 训练/验证数据集
                 train_data = lgb.Dataset(
                     X_train, label=y_train, feature_name=feature_cols
                 )
+                val_data = lgb.Dataset(
+                    X_val, label=y_val, reference=train_data
+                )
+
                 model = lgb.train(
                     params,
                     train_data,
+                    valid_sets=[val_data],
+                    valid_names=["valid"],
                     num_boost_round=200,
                     callbacks=[lgb.early_stopping(10), lgb.log_evaluation(0)],
                 )

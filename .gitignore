@@ -28,3 +28,21 @@ data/*.db
 *.pkl
 models/*.pkl
 models/*.joblib
+
+# Runtime-generated model metadata
+models/ev_calibration.json
+models/feature_importance.json
+
+# Temp debug scripts (not for production)
+check_hf_db.py
+check_hf_db_full.py
+check_res_db.py
+fix_build_script.py
+fix_research_indent2.py
+fix_research_silent_indent.py
+temp_snippets/
+temp_test_v565_min_score.py
+test_outcome_thread_fix.py
+data/quick_view_backtests.py
+scripts/git_push_fix.py
+scripts/inspect_v6_db.py
