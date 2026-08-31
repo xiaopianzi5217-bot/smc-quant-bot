@@ -172,6 +172,9 @@ _V56_ENGINE = V56_5_Engine(V565Config(
 # ---------- EVRealityGuard / ML EV Guard ----------
 _EV_REALITY_GUARD = EVRealityGuard(model_dir="models")
 
+# ---------- V60.5 Decision Fusion Layer 单例 ----------
+_DECISION_FUSION = get_decision_fusion()
+
 # 【20260916】数据收集模式：注释掉回测 bucket_ev 加载
 # 原因：回测 HIGH 桶(score>=80) EV(+0.65~0.73) 与实盘 score(30~55) 严重脱节，
 # 加载会引入不匹配的加权偏差。数据收集阶段保持纯 model_ev 模式更干净。
