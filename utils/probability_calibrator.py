@@ -79,8 +79,13 @@ class ProbabilityEngine:
         total = wins + losses
 
         if total < 30:
-            # Fallback logistic：58 分对应 ~50%
-            return round(1 / (1 + math.exp(-(score - 58) / 13)), 4)
+            # Fallback: logistic 先验 + 实际样本 Beta 修正的线性混合
+            # 样本数为 0 时 = 100% logistic（保持原有冷启动行为）
+            # 样本数 = 30 时 = 100% Beta（与 total>=30 的 Beta 平滑无缝衔接）
+            logistic_p = 1 / (1 + math.exp(-(score - 58) / 13))
+            beta_p = (wins + 5) / (total + 10)
+            mix_ratio = total / 30.0  # 0→0%, 30→100%
+            return round(mix_ratio * beta_p + (1 - mix_ratio) * logistic_p, 4)
 
         # Beta 平滑（先验贝叶斯）
         return round((wins + 5) / (total + 10), 4)
@@ -114,8 +119,37 @@ class ProbabilityEngine:
         n = data.get("wins", 0) + data.get("losses", 0)
         confidence = n / (n + 100)  # 10样本->9%, 500->83%, 5000->98%
 
+        # ════════════════════════════════════════════════════════
+        # 【方案四】贝叶斯收缩（Bayesian Shrinkage）
+        # 目的: 在小样本时，将极端 EV 收缩回无偏先验(0)，避免噪声污染决策
+        #
+        # 公式: ev_final = shrinkage * ev_raw + (1 - shrinkage) * prior_ev
+        #   shrinkage = n / (n + prior_strength)
+        #   prior_strength = 150 (BTC/ETH 高频采样建议值)
+        #
+        # 逻辑:
+        #   n=0   -> shrinkage=0    -> ev_final = prior_ev (=0)
+        #   n=50  -> shrinkage=0.25 -> ev_final = 25% 统计 + 75% 先验
+        #   n=150 -> shrinkage=0.50 -> ev_final = 50% 统计 + 50% 先验
+        #   n=600 -> shrinkage=0.80 -> ev_final = 80% 统计 + 20% 先验
+        #   n→∞   -> shrinkage→1    -> ev_final → 完全信任统计值
+        # ════════════════════════════════════════════════════════
+        prior_strength = 150.0  # 需要 150 笔同桶结算才让统计占据 50% 权重
+        prior_ev = 0.0          # 无偏先验：无信息时的合理默认 EV
+        shrinkage = n / (n + prior_strength) if n > 0 else 0.0
+        ev_shrunk = shrinkage * ev + (1 - shrinkage) * prior_ev
+
+        # 记录收缩前后值（便于日志调试）
+        raw_ev = ev
+        ev = round(ev_shrunk, 4)
+
         return {
             "probability": round(p, 4),
             "ev": round(ev, 4),
+            # sample_conf 即为 confidence (n/(n+100))
             "confidence": round(confidence, 4),
+            # 新增调试字段
+            "raw_ev": round(raw_ev, 4),      # 收缩前 EV
+            "shrinkage": round(shrinkage, 4), # 收缩系数
+            "prior_strength": prior_strength,
         }

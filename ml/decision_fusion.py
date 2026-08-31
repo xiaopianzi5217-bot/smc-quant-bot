@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -40,6 +41,39 @@ _WEIGHT_LIMITS = {
     "ml_engine": (0.20, 0.50),
     "ev_guard": (0.05, 0.25),
     "feedback": (0.05, 0.25),
+}
+
+# ════════════════════════════════════════════════════════════
+# 方案四增强版：Sigmoid 激活参数
+# ════════════════════════════════════════════════════════════
+# Sigmoid 形式: act(x) = 1 / (1 + exp(-k * (x - x0)))
+#   - x=0 时: act ≈ 1/(1+exp(k*x0))  → 极小值（趋近 0）
+#   - x≥x0 时: act 快速爬升
+#   - x→1 时: act ≈ 1（饱和）
+# floor: 置信度为 0 时保留的最小激活值（防完全失效，但极小）
+_SIGMOID_ACT_PARAMS = {
+    # calibrator: 平滑参与度上限 0.62，置信度门槛 0.35
+    #   - conf=0 → floor=0.01 (接近零)
+    #   - conf=1 → cap=0.62 (最大参与度)
+    "calibrator": {"k": 8.0, "x0": 0.35, "floor": 0.01, "cap": 0.62},
+    # ml_engine: 高 floor 保证 ML 即使不活跃也有基础权重
+    "ml_engine":   {"k": 6.0, "x0": 0.25, "floor": 0.40, "cap": 1.0},
+    # ev_guard: quality 通过 sigmoid 门槛后激活
+    "ev_guard":    {"k": 10.0, "x0": 0.30, "floor": 0.20, "cap": 1.0},
+    # feedback: score=0 时保留 30% 基础参与
+    "feedback":    {"k": 8.0, "x0": 0.25, "floor": 0.30, "cap": 1.0},
+}
+
+# ML 微调参数（方案四增强版）
+_ML_TUNING = {
+    "ml_inactive_discount": 0.3,       # ML 不活跃时激活因子×0.3
+    "ml_level_scale": 0.3,             # ml_active=False 时 ml_level 额外缩放
+    "guard_unknown_scale": 0.2,        # guard_quality="unknown/low" 时权重缩放
+    "guard_medium_max_w": 0.35,        # guard="medium" 时权重上限（归一化前）
+    "guard_unknown_max_w": 0.15,       # guard="unknown" 时权重上限（归一化前）
+    "guard_global_max_w": 0.30,        # guard 全局最大权重（归一化前）
+    "calib_ml_feed_ratio": 0.0,        # ML 释放权重流给 calibrator 的比例 (0=防止calib垄断)
+    "fb_ml_feed_ratio": 1.0,           # ML 释放权重流给 feedback 的比例 (1=全部给feedback)
 }
 
 
@@ -265,37 +299,147 @@ class DecisionFusionLayer:
     # ════════════════════════════════════════════════════════
 
     def _dynamic_weights(self, inp: FusionInput) -> Dict[str, float]:
-        """动态调整权重
+        """基于置信度的动态权重调整（方案四增强版：Sigmoid 激活 + ML 微调）
 
-        规则:
-          - ML 降级时降低 ml_engine 权重
-          - EVRealityGuard quality=low 时降低 guard 权重
-          - FeedbackLoop confidence 高时提升 feedback 权重
+        核心思想：各来源的权重 = 基础权重 × Sigmoid 置信度激活因子
+          - 置信度 = 0 时，激活值据逼近 0（受 floor 保护，极小）
+            校准器权重被压缩至 <3%（冷启动安全模式）
+          - 置信度 ∈ (0.3~0.5) 门槛后，激活值快速爬升并趋于饱和
+          - ML 不活跃时，其权重按比例流给 calibrator / feedback
+
+        流程:
+          1. Sigmoid 激活: act(x) = 1 / (1 + exp(-k*(x - x0)))
+          2. 计算各源 raw_weight = base_weight * act
+          3. ML 微调: ml_active=False → ml_level *= 0.3, 释放权重按 7:3 分给 calib/fb
+          4. Guard 质量微调: quality=unknown → guard_w *= 0.2
+          5. 归一化确保和 = 1
         """
-        weights = dict(self._weights)
+        # 从基础权重开始（保证 update_weights 的调整仍生效）
+        base = dict(self._weights)
 
-        # ML fallback: 降低 ML 权重
+        # ── 1. Sigmoid 置信度激活因子 ──
+        def _sigmoid_act(conf: float, params: Dict[str, float]) -> float:
+            """Sigmoid 激活: conf=0 → floor, conf=1 → cap (默认 1.0)"""
+            k = params["k"]
+            x0 = params["x0"]
+            floor = params["floor"]
+            cap = params.get("cap", 1.0)  # 最大参与度上限
+            # 标准 Sigmoid
+            sig = 1.0 / (1.0 + math.exp(-k * (float(conf) - x0)))
+            # 归一化: 确保 conf=0 时 = floor, conf=1 时 ≈ cap
+            sig_0 = 1.0 / (1.0 + math.exp(k * x0))
+            sig_1 = 1.0 / (1.0 + math.exp(-k * (1.0 - x0)))
+            # 重映射到 [floor, cap]
+            if sig_1 - sig_0 <= 0:
+                return float(floor)
+            act = floor + (cap - floor) * (sig - sig_0) / (sig_1 - sig_0)
+            return max(floor, min(cap, act))
+
+        # calibrator 激活: 基于 calib_conf
+        calib_act = _sigmoid_act(inp.calib_conf, _SIGMOID_ACT_PARAMS["calibrator"])
+
+        # ml_engine 激活: 基于 ml_conf（不在激活阶段乘 ml_inactive_discount）
+        #       真正折扣在 Step 3 统一处理，避免双重折扣
+        ml_act = _sigmoid_act(inp.ml_conf, _SIGMOID_ACT_PARAMS["ml_engine"])
+
+        # ev_guard 激活: 基于 guard_quality
+        guard_quality_map = {
+            "high": 1.0,
+            "medium": 0.65,
+            "low": 0.2,
+            "unknown": 0.1,
+        }
+        guard_qual_act = guard_quality_map.get(str(inp.guard_quality).strip().lower(), 0.2)
+        guard_act = _sigmoid_act(guard_qual_act, _SIGMOID_ACT_PARAMS["ev_guard"])
+
+        # feedback 激活: 基于 feedback_score (0-100 → 0-1 归一化)
+        fb_score_norm = max(0.0, min(1.0, inp.feedback_score / 100.0))
+        fb_act = _sigmoid_act(fb_score_norm, _SIGMOID_ACT_PARAMS["feedback"])
+
+        # ── 2. 计算各源原始权重 (base_weight × activation) ──
+        calib_w = base["calibrator"] * calib_act
+        ml_w_full = base["ml_engine"] * ml_act  # ML 全量激活权重（未打折）
+        guard_w = base["ev_guard"] * guard_act
+        fb_w = base["feedback"] * fb_act
+
+        # ── 3. ML 微调: ML 不活跃时，只保留 ml_inactive_discount 比例的权重
+        #    其余 (1-ratio) 释放。释放策略受 calibrator 置信度制约：
+        #    若 calib_conf 低于激活门槛(x0=0.30)，ML 释放权重全部给 feedback
+        #    若 calib_conf 已过门槛，按 7:3 分给 calibrator/feedback ──
         if not inp.ml_active:
-            weights["ml_engine"] *= 0.5
-            weights["calibrator"] += self._weights["ml_engine"] * 0.5
+            ml_w = ml_w_full * _ML_TUNING["ml_inactive_discount"]      # ML 保留 30%
+            ml_release = ml_w_full * (1.0 - _ML_TUNING["ml_inactive_discount"])  # 释放 70%
+            # 只有当 calibrator 置信度已超过激活门槛时，才接受 ML 释放的权重
+            calib_threshold = _SIGMOID_ACT_PARAMS["calibrator"]["x0"]  # 0.30
+            if inp.calib_conf >= calib_threshold:
+                calib_w += ml_release * _ML_TUNING["calib_ml_feed_ratio"]
+                fb_w += ml_release * _ML_TUNING["fb_ml_feed_ratio"]
+            else:
+                # calibrator 置信度过低，ML 释放权重全部给 feedback
+                fb_w += ml_release
+        else:
+            ml_w = ml_w_full
 
-        # EVRealityGuard quality 低时调整
-        if inp.guard_quality == "low":
-            weights["ev_guard"] *= 0.5
-            # 将权重转移到 calibrator
-            weights["calibrator"] += self._weights["ev_guard"] * 0.5
+        # ── 4. Guard 质量微调: 限制低质量 guard 的最大权重 ──
+        guard_quality_str = str(inp.guard_quality).strip().lower()
+        if guard_quality_str in ("unknown", "low"):
+            guard_w *= _ML_TUNING["guard_unknown_scale"]
+            guard_w = min(guard_w, _ML_TUNING["guard_unknown_max_w"])
+        elif guard_quality_str == "medium":
+            guard_w = min(guard_w, _ML_TUNING["guard_medium_max_w"])
+        # Guard 全局上限（归一化前）
+        guard_w = min(guard_w, _ML_TUNING["guard_global_max_w"])
 
-        # FeedbackLoop confidence 高时提升 (通过 feedback_score)
-        if inp.feedback_score > 60:
-            weights["feedback"] = min(
-                _WEIGHT_LIMITS["feedback"][1],
-                weights["feedback"] * 1.3
+        # ── 4b. 校准器满置信时 ML 让出权重（置信度导向） ──
+        # 当 calibrator 置信度极高 (≥0.7) 且 ML 活跃时，
+        # ML 主动释放一部分权重给 calibrator，确保满置信校准器主导决策。
+        # 0.7 → 0% 让出, 1.0 → 35% 让出（线性插值）
+        if inp.ml_active and inp.calib_conf >= 0.7:
+            calib_steer_ratio = min(0.35, (inp.calib_conf - 0.7) / 0.3 * 0.35)
+            steer_amount = ml_w * calib_steer_ratio
+            calib_w += steer_amount
+            ml_w -= steer_amount
+            logger.debug(
+                f"DecisionFusion: calib_conf={inp.calib_conf:.2f} >= 0.7, "
+                f"ML 让出权重 steer_ratio={calib_steer_ratio:.3f}, amount={steer_amount:.4f}"
             )
 
-        # 归一化确保权重和 = 1
+        # ── 5. 归一化确保和 = 1 ──
+        weights = {
+            "calibrator": calib_w,
+            "ml_engine": ml_w,
+            "ev_guard": guard_w,
+            "feedback": fb_w,
+        }
         total = sum(weights.values())
-        if total > 0:
-            weights = {k: v / total for k, v in weights.items()}
+        if total <= 0:
+            return dict(self._weights)
+        weights = {k: v / total for k, v in weights.items()}
+
+        # ── 6. 归一化后 Guard 占比钳制（防止低置信场景下 guard 独裁） ──
+        # 即使归一化前已限制，当其他源置信度极低时 guard 仍可能占主导。
+        # 此处在归一化后再次兜底，将 guard 超过阈值的部分按比例分给其他源。
+        guard_quality_str = str(inp.guard_quality).strip().lower()
+        guard_max_ratio = 0.70  # guard 最大允许占比（高置信 quality 时）
+        if guard_quality_str in ("unknown", "low"):
+            guard_max_ratio = 0.55
+        elif guard_quality_str == "medium":
+            guard_max_ratio = 0.60
+
+        if weights["ev_guard"] > guard_max_ratio:
+            excess = weights["ev_guard"] - guard_max_ratio
+            weights["ev_guard"] = guard_max_ratio
+            # 将 excess 按比例重分配给其他源
+            others_sum = sum(v for k, v in weights.items() if k != "ev_guard")
+            if others_sum > 0:
+                for k in weights:
+                    if k != "ev_guard":
+                        weights[k] += excess * weights[k] / others_sum
+            else:
+                # 极端情况：其他源全为 0，均匀分配
+                for k in weights:
+                    if k != "ev_guard":
+                        weights[k] = excess / 3.0
 
         return weights
 
