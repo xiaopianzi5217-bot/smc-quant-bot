@@ -86,8 +86,12 @@ from utils.daily_panel import DailyPanel, get_daily_panel
 from utils.event_bus import emit
 import utils.v6_event_hooks
 
+
+
 # ---------- EVRealityGuard (ML EV Guard) ----------
 from utils.ev_reality_guard import EVRealityGuard
+# ---------- V60.5 标准融合层 (Decision Fusion Layer) ----------
+from ml.decision_fusion import DecisionFusionLayer, FusionInput, get_decision_fusion
 
 # ---------- V58.6 统一事件日志与结果回填 ----------
 from analytics.event_schema import event_logger
@@ -163,8 +167,6 @@ _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=45.0,
     allowed_hours=(0, 1, 2, 3, 4, 6, 7, 16, 17, 18, 19, 21, 23),
     # 【20260905】实盘 score 量级为 30~55（trade_journal 92 笔均值 40.8、最高 54.3），
-    # 45 分 = 实盘优质区（约前 25%）；50 分 = Tier2 强信号阈值（实盘 top 10%）。
-    allow_tier2_if_strong=True,
     strong_tier2_score=50.0,
 ))
 # ---------- EVRealityGuard / ML EV Guard ----------
@@ -1186,9 +1188,78 @@ async def scan_and_decide(symbol: str) -> dict | None:
         features=_fb_features,
         score=score,
         raw_feature_scores=_fb_raw_scores,
-        base_ev=_blended_ev,
+                base_ev=_blended_ev,
     )
     slog.info(f"[{symbol}] FeedbackLoop: score={score:.1f} -> weighted={_fb_result['weighted_score']:.1f}, confidence={_fb_result['confidence']:.3f}, ev={_fb_result['ev']:.4f}, reject={_fb_result['should_reject']} (threshold={_fb_result['reject_threshold']})")
+
+    # ===== 【V60.5 标准融合层】Decision Fusion Layer =====
+    # 将 EVRealityGuard + ProbabilityCalibrator + ML Decision Engine + FeedbackLoop
+    # 统一融合为最终置信度，替代旧有的单一 EVRealityGuard soft penalty
+    _fusion_input = FusionInput(
+        calib_prob=_calibrated_prob,
+        calib_conf=_calibrated_conf,
+        ml_prob=_ml_prob,
+        ml_conf=_ml_conf if _ml_conf is not None else 0.0,
+        ml_active=bool(_ml_active),
+        guard_prob=_guard_win_prob,
+        guard_ml_ev=_guard_ml_ev,
+        guard_quality=_guard_quality,
+        guard_blocked=_guard_blocked,
+        guard_penalty=_guard_penalty,
+        feedback_score=float(_fb_result.get("weighted_score", score)),
+        feedback_ev=float(_fb_result["ev"]),
+        feedback_reject=bool(_fb_result.get("should_reject", False)),
+        v56_score=score,
+        blended_ev=_blended_ev,
+        direction=direction,
+    )
+    try:
+        _fusion_result = _DECISION_FUSION.fuse(_fusion_input)
+        # 硬拦截：融合层判定 BLOCK
+        if _fusion_result.hard_blocked:
+            slog.warning(
+                f"[{symbol}] DecisionFusion BLOCK: reason={_fusion_result.block_reason} "
+                f"prob={_fusion_result.fused_prob:.3f} ev={_fusion_result.fused_ev:.4f}"
+            )
+            get_reject_audit().log(
+                symbol, _fusion_result.block_reason,
+                score=score, ev=ev, regime=_regime_name,
+                direction=direction or "",
+                setup_type=str(best.get("setup_type", "")),
+                extra={"fusion": _fusion_result.details},
+            )
+            return None
+        # 记录融合结果（软调整）
+        _fused_prob = _fusion_result.fused_prob
+        _fused_ev = _fusion_result.fused_ev
+        _fused_conf = _fusion_result.fused_conf
+        _use_fused = _fusion_result.use_fused_prob
+        if _use_fused and _fused_prob > 0:
+            # 用融合概率替换校准概率（下游 EV / 快照使用）
+            _calibrated_prob = round(float(_fused_prob), 4)
+            slog.info(
+                f"[{symbol}] DecisionFusion: fused_prob={_fused_prob:.3f} conf={_fused_conf:.3f} "
+                f"ev={_fused_ev:.4f} 源权重={_fusion_result.source_weights} "
+                f"贡献={_fusion_result.source_contributions}"
+            )
+        else:
+            slog.info(
+                f"[{symbol}] DecisionFusion: 保持原分量 (max_diff={_fusion_result.details.get('max_diff', 0):.3f}, "
+                f"fused_conf={_fused_conf:.3f}) p={_calibrated_prob:.3f}"
+            )
+        # 记录融合详情供返回结构使用
+        _fusion_details = _fusion_result.details
+        _fusion_weights = _fusion_result.source_weights
+        _fusion_contrib = _fusion_result.source_contributions
+    except Exception as _fusion_err:
+        slog.warning(f"[{symbol}] DecisionFusion error: {_fusion_err}")
+        _fused_prob = _calibrated_prob
+        _fused_ev = _blended_ev
+        _fused_conf = 0.0
+        _use_fused = False
+        _fusion_details = {}
+        _fusion_weights = {}
+        _fusion_contrib = {}
 
         # ===== 【V21 FeatureLearningEngine】特征权重调整 =====
     _fl_weighted_score = get_feature_learner().get_weighted_score(_fb_raw_scores)
@@ -1299,13 +1370,23 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "_feedback_raw_scores": _fb_raw_scores,  # 【闭环】原始特征分数
         "_feedback_result": _fb_result,  # 【闭环】全文决策统计
         "_feedback_ev": _fb_result["ev"],  # 【闭环】FeedbackLoop EV
-        "_feature_learning_score": _fl_final_score,  # 【V21】FeatureLearning 调整后分数
+                "_feature_learning_score": _fl_final_score,  # 【V21】FeatureLearning 调整后分数
         "_ev_guard": {
             "ml_win_prob": _guard_win_prob,
             "ml_ev": _guard_ml_ev,
             "quality": _guard_quality,
             "blocked": _guard_blocked,
             "penalty": _guard_penalty,
+        },
+        # ===== V60.5 标准融合层 =====
+        "_fusion": {
+            "fused_prob": _fused_prob,
+            "fused_ev": _fused_ev,
+            "fused_conf": _fused_conf,
+            "use_fused_prob": _use_fused,
+            "source_weights": _fusion_weights,
+            "source_contributions": _fusion_contrib,
+            "detail": _fusion_details,
         },
         #"confidence": _fb_result["confidence"],  # 【闭环】置信度
         "confidence": _calibrated_prob,  # 【闭环】校准后的信心分数
