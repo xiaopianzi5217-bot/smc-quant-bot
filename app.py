@@ -800,19 +800,22 @@ def _start_hf_auto_trader():
             from v6_data_engine import _get_db_path, request_push_database_to_hub
 
             _now_ts = int(_time_mod.time())
-            _cutoff_ts = _now_ts - 72 * 3600  # 72 小时前仍未平仓视为悬空单
+            _cutoff_ts = _now_ts - 72 * 3600  # 72 小时前仍未平仓视为悬空单（数据库 timestamp 为秒级）
 
             _cleanup_conn = sqlite3.connect(str(_get_db_path()))
             _cleanup_cur = _cleanup_conn.cursor()
 
             # 动态清洗：所有 exit_reason='OPEN' 且 timestamp 超过 72h 的记录
+            # 同时补充 exit_timestamp（当前时间）和 pnl_r=0.0，避免后续训练读取空值
             _cleanup_cur.execute(
                 """
                 UPDATE trade_snapshots 
-                SET exit_reason = 'MANUAL_CLEANUP_DEPRECATED' 
+                SET exit_reason = 'MANUAL_CLEANUP_DEPRECATED',
+                    exit_timestamp = ?,
+                    pnl_r = 0.0
                 WHERE exit_reason = 'OPEN' AND timestamp < ?;
                 """,
-                (_cutoff_ts,)
+                (_now_ts, _cutoff_ts)
             )
             _updated_rows = _cleanup_cur.rowcount
             _cleanup_conn.commit()
