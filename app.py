@@ -793,30 +793,44 @@ def _start_hf_auto_trader():
         except Exception as _db_e:
             slog.error(f"[V6 DataEngine] 数据库初始化异常（非致命）: {_db_e}")
 
-        # == [cleanup] 清洗 8.26 修复前的历史悬空单 ==
+        # == [cleanup] 动态清洗所有历史悬空单（OPEN 状态且超过 72 小时）==
         try:
             import sqlite3
-            from v6_data_engine import _get_db_path
-            legacy_ids = ("V6_BTCUSDT_1786873507", "V6_ETHUSDT_1786868110")
+            import time as _time_mod
+            from v6_data_engine import _get_db_path, request_push_database_to_hub
+
+            _now_ts = int(_time_mod.time())
+            _cutoff_ts = _now_ts - 72 * 3600  # 72 小时前仍未平仓视为悬空单
+
             _cleanup_conn = sqlite3.connect(str(_get_db_path()))
             _cleanup_cur = _cleanup_conn.cursor()
+
+            # 动态清洗：所有 exit_reason='OPEN' 且 timestamp 超过 72h 的记录
             _cleanup_cur.execute(
-                f"""
+                """
                 UPDATE trade_snapshots 
                 SET exit_reason = 'MANUAL_CLEANUP_DEPRECATED' 
-                WHERE signal_id IN {legacy_ids} AND exit_reason = 'OPEN';
-                """
+                WHERE exit_reason = 'OPEN' AND timestamp < ?;
+                """,
+                (_cutoff_ts,)
             )
             _updated_rows = _cleanup_cur.rowcount
             _cleanup_conn.commit()
             _cleanup_conn.close()
             if _updated_rows > 0:
                 print(f"[System Cleanup] 成功清洗 {_updated_rows} 笔历史悬空单！")
+                # 强制推送清理后的数据库到云端
+                try:
+                    from v6_data_engine import push_database_to_hub
+                    push_database_to_hub()
+                    print("[System Cleanup] 清理结果已推送至 HuggingFace 云端")
+                except Exception as _push_e:
+                    print(f"[System Cleanup] 推送失败（将稍后自动重试）: {_push_e}")
+                    request_push_database_to_hub()  # 由节流推送线程稍后执行
             else:
                 print("[System Cleanup] 无需清洗或目标单子已被处理。")
         except Exception as _cleanup_e:
             print(f"[System Cleanup] 清洗数据库时出错: {_cleanup_e}")
-
         async def _run_async_main():
             _feeder = None
             try:
