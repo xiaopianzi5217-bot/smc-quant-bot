@@ -217,7 +217,7 @@ def add_stop_hunt_detection(df: pd.DataFrame, atr_col: str = "ATRr_14", volume_w
 
 def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    【新澧炪€戜笓门用于计绠?Squeeze Momentum 以及右侧变白/缩头确认特征。    将原本写鍦?runner.py 中的逻辑下沉到特征工程层，确保实目回测逻辑严格涓€鑷淬€?    """
+    銆愭柊澧炪€戜笓闂ㄧ敤浜庤绠?Squeeze Momentum 浠ュ強鍙充晶鍙樼櫧/缂╁ご纭鐗瑰緛銆?    灏嗗師鏈啓鍦?runner.py 涓殑閫昏緫涓嬫矇鍒扮壒寰佸伐绋嬪眰锛岀‘淇濆疄鐩?鍥炴祴閫昏緫涓ユ牸涓€鑷淬€?    """
     out = df.copy()
     close = out["close"].astype(float)
     
@@ -225,12 +225,12 @@ def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
         bb_mid = close.rolling(20, min_periods=10).mean()
         out["momentum"] = close - bb_mid
         
-    # 提取当前与前涓€鏍?Bar 的绝对动閲?    curr_mom = out["momentum"].astype(float)
+    # 鎻愬彇褰撳墠涓庡墠涓€鏍?Bar 鐨勭粷瀵瑰姩閲?    curr_mom = out["momentum"].astype(float)
     prev_mom = curr_mom.shift(1).astype(float)
     
-    # 鍔ㄦ€佹敞入右侧衰竭特征变白（当前绝对动量鍊?<= 前一根Bar鐨?2%（    out["sqzmom_white"] = curr_mom.abs() <= (prev_mom.abs() * 0.92)
+    # 鍔ㄦ€佹敞鍏ュ彸渚ц“绔壒寰佸彉鐧斤紙褰撳墠缁濆鍔ㄩ噺鍊?<= 鍓嶄竴鏍笲ar鐨?2%锛?    out["sqzmom_white"] = curr_mom.abs() <= (prev_mom.abs() * 0.92)
     
-    # 绠€单的动能方向判断
+    # 绠€鍗曠殑鍔ㄨ兘鏂瑰悜鍒ゆ柇
     out["mom_bullish"] = curr_mom > 0
     out["mom_bearish"] = curr_mom < 0
     
@@ -238,7 +238,7 @@ def add_sqzmom_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_smc_features(df: pd.DataFrame) -> pd.DataFrame:
-    """主特征调度管道，实盘与回测均由此接入"""
+    """涓荤壒寰佽皟搴︾閬擄紝瀹炵洏涓庡洖娴嬪潎鐢辨鎺ュ叆"""
     out = df.copy()
     if "ATRr_14" not in out.columns:
         out = add_true_range_atr(out)
@@ -249,7 +249,7 @@ def prepare_smc_features(df: pd.DataFrame) -> pd.DataFrame:
     out = add_order_block_proxy(out)
     out = add_stop_hunt_detection(out)
     
-    # 【新澧炪€戝皢右侧变白特征妫€测正式集成到主管道中
+    # 銆愭柊澧炪€戝皢鍙充晶鍙樼櫧鐗瑰緛妫€娴嬫寮忛泦鎴愬埌涓荤閬撲腑
     out = add_sqzmom_features(out)
     
     return out

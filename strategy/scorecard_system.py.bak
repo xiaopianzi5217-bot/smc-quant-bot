@@ -2,14 +2,14 @@
 """
 Scorecard System V2
 
-把高阶判断从“硬过滤器”降级为“旁路评分审计层”。
-V2: 引入 HTF 1H 级别背离反向挡停，以及HTF+LTF 多周期背离共鎸€昏緫。
+鎶婇珮闃跺垽鏂粠鈥滅‖杩囨护鍣ㄢ€濋檷绾т负鈥滄梺璺瘎鍒?瀹¤灞傗€濄€?
+V2: 寮曞叆 HTF 1H 绾у埆鑳岀鍙嶅悜鎸″仠锛屼互鍙?HTF+LTF 澶氬懆鏈熻儗绂诲叡鎸€昏緫銆?
 
-设计目标（
-1. 第一准入只由 Base Layer 决定：SMC 结构 + SQZMOM 背离/动量确认。
-2. HTF / VWAP / DMI / Breakout / Regime 等不再一票否决，只输出分鍊笺€丒V 修正和仓位修姝ｃ€?
-3. 针对 1H HTF 强反向背离设置硬阻断 (block)，强制归零仓浣嶃€?
-4. 每个 scorer 的输出都可进鍏?trade log / reject audit，后续可以做 counterfactual 分组统计。
+璁捐鐩爣锛?
+1. 绗竴鍑嗗叆鍙敱 Base Layer 鍐冲畾锛歋MC 缁撴瀯 + SQZMOM 鑳岀/鍔ㄩ噺纭銆?
+2. HTF / VWAP / DMI / Breakout / Regime 绛変笉鍐嶄竴绁ㄥ惁鍐筹紝鍙緭鍑哄垎鍊笺€丒V 淇鍜屼粨浣嶄慨姝ｃ€?
+3. 閽堝 1H HTF 寮哄弽鍚戣儗绂昏缃‖闃绘柇 (block)锛屽己鍒跺綊闆朵粨浣嶃€?
+4. 姣忎釜 scorer 鐨勮緭鍑洪兘鍙繘鍏?trade log / reject audit锛屽悗缁彲浠ュ仛 counterfactual 鍒嗙粍缁熻銆?
 """
 from __future__ import annotations
 
@@ -63,11 +63,11 @@ def dumps_compact(obj: Dict[str, Any]) -> str:
 
 def evaluate_base_trigger(row: Any, direction: str, ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    第一道进场许可：只看 SMC + SQZMOM。
+    绗竴閬撹繘鍦鸿鍙細鍙湅 SMC + SQZMOM銆?
 
-    注意：这不是高阶过滤。它只回答“当前15m 是否存在可交易结构”。
-    - SMC：结构质量分 / FVG-OB 鍖?/ liquidity sweep 任一提供结构支撑。
-    - SQZMOM：同向背绂?+ 白柱/动量/DMI/释放等确璁ゃ€?
+    娉ㄦ剰锛氳繖涓嶆槸楂橀樁杩囨护銆傚畠鍙洖绛斺€滃綋鍓?15m 鏄惁瀛樺湪鍙氦鏄撶粨鏋勨€濄€?
+    - SMC锛氱粨鏋勮川閲忓垎 / FVG-OB 鍖?/ liquidity sweep 浠讳竴鎻愪緵缁撴瀯鏀拺銆?
+    - SQZMOM锛氬悓鍚戣儗绂?+ 鐧芥煴/鍔ㄩ噺/DMI/閲婃斁绛夌‘璁ゃ€?
     """
     ctx = ctx or {}
     direction = str(direction).title()
@@ -181,10 +181,10 @@ def _scorer(name: str, score: float, ev: float, pos_mult: float, reason: str) ->
 
 def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
-    高阶模块旁路评分鍗?(V2).
+    楂橀樁妯″潡鏃佽矾璇勫垎鍗?(V2).
     
-    修改：增加1H(HTF) 背离反向挡停机制，以及HTF+LTF 多周期背离共振加分。
-    如果触发挡停，将无视旁路分数，强分position_multiplier = 0.0。
+    淇敼锛氬鍔?1H(HTF) 鑳岀鍙嶅悜鎸″仠鏈哄埗锛屼互鍙?HTF+LTF 澶氬懆鏈熻儗绂诲叡鎸姞鍒嗐€?
+    濡傛灉瑙﹀彂鎸″仠锛屽皢鏃犺鏃佽矾鍒嗘暟锛屽己鍒?position_multiplier = 0.0銆?
     """
     macro_ctx = macro_ctx or {}
     direction = str(signal.get("direction", ctx.get("direction", ""))).title()
@@ -249,24 +249,24 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
         scorers["breakout"] = _scorer("breakout", -0.10, -0.005, 0.95, "NO_BREAKOUT_NO_REJECT")
 
     # ==========================
-    # 多周期背离与共振逻辑 (15M & 1H)
+    # 澶氬懆鏈熻儗绂讳笌鍏辨尟閫昏緫 (15M & 1H)
     # ==========================
     
-    # 15M (LTF) 背离状态?
+    # 15M (LTF) 鑳岀鐘舵€?
     div_dir = str(ctx.get("sqzmom_divergence_dir", "None"))
     div_age = safe_float(ctx.get("sqzmom_divergence_age", 999), 999)
     div_strength = safe_float(ctx.get("sqzmom_divergence_strength", 0.0), 0.0)
     
-    # 1H (HTF) 背离状态?
+    # 1H (HTF) 鑳岀鐘舵€?
     htf_div_dir = str(macro_ctx.get("sqzmom_divergence_dir", "None"))
     htf_div_age = safe_float(macro_ctx.get("sqzmom_divergence_age", 999), 999)
     
-    # 活跃背离判定标准 (18周期鍐?
+    # 娲昏穬鑳岀鍒ゅ畾鏍囧噯 (18鍛ㄦ湡鍐?
     ltf_active_same = (div_dir == direction and div_age <= 18)
     htf_active_opp = (htf_div_dir in ("Long", "Short") and htf_div_dir != direction and htf_div_age <= 18)
     htf_active_same = (htf_div_dir == direction and htf_div_age <= 18)
 
-    # 1. 1H HTF 背离处理 (挡停与共鎸?
+    # 1. 1H HTF 鑳岀澶勭悊 (鎸″仠涓庡叡鎸?
     if htf_active_opp:
         is_blocked = True
         block_reason = f"HTF_OPPOSITE_DIV_BLOCK_{htf_div_dir.upper()}"
@@ -278,7 +278,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     else:
         scorers["htf_divergence"] = _scorer("htf_divergence", 0.0, 0.0, 1.0, "HTF_DIVERGENCE_NEUTRAL")
 
-    # 2. 15M LTF 原有背离逻辑
+    # 2. 15M LTF 鍘熸湁鑳岀閫昏緫
     if ltf_active_same:
         freshness = 1.0 if div_age <= 8 else 0.62
         strength_bonus = _clip(div_strength / 25.0, 0.0, 0.35)
@@ -316,7 +316,7 @@ def build_scorecard(signal: Dict[str, Any], ctx: Dict[str, Any], macro_ctx: Dict
     for v in scorers.values():
         position_multiplier *= safe_float(v.get("position_mult"), 1.0)
     
-    # 挡停逻辑：如果是 Block 状态侊紝彻底剥夺仓位。
+    # 鎸″仠閫昏緫锛氬鏋滄槸 Block 鐘舵€侊紝褰诲簳鍓ュず浠撲綅銆?
     if is_blocked:
         position_multiplier = 0.0
     else:

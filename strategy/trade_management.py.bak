@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-""" strategy/trade_management.py V2 Stable Compatible Version 目标（1. 尽量保留旧项目可能调用的通用函数名。2. 引入分层止盈止损参数（A 单：更能吃趋加B 单：平衡胜率与盈亏比 C 单：快保鏈€佸揩止盈，避免边缘信号拖绱?3. 不破坏原鏈?-1R 鏈€大亏损结构。"""
+""" strategy/trade_management.py V2 Stable Compatible Version 鐩爣锛?1. 灏介噺淇濈暀鏃ч」鐩彲鑳借皟鐢ㄧ殑閫氱敤鍑芥暟鍚嶃€?2. 寮曞叆鍒嗗眰姝㈢泩姝㈡崯鍙傛暟锛?A 鍗曪細鏇磋兘鍚冭秼鍔?B 鍗曪細骞宠　鑳滅巼涓庣泩浜忔瘮 C 鍗曪細蹇繚鏈€佸揩姝㈢泩锛岄伩鍏嶈竟缂樹俊鍙锋嫋绱?3. 涓嶇牬鍧忓師鏈?-1R 鏈€澶т簭鎹熺粨鏋勩€?"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _lower(v: Any) -> str:
 
 
 def get_management_profile(entry_grade: str = "B", **kwargs: Any) -> Dict[str, Any]:
-    """ 根据入场等级返回止盈止损管理参数。返回单位（- *_r 都是 R 倍数 - pct 是平仓比渚?"""
+    """ 鏍规嵁鍏ュ満绛夌骇杩斿洖姝㈢泩姝㈡崯绠＄悊鍙傛暟銆?杩斿洖鍗曚綅锛?- *_r 閮芥槸 R 鍊嶆暟 - pct 鏄钩浠撴瘮渚?"""
     g = str(entry_grade or "B").upper()
 
     if g == "A":
@@ -70,7 +70,7 @@ def get_management_profile(entry_grade: str = "B", **kwargs: Any) -> Dict[str, A
 
 
 def build_trade_plan(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    """ 生成交易管理计划。"""
+    """ 鐢熸垚浜ゆ槗绠＄悊璁″垝銆?"""
     ctx: Dict[str, Any] = {}
     if isinstance(context, dict):
         ctx.update(context)
@@ -108,7 +108,7 @@ def build_trade_plan(context: Optional[Dict[str, Any]] = None, **kwargs: Any) ->
 
 
 def manage_trade(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
-    """ 通用兼容管理函数：返回当前应采取的动浣溿€?"""
+    """ 閫氱敤鍏煎绠＄悊鍑芥暟锛氳繑鍥炲綋鍓嶅簲閲囧彇鐨勫姩浣溿€?"""
     ctx: Dict[str, Any] = {}
     if isinstance(context, dict):
         ctx.update(context)
@@ -147,7 +147,7 @@ def manage_trade(context: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dic
     }
 
 
-# 旧项目可能调用这些别名
+# 鏃ч」鐩彲鑳借皟鐢ㄨ繖浜涘埆鍚?
 def trade_management_plan(*args: Any, **kwargs: Any) -> Dict[str, Any]:
     return build_trade_plan(*args, **kwargs)
 

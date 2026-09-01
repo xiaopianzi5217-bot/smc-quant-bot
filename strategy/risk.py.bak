@@ -88,20 +88,20 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, min(max_stop_atr * atr, risk))
         sl = entry - risk
         
-        # 【修澶?止盈过近】不再用 BSL/OB 作为 TP1 鍊欓€変綅缃?
-        # BSL/OB 是阻加支撑区，价格到了容易反转，做止盈目标不合鐞?
-        # 只用 ATR 乘数 + 止损距离保底，确淇?tp1 真实可触以
+        # 銆愪慨澶?姝㈢泩杩囪繎銆戜笉鍐嶇敤 BSL/OB 浣滀负 TP1 鍊欓€変綅缃?
+        # BSL/OB 鏄樆鍔?鏀拺鍖猴紝浠锋牸鍒颁簡瀹规槗鍙嶈浆锛屽仛姝㈢泩鐩爣涓嶅悎鐞?
+        # 鍙敤 ATR 涔樻暟 + 姝㈡崯璺濈淇濆簳锛岀‘淇?tp1 鐪熷疄鍙Е鍙?
         _sl_dist = abs(entry - sl)
         
-        # tp1: max(ATR目标, 止损距离×1.5)，确保足够空闂?
+        # tp1: max(ATR鐩爣, 姝㈡崯璺濈脳1.5)锛岀‘淇濊冻澶熺┖闂?
         tp1_min_dist = max(tp1_atr * atr, _sl_dist * 1.5)
         tp1 = entry + tp1_min_dist
         
-        # tp2: 基于实际止损距离，保证真瀹?RR 不虚楂?
+        # tp2: 鍩轰簬瀹為檯姝㈡崯璺濈锛屼繚璇佺湡瀹?RR 涓嶈櫄楂?
         tp2_min_dist = max(tp2_atr * atr, _sl_dist * 2.0)
         tp2 = entry + tp2_min_dist
         
-        # tp3: 更远的目鏍?
+        # tp3: 鏇磋繙鐨勭洰鏍?
         tp3_min_dist = max(tp3_atr * atr, _sl_dist * 3.0)
         tp3 = entry + tp3_min_dist
         
@@ -119,7 +119,7 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         risk = max(min_stop_atr * atr, min(max_stop_atr * atr, risk))
         sl = entry + risk
         
-        # 【修澶?止盈过近】同上，空单不再用SSL/OB 鍋?TP1
+        # 銆愪慨澶?姝㈢泩杩囪繎銆戝悓涓婏紝绌哄崟涓嶅啀鐢?SSL/OB 鍋?TP1
         _sl_dist = abs(entry - sl)
         
         tp1_min_dist = max(tp1_atr * atr, _sl_dist * 1.5)
@@ -131,22 +131,22 @@ def calculate_dynamic_tp_sl(direction: str, curr: Dict[str, Any], hist_exec=None
         tp3_min_dist = max(tp3_atr * atr, _sl_dist * 3.0)
         tp3 = entry - tp3_min_dist
 
-    # 【修澶嶃€慠R 基于 tp1（实际第涓€止盈位），避免虚假高 RR
-    # 之前用tp2 绠?RR 导致显示高但 tp1 实际很近，止盈就被扫浜?
+    # 銆愪慨澶嶃€慠R 鍩轰簬 tp1锛堝疄闄呯涓€姝㈢泩浣嶏級锛岄伩鍏嶈櫄鍋囬珮 RR
+    # 涔嬪墠鐢?tp2 绠?RR 瀵艰嚧鏄剧ず楂樹絾 tp1 瀹為檯寰堣繎锛屾鐩堝氨琚壂浜?
     rr = abs(tp1 - entry) / max(abs(entry - sl), 1e-12)
-    # 同时保留 tp2 的RR 在exec_ctx 中供参考
+    # 鍚屾椂淇濈暀 tp2 鐨?RR 鍦?exec_ctx 涓緵鍙傝€?
     _rr2 = abs(tp2 - entry) / max(abs(entry - sl), 1e-12)
     
     return float(sl), float(tp1), float(tp2), float(tp3), float(rr)
 
-# 恢复遗漏的原版风控检查函鏁?
+# 鎭㈠閬楁紡鐨勫師鐗堥鎺ф鏌ュ嚱鏁?
 def risk_is_acceptable(entry: float, sl: float, atr: float, max_risk_atr: float = 2.5) -> bool:
     if entry <= 0 or atr <= 0: return False
     return abs(entry - sl) <= max_risk_atr * atr
 
 def dynamic_position_risk(trade_history: list, exec_ctx: Dict[str, Any] | None = None) -> float:
     """
-    打分系统无缝对接：读取评分卡输出的position_multiplier。
+    鎵撳垎绯荤粺鏃犵紳瀵规帴锛氳鍙栬瘎鍒嗗崱杈撳嚭鐨?position_multiplier銆?
     """
     exec_ctx = exec_ctx or {}
     base_mult = safe_float(exec_ctx.get("position_multiplier"), 1.0)
@@ -167,11 +167,11 @@ def check_partial_close_and_trail(
     current_price
 ) -> dict:
     """
-    动ֹ̬ӯֹ损管理 V58.7 + V59.7 修复
+    动态止盈止损管理 V58.7 + V59.7 修复
 
     【V59.7 修复两个致命bug】
-    1. TP1 部分ֹӯ被保本逻辑抢先：到达 TP1 ʱ返回 MOVE_SL 而非 PARTIAL_CLOSE
-    2. 保本后 risk=0 导致所有ƽ仓信号ʧЧ（92条开仓、0条ƽ仓）
+    1. TP1 部分止盈被保本逻辑抢先：到达 TP1 时返回 MOVE_SL 而非 PARTIAL_CLOSE
+    2. 保本后 risk=0 导致所有平仓信号失效（92条开仓、0条平仓）
 
     返回:
     {
@@ -194,7 +194,7 @@ def check_partial_close_and_trail(
             "reason": "NO_POSITION"
         }
 
-    # 兼容旧 key: ֧持 `side` 或 `direction`，entry/entry_price，stop_loss/current_sl
+    # 兼容旧 key: 支持 `side` 或 `direction`，entry/entry_price，stop_loss/current_sl
     side = position.get("side") or position.get("direction")
 
     entry = float(position.get("entry") or position.get("entry_price") or 0)
@@ -214,9 +214,9 @@ def check_partial_close_and_trail(
     # ============================
     # 计算 risk（兼容保本后 sl == entry 的情况）
     # ============================
-    # 【V59.7 修复】保本后 current_sl == entry ʱ risk=0，导致所有ƽ仓信号ʧЧ。
-    # 方案：优先ʹ用 initial_risk（开仓ʱ保存），其次用 ATR fallback，
-    # 保֤保本后 TP1/TP2/׷踪ֹ损仍能正ȷ触发。
+    # 【V59.7 修复】保本后 current_sl == entry 时 risk=0，导致所有平仓信号失效。
+    # 方案：优先使用 initial_risk（开仓时保存），其次用 ATR fallback，
+    # 保证保本后 TP1/TP2/追踪止损仍能正确触发。
     atr = float(position.get("atr") or position.get("ATRr_14") or 0)
     if atr <= 0:
         atr = entry * 0.01 if entry > 0 else 1.0  # fallback: 1% entry
@@ -226,20 +226,20 @@ def check_partial_close_and_trail(
 
     if risk_abs > 0:
         risk = risk_abs
-        # 首次计算ʱ保存 initial_risk（便于保本后׷溯）
+        # 首次计算时保存 initial_risk（便于保本后追溯）
         if initial_risk <= 0:
             initial_risk = risk_abs
     elif initial_risk > 0:
         risk = initial_risk
     else:
-        # 保本后无初ʼ风险记¼，用 ATR 作Ϊ合理 fallback
+        # 保本后无初始风险记录，用 ATR 作为合理 fallback
         risk = atr
 
     if risk <= 0:
         risk = atr
 
     # ============================
-    # 计算 R（基于ʵ际 risk，保本后仍可正ȷ计算）
+    # 计算 R（基于实际 risk，保本后仍可正确计算）
     # ============================
     if str(side or "").lower().startswith("long"):
         profit_r = (current_price - entry) / risk
@@ -247,7 +247,7 @@ def check_partial_close_and_trail(
         profit_r = (entry - current_price) / risk
 
     # ============================
-    # 1. 首先检查Ӳֹ损（无条件，即ʹ保本后Ҳ能触发）
+    # 1. 首先检查硬止损（无条件，即使保本后也能触发）
     # ============================
     if str(side or "").lower().startswith("long"):
         if current_price <= sl:
@@ -269,8 +269,8 @@ def check_partial_close_and_trail(
             }
 
     # ============================
-    # 2. TP2 ȫ部退出（无条件，优先于保本/׷踪）
-    # 【V59.7 修复】修复 TP2 被׷踪ֹ损抢先、或保本后 risk=0 导致 TP2 永不触发
+    # 2. TP2 全部退出（无条件，优先于保本/追踪）
+    # 【V59.7 修复】修复 TP2 被追踪止损抢先、或保本后 risk=0 导致 TP2 永不触发
     # ============================
     if str(side or "").lower().startswith("long"):
         hit_tp2 = (current_price >= tp2)
@@ -286,8 +286,8 @@ def check_partial_close_and_trail(
         }
 
     # ============================
-    # 3. TP1 部分ֹӯ（无条件，优先于保本）
-    # 【V59.7 修复】修复 TP1 到达ʱ被 BREAKEVEN_PROTECT 抢先导致 PARTIAL_CLOSE 永不触发
+    # 3. TP1 部分止盈（无条件，优先于保本）
+    # 【V59.7 修复】修复 TP1 到达时被 BREAKEVEN_PROTECT 抢先导致 PARTIAL_CLOSE 永不触发
     # ============================
     if stage < 2:
         if str(side or "").lower().startswith("long"):
@@ -305,7 +305,7 @@ def check_partial_close_and_trail(
             }
 
     # ============================
-    # 4. ӯ利 0.8R 保本（仅 stage < 1 ʱ）
+    # 4. 盈利 0.8R 保本（仅 stage < 1 时）
     # ============================
     if profit_r >= 0.8 and stage < 1:
         return {
@@ -317,12 +317,12 @@ def check_partial_close_and_trail(
         }
 
     # ============================
-    # 5. TP1 后启动׷踪ֹ损（stage >= 2）
+    # 5. TP1 后启动追踪止损（stage >= 2）
     # ============================
     if stage >= 2:
-        # V59.4: 分阶段׷踪ֹ损
-        # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免С回调被ɨ）
-        # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个Ŀ标利润，开ʼ收紧）
+        # V59.4: 分阶段追踪止损
+        # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免小回调被扫）
+        # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个目标利润，开始收紧）
         if stage == 2:
             trail_distance = risk * 1.0
         else:

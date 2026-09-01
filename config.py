@@ -3,7 +3,7 @@ import os
 
 # ================= V38 REAL ENGINE CONFIG =================
 # 统一控制层：哪些引擎启用，哪些隔离
-VERSION = "V54_ALPHA_EXPANSION_20260621"
+VERSION = "V11_V3_INSTITUTIONAL_ROOT_20260918"
 PURE_MODE = False  # V54: no legacy book hard whitelist; use probe sizing instead
 ENGINES = ["TRANSITION", "CORE", "TREND"]  # 启用哪些 regime 引擎
 ISOLATED = ["PROBE"]  # 完全隔离账户的 book

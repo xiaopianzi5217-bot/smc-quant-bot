@@ -129,6 +129,22 @@ def _get_adaptive_min_score(
     return dynamic_val
 
 
+
+
+def _is_blocked_hour(hour: int, cfg: Dict[str, Any]) -> bool:
+    """检查当前小时是否被 v11_full_config 的 hard_block_hours 禁止。
+
+    优先读取 config.hard_block_hours（JSON配置），
+    若未配置则回退到模块级 BLOCKED_HOURS（默认空）。
+    """
+    blocked = cfg.get("hard_block_hours")
+    if blocked is None:
+        blocked = list(BLOCKED_HOURS)
+    else:
+        # 兼容 JSON 中数字为 int 或 str
+        blocked = [int(h) for h in blocked]
+    return hour in blocked
+
 def v565_quality_gate(
     row: Dict[str, Any],
     config: Optional[Dict[str, Any]] = None,
@@ -157,6 +173,28 @@ def v565_quality_gate(
     regime = str(row.get("regime", "mixed")).lower().strip()
     model_ev = float(row.get("model_ev", -999.0))
     setup_type_str = str(row.get("setup_type", "")).upper()
+        # ========================================================
+    # 0b. 硬阻塞小时（hard_block_hours）
+    #     优先读取 config.v565_gate.hard_block_hours（JSON配置），
+    #     例如 [4, 6, 7, 23] 表示这些小时完全禁止交易
+    # ========================================================
+    if _is_blocked_hour(hour, cfg):
+        reasons.append(f"HARD_BLOCKED_HOUR_{hour}")
+        meta["blocked"] = True
+        meta["failed_checks"].append("hard_block_hour")
+        meta["size_penalty"] = 0.0
+        reject_analytics.record(
+            symbol=row.get("symbol", ""),
+            signal_id=row.get("signal_id", ""),
+            stage="HOUR",
+            reason="HARD_BLOCKED_HOUR",
+            score=score,
+            confidence=row.get("confidence"),
+            regime=regime,
+            extra={"blocked_hour": hour},
+        )
+        return False, f"HARD_BLOCKED_HOUR_{hour}", meta
+
     adx = float(row.get("adx", row.get("ADX", row.get("adx_14", 0.0))) or 0.0)
     # ========================================================
     # 0. Structure Enhancement（高分结构信号）⚡ 优先级最高
@@ -288,7 +326,7 @@ def v565_quality_gate(
     # 2. 动态分数门槛
     # ========================================================
     # config.min_score 作为 fallback：如果动态表的值比它高，优先用 config 值
-        _config_min_score = cfg.get("min_score")
+    _config_min_score = cfg.get("min_score")
     _config_min_score_f = float(_config_min_score) if _config_min_score is not None else None
     min_score = _get_adaptive_min_score(regime, hour, cfg.get("regime_hour_min_score"), fallback=_config_min_score_f)
     # V59.5: 记录实际门槛供 gate_snapshot 使用（事后复盘: 哪个条件导致亏损）

@@ -107,7 +107,7 @@ class FilterAuditLogger:
 
     def log(self, *args, **kwargs):
         """
-        向后兼容别名：解决外部调用.log() 导致鐨?AttributeError 报错。        将所有传缁?log() 的参数无缝路由至实际工作鐨?record() 方法涓€?        """
+        鍚戝悗鍏煎鍒悕锛氳В鍐冲閮ㄨ皟鐢?.log() 瀵艰嚧鐨?AttributeError 鎶ラ敊銆?        灏嗘墍鏈変紶缁?log() 鐨勫弬鏁版棤缂濊矾鐢辫嚦瀹為檯宸ヤ綔鐨?record() 鏂规硶涓€?        """
         return self.record(*args, **kwargs)
 
 
@@ -138,12 +138,12 @@ def summarize_filter_audit(path="reports/filter_audit.csv", output_path="reports
 
 
 # ==========================================
-# 补充：暴露给外部直接调用鐨?wrapper 函数
+# 琛ュ厖锛氭毚闇茬粰澶栭儴鐩存帴璋冪敤鐨?wrapper 鍑芥暟
 # ==========================================
 _default_logger = FilterAuditLogger()
 
 def record_filter_audit(symbol, curr, decision, future_price=None, future_r=None):
     """
-    提供缁?v9_decision_kernel.py 调用的接以    """
+    鎻愪緵缁?v9_decision_kernel.py 璋冪敤鐨勬帴鍙?    """
     return _default_logger.record(symbol, curr, decision, future_price, future_r)
 

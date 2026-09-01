@@ -2,7 +2,7 @@
 """
 V56.5 Stable Production Backtest Runner
 
-唯一回测入口，直接调用final_forge.v56_5_stable_engine。鎵€有旧 V37/V38 回测路径已彻底移除了"""
+鍞竴鍥炴祴鍏ュ彛锛岀洿鎺ヨ皟鐢?final_forge.v56_5_stable_engine銆?鎵€鏈夋棫 V37/V38 鍥炴祴璺緞宸插交搴曠Щ闄ゃ€?"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -165,7 +165,7 @@ _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open�
 # ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
 _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=45.0,
-    allowed_hours=(0, 1, 2, 3, 4, 6, 7, 16, 17, 18, 19, 21, 23),
+    allowed_hours=(0, 1, 2, 3, 16, 17, 18, 19, 21),
     # 【20260905】实盘 score 量级为 30~55（trade_journal 92 笔均值 40.8、最高 54.3），
     strong_tier2_score=50.0,
 ))
