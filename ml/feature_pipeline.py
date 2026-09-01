@@ -35,6 +35,140 @@ BACKTEST_CSV_PATHS = [
     Path("data/backtest_v56_5.csv"),
 ]
 
+# ════════════════════════════════════════════════════════════
+# 多空样本对称性常量
+# ════════════════════════════════════════════════════════════
+_LONG_SHORT_BALANCE_WARN_THRESHOLD = 0.20   # 比例偏差 > 20% 时警告
+_LONG_SHORT_BALANCE_ERROR_THRESHOLD = 0.35  # 比例偏差 > 35% 时拒绝训练（太严重）
+
+
+def check_long_short_balance(df,
+                             direction_col: str = "direction",
+                             warn_threshold: float = _LONG_SHORT_BALANCE_WARN_THRESHOLD,
+                             error_threshold: float = _LONG_SHORT_BALANCE_ERROR_THRESHOLD,
+                             logger_obj=None) -> Dict[str, Any]:
+    """检查训练集多空样本对称性。
+
+    核心目标：
+      防止模型因训练数据中长单/短单数量严重不平衡而偏向某一方向。
+
+    Args:
+        df: 包含 direction 列的训练集 DataFrame
+        direction_col: 方向列名（"direction"）
+        warn_threshold: 比例偏差警告阈值（默认 0.20 = 20%）
+        error_threshold: 比例偏差错误阈值（默认 0.35 = 35%）
+        logger_obj: 可选的 logger 对象
+
+    Returns:
+        {
+            "balanced": bool,           # 是否平衡（偏差 <= warn_threshold）
+            "strict_balanced": bool,    # 是否足够平衡（偏差 <= error_threshold）
+            "long_count": int,
+            "short_count": int,
+            "long_ratio": float,        # Long 占比 (0-1)
+            "short_ratio": float,       # Short 占比 (0-1)
+            "bias": float,              # 偏差量（0 = 完全平衡）
+            "status": str,              # "BALANCED" / "WARN" / "SEVERE"
+            "message": str,             # 人类可读描述
+        }
+    """
+    _log = logger_obj or logger
+
+    if df is None or len(df) == 0:
+        return {
+            "balanced": True,
+            "strict_balanced": True,
+            "long_count": 0,
+            "short_count": 0,
+            "long_ratio": 0.5,
+            "short_ratio": 0.5,
+            "bias": 0.0,
+            "status": "EMPTY",
+            "message": "训练集为空，跳过平衡性检查",
+        }
+
+    if direction_col not in df.columns:
+        _log.warning(f"训练集缺少 {direction_col} 列（等待从 TradeJournal+FeatureStore 补充）")
+        return {
+            "balanced": True,
+            "strict_balanced": True,
+            "long_count": 0,
+            "short_count": 0,
+            "long_ratio": 0.5,
+            "short_ratio": 0.5,
+            "bias": 0.0,
+            "status": "NO_DIRECTION",
+            "message": f"训练集缺少 {direction_col} 列，无法检查多空平衡",
+        }
+
+    # 统计 Long / Short 样本数
+    dir_lower = df[direction_col].astype(str).str.lower().str.strip()
+    long_count = int((dir_lower == "long").sum())
+    short_count = int((dir_lower == "short").sum())
+    total = long_count + short_count
+
+    # 忽略无法识别方向的样本（如空字符串、未知值）
+    unknown_count = len(df) - total
+
+    if total == 0:
+        return {
+            "balanced": False,
+            "strict_balanced": False,
+            "long_count": 0,
+            "short_count": 0,
+            "long_ratio": 0.0,
+            "short_ratio": 0.0,
+            "bias": 1.0,
+            "status": "NO_CLASSES",
+            "message": f"训练集中没有可识别的 Long/Short 方向（未知 {unknown_count} 个）",
+        }
+
+    long_ratio = long_count / total
+    short_ratio = short_count / total
+
+    # 偏差 = |Long比例 - 0.5|
+    bias = abs(long_ratio - 0.5)
+
+    # 状态判定
+    if bias <= warn_threshold:
+        status = "BALANCED"
+    elif bias <= error_threshold:
+        status = "WARN"
+    else:
+        status = "SEVERE"
+
+    # 人类可读消息
+    dominant = "Long" if long_ratio > short_ratio else "Short"
+    dominant_ratio = max(long_ratio, short_ratio)
+    message = (
+        f"[多空样本检查] {status}: Long={long_count} ({long_ratio:.1%}), "
+        f"Short={short_count} ({short_ratio:.1%}), 偏斜={bias:.1%}"
+    )
+    if unknown_count > 0:
+        message += f" (未知方向: {unknown_count})"
+    if status != "BALANCED":
+        message += f" → {dominant} 占比过高 ({dominant_ratio:.1%})"
+
+    # 日志输出
+    if status == "BALANCED":
+        _log.info(message)
+    elif status == "WARN":
+        _log.warning(message)
+    else:
+        _log.error(message)
+
+    return {
+        "balanced": bias <= warn_threshold,
+        "strict_balanced": bias <= error_threshold,
+        "long_count": long_count,
+        "short_count": short_count,
+        "long_ratio": round(long_ratio, 4),
+        "short_ratio": round(short_ratio, 4),
+        "bias": round(bias, 4),
+        "status": status,
+        "message": message,
+    }
+
 
 class FeaturePipeline:
     """特征工程管线：从 TradeJournal + FeatureStore + 回测数据提取训练集。"""
@@ -81,6 +215,18 @@ class FeaturePipeline:
         df = self._merge_features(closes, features)
         df = self._engineer_features(df)
         df = self._create_labels(df)
+
+        # ── 多空样本对称性检查 ──
+        # 在此检查训练集中 Long/Short 的比例是否平衡。
+        # 如果严重失衡（偏差 > error_threshold=35%），返回 None 拒绝使用该训练集。
+        _balance = self._check_training_balance(df)
+        if _balance["status"] == "SEVERE":
+            logger.error(
+                f"❌ 训练集放弃: 多空样本严重失衡\n"
+                f"   {_balance['message']}"
+            )
+            return None
+        # ── 结束多空检查 ──
 
         logger.info(f"训练集构建完成: {len(df)} 样本, {len(df.columns)} 列")
 
@@ -389,6 +535,13 @@ class FeaturePipeline:
         logger.info(f"标签分布: 胜={df['label'].sum()} 负={(1-df['label']).sum()} "
                      f"总={len(df)}")
         return df
+
+    def _check_training_balance(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """内部方法：训练集多空样本对称性检查。
+
+        在 build_training_set 中调用，用于监控并过滤严重失衡的训练集。
+        """
+        return check_long_short_balance(df, logger_obj=logger)
 
     # ════════════════════════════════════════════════════════════
     # 内部方法 - 实时推理单行

@@ -304,10 +304,11 @@ def check_partial_close_and_trail(
                 "profit_r": round(profit_r, 3)
             }
 
+        # ============================
+    # 4. ӯ利 1.2R 保本（仅 stage < 1 ʱ）
+    # 原 0.8R 过早，15m 上容易在到 TP2 前被洗到保本出局
     # ============================
-    # 4. ӯ利 0.8R 保本（仅 stage < 1 ʱ）
-    # ============================
-    if profit_r >= 0.8 and stage < 1:
+    if profit_r >= 1.2 and stage < 1:
         return {
             "action": "MOVE_SL",
             "new_sl": entry,

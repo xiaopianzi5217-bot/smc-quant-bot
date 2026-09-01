@@ -97,8 +97,28 @@ class ProbabilityEngine:
             logger.info(f"正负样本不平衡: pos={n_pos} neg={n_neg}")
             return False
 
-        # 准备特征列（排除 label 和 pnl_r，pnl_r 仅用于 EV 校准）
-        feature_cols = [c for c in df.columns if c not in ["label", "pnl_r"]]
+        # ── 多空样本对称性检查 ──
+        # 防止模型因训练数据中长单/短单数量严重不平衡而偏向某一方向。
+        if "direction" in df.columns:
+            try:
+                from ml.feature_pipeline import check_long_short_balance
+            except ImportError:
+                from feature_pipeline import check_long_short_balance
+            _balance = check_long_short_balance(df, logger_obj=logger)
+            if _balance["status"] == "SEVERE":
+                logger.error(
+                    f"⚠️ 训练放弃: 多空样本严重失衡\n"
+                    f"   {_balance['message']}"
+                )
+                return False
+        else:
+            logger.warning(
+                "训练集缺少 direction 列，跳过多空平衡性检查"
+            )
+        # ── 结束多空检查 ──
+
+        # 准备特征列（排除 label、pnl_r 和 direction，其中 direction 仅用于多空检查，pnl_r 仅用于 EV 校准）
+        feature_cols = [c for c in df.columns if c not in ["label", "pnl_r", "direction"]]
         X = df[feature_cols].copy()
         y = df["label"].copy()
 
