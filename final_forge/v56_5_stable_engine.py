@@ -339,7 +339,17 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
 
         rejected_count = int((~pd.Series(gate_passed_list)).sum())
         if rejected_count > 0:
-            print(f"🔍 V56.5 Quality Gate blocked {rejected_count} candidates (kept {int(sum(gate_passed_list))})")
+            rejected_reasons = pd.Series(
+                reason for passed, reason in zip(gate_passed_list, gate_reason_list)
+                if not passed
+            ).value_counts().to_dict()
+            reason_summary = ", ".join(
+                f"{reason}:{count}" for reason, count in rejected_reasons.items()
+            )
+            print(
+                f"🔍 V56.5 Quality Gate blocked {rejected_count} candidates "
+                f"(kept {int(sum(gate_passed_list))}); reasons: {reason_summary}"
+            )
 
         cand = cand[cand["gate_passed"]].copy()
         if cand.empty:
