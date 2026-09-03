@@ -22,6 +22,7 @@ import os
 import numpy as np
 import joblib
 from utils.structured_logger import slog
+from utils.ml_utils import safe_predict
 
 
 class EVRealityGuard:
@@ -237,13 +238,11 @@ class EVRealityGuard:
         
         try:
             # ML预测盈利概率
-            if hasattr(self.profit_model, "predict_proba"):
-                win_prob = float(self.profit_model.predict_proba(feature_vec)[0][1])
-            else:
-                win_prob = float(self.profit_model.predict(feature_vec)[0])
+            # === 使用安全推理：自动对齐训练列名，消除 feature-name UserWarning ===
+            win_prob = float(safe_predict(self.profit_model, feature_vec, is_proba=True)[0][1]                if hasattr(self.profit_model, "predict_proba") else safe_predict(self.profit_model, feature_vec)[0])
             
             # ML预测EV
-            ml_ev = float(self.ev_model.predict(feature_vec)[0])
+            ml_ev = float(safe_predict(self.ev_model, feature_vec)[0])
             
             # 原始信号的EV和概率
             orig_ev = float(signal.get("expected_value", 0))
