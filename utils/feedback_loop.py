@@ -183,11 +183,13 @@ class RegimeFeatureStats:
 class AdaptiveRejector:
     """Adaptive reject threshold per cluster"""
     def __init__(self, save_path: str = "data/adaptive_reject.json",
-                 base_threshold: float = 0.25, window: int = 40):
+                 base_threshold: float = 0.25, window: int = 40,
+                 min_samples_for_reject: int = 20):
         self.save_path = Path(save_path)
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         self.base_threshold = base_threshold
         self.window = window
+        self.min_samples_for_reject = min_samples_for_reject
         self.clusters: Dict[str, Dict] = defaultdict(lambda: {
             "wins": 0, "total": 0, "avg_r": 0.0, "reject_threshold": base_threshold,
             "recent_wins": 0, "recent_total": 0,
@@ -252,10 +254,45 @@ class AdaptiveRejector:
         return self.clusters.get(key, {}).get("reject_threshold", self.base_threshold)
 
     def should_reject(self, regime: str, features: List[str], confidence: float, ev: float) -> bool:
+        # ① 绝对硬底防线（Hard Floor）：置信度极低的异常信号（如垃圾扫描产出）
+        #    无论冷启动还是成熟阶段都无条件拒绝，防止垃圾穿透。
+        ABSOLUTE_MIN_CONFIDENCE = 0.05
+        if confidence < ABSOLUTE_MIN_CONFIDENCE:
+            return True
+
+        # ② 负期望值直接拒绝（不可逆交易没有探索价值）
         if ev < 0:
             return True
-        threshold = self.get_threshold(regime, features, confidence)
+
+        key = self._make_cluster_key(regime, features, confidence)
+        cluster = self.clusters.get(key, {})
+        total_trades = cluster.get("total", 0)
+
+        # ③ 冷启动探索期放行：新组合样本不足时放行让其积累数据，
+        #    打破死锁（否则 BEAR/LOB 等新组织永远不会获得 20 笔样本）。
+        #    已在 ① 中拦截了 <0.05 的极低置信，所以这里放行的信号
+        #    仅在 [0.05, base_threshold) 区间发生，不会穿透硬底。
+        if total_trades < self.min_samples_for_reject:
+            return False
+
+        # ④ 样本充足时，按该集群自适应拒绝阈值过滤
+        threshold = cluster.get("reject_threshold", self.base_threshold)
         return confidence < threshold
+
+    def get_cluster_total(self, regime: str, features: List[str], confidence: float) -> int:
+        """获取当前 cluster 累计样本量，供上游决定冷启动仓位缩放。"""
+        key = self._make_cluster_key(regime, features, confidence)
+        return int(self.clusters.get(key, {}).get("total", 0))
+
+    def get_cold_start_scale(self, regime: str, features: List[str], confidence: float) -> float:
+        """冷启动仓位缩放因子：样本小于 min 时按线性 ramp 0.50→1.0。
+        达到 min_samples_for_reject 即解除限制。"""
+        total = self.get_cluster_total(regime, features, confidence)
+        if total >= self.min_samples_for_reject:
+            return 1.0
+        # 线性 ramp：0 样本 = 0.50, min_samples 时 = 1.0
+        progress = total / self.min_samples_for_reject
+        return round(0.50 + 0.50 * progress, 4)
 
 
 class FeedbackLoop:
@@ -330,6 +367,10 @@ class FeedbackLoop:
 
         should_reject = self.rejector.should_reject(regime, features, confidence, ev)
 
+        # === 冷启动信息：让上游可对探索期仓位做安全缩放 ===
+        cluster_total = self.rejector.get_cluster_total(regime, features, confidence)
+        cold_start_scale = self.rejector.get_cold_start_scale(regime, features, confidence)
+
         return {
             "weighted_score": round(weighted_score, 2),
             "calibration": calib,
@@ -340,6 +381,8 @@ class FeedbackLoop:
             ),
             "should_reject": should_reject,
             "is_reliable": calib["is_reliable"],
+            "cluster_total": cluster_total,
+            "cold_start_scale": cold_start_scale,
         }
 
     def get_signal_features(self, reason: str, result: dict, exec_ctx: dict) -> tuple:

@@ -2766,8 +2766,13 @@ def check_and_open(result: dict | None) -> bool:
         )
         _v2_size = _calc["final_size"]
         _breaker_mult = _breaker.size_multiplier()
-        _final_size = _v2_size * _breaker_mult
+        # 【冷启动安全缩放】FeedbackLoop rejector cluster 样本不足时降仓避坑
+        _fb_full = result.get("_feedback_result") or {}
+        _fb_cold_scale = float(_fb_full.get("cold_start_scale", 1.0) or 1.0)
+        _final_size = _v2_size * _breaker_mult * _fb_cold_scale
         _final_size = max(0.003, min(0.12, _final_size))
+        if _fb_cold_scale < 1.0:
+            slog.info(f"[{symbol}] 冷启动仓位缩放: cluster_total={_fb_full.get('cluster_total', 0)}, scale={_fb_cold_scale:.2f}, final_size={_final_size:.4f}")
         result["size"] = _final_size
         result["_v2_calc"] = _calc
     except Exception as exc:
