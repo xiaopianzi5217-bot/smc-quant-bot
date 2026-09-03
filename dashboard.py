@@ -42,6 +42,18 @@ if len(df) == 0:
     st.warning("暂无交易数据，请先运行机器人")
     st.stop()
 
+# 兼容旧版交易记录：历史 CSV 可能缺少后续版本新增的统计列。
+for column, default in {
+    "pnl_r": 0.0,
+    "ev": 0.0,
+    "mfe": 0.0,
+    "mae": 0.0,
+    "max_r": 0.0,
+    "exit_reason": "OPEN",
+}.items():
+    if column not in df.columns:
+        df[column] = default
+
 # 类型转换
 df["pnl_r"] = pd.to_numeric(df["pnl_r"], errors="coerce")
 df["ev"] = pd.to_numeric(df["ev"], errors="coerce")

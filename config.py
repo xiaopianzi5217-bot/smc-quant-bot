@@ -28,6 +28,21 @@ MAX_CONSECUTIVE_LOSS = 3
 # 是否启用运行时状态恢复
 ENABLE_RUNTIME_RECOVERY = True
 
+# ===============================
+# HTF Regime 控制 (GATE-4)
+# ===============================
+HTF_REGIME_HARD_BLOCK = False          # True=一票否决，False=只扣分
+HTF_REGIME_PENALTY_SCORE = 20.0        # 逆势时扣多少分
+HTF_ALLOW_COUNTER_TREND = True         # 是否允许逆势信号进入后续流程
+
+# ===============================
+# LIQUIDITY_SWEEP 控制
+# ===============================
+LIQUIDITY_SWEEP_REQUIRE_CHOCH = False     # False=不强制要 CHOCH，只有 momentum 足够就能通过
+LIQUIDITY_SWEEP_MIN_VOL_RATIO = 0.3       # 原 1.0，降低门槛
+LIQUIDITY_SWEEP_HARD_VETO = False         # False=只扣分，True=一票否决
+LIQUIDITY_SWEEP_PENALTY = 15.0
+
 STRATEGY_PARAMS = {
     'rsi_ob': 75,
     'rsi_os': 25,

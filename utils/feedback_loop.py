@@ -183,7 +183,7 @@ class RegimeFeatureStats:
 class AdaptiveRejector:
     """Adaptive reject threshold per cluster"""
     def __init__(self, save_path: str = "data/adaptive_reject.json",
-                 base_threshold: float = 0.30, window: int = 40):
+                 base_threshold: float = 0.25, window: int = 40):
         self.save_path = Path(save_path)
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         self.base_threshold = base_threshold
@@ -238,12 +238,12 @@ class AdaptiveRejector:
 
         recent_win_rate = c["recent_wins"] / max(c["recent_total"], 1)
         if c["recent_total"] >= 10 and recent_win_rate < 0.40:
-            c["reject_threshold"] = min(0.60, c.get("reject_threshold", 0.30) + 0.03)
+            c["reject_threshold"] = min(0.60, c.get("reject_threshold", 0.25) + 0.03)
         elif c["recent_total"] >= 10 and recent_win_rate > 0.60:
-            c["reject_threshold"] = max(0.10, c.get("reject_threshold", 0.30) - 0.02)
+            c["reject_threshold"] = max(0.10, c.get("reject_threshold", 0.25) - 0.02)
         else:
-            delta = self.base_threshold - c.get("reject_threshold", 0.30)
-            c["reject_threshold"] = c.get("reject_threshold", 0.30) + delta * 0.1
+            delta = self.base_threshold - c.get("reject_threshold", 0.25)
+            c["reject_threshold"] = c.get("reject_threshold", 0.25) + delta * 0.1
         c["reject_threshold"] = max(0.10, min(0.70, c["reject_threshold"]))
         self.save()
 

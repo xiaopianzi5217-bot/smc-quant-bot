@@ -76,7 +76,6 @@ _ML_TUNING = {
     "fb_ml_feed_ratio": 1.0,           # ML 释放权重流给 feedback 的比例 (1=全部给feedback)
 }
 
-
 @dataclass
 class FusionInput:
     """融合输入源数据"""
@@ -108,7 +107,6 @@ class FusionInput:
         # 校验 calib_prob
         self.calib_prob = max(0.0, min(1.0, float(self.calib_prob)))
 
-
 @dataclass
 class FusionOutput:
     """融合输出"""
@@ -123,7 +121,6 @@ class FusionOutput:
     model_ev: float = 0.0            # model_ev (用于快照)
     p_win_calibrated: float = 0.0    # p_win_calibrated (用于快照)
     details: Dict[str, Any] = field(default_factory=dict)  # 详细调试信息
-
 
 class DecisionFusionLayer:
     """V60.5 标准融合层"""
@@ -160,17 +157,10 @@ class DecisionFusionLayer:
             logger.info(f"DecisionFusion: EVRealityGuard 硬拦截 -> BLOCK")
             return out
 
-        # 1b. FeedbackLoop 建议拒绝
+        # 1b. FeedbackLoop 建议拒绝 (软拒绝: 软降权而非硬 BLOCK)
         if inp.feedback_reject:
-            out.hard_blocked = True
-            out.block_reason = "FEEDBACK_LOOP_REJECT"
-            out.fused_prob = 0.0
-            out.fused_ev = 0.0
-            out.fused_conf = 0.0
-            out.source_weights = dict(self._weights)
-            out.details["hard_block_source"] = "FeedbackLoop"
-            logger.info(f"DecisionFusion: FeedbackLoop 拒绝 -> BLOCK")
-            return out
+            out.details["feedback_reject_soft"] = True
+            logger.info("DecisionFusion: FeedbackLoop 建议拒绝 -> 软降权")
 
         # ── Step 2: 归一化各源概率 ──
         # guard_prob: EVRealityGuard ML win prob (None -> 用 calib_prob 替代)
@@ -251,6 +241,12 @@ class DecisionFusionLayer:
             abs(inp.ml_prob - guard_prob),
         )
         use_fused = max_diff >= 0.05 or fused_conf < 0.9
+        if inp.feedback_reject:
+            fused_prob = fused_prob * 0.55
+            fused_ev = fused_ev * 0.55
+            fused_conf = fused_conf * 0.75
+            out.details["feedback_soft_penalty"] = 0.55
+            logger.debug(f"feedback_reject soft: fused_prob={fused_prob:.3f}")
 
         # ── Step 8: 填充输出 ──
         out.fused_prob = fused_prob
@@ -456,10 +452,8 @@ class DecisionFusionLayer:
         prob = 0.30 + (feedback_score / 100.0) * 0.50
         return max(0.0, min(1.0, prob))
 
-
 # 全局单例
 _fusion_layer: Optional[DecisionFusionLayer] = None
-
 
 def get_decision_fusion() -> DecisionFusionLayer:
     """获取融合层单例"""

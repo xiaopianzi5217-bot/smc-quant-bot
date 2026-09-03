@@ -37,6 +37,8 @@ from config import (
     MAX_TRADES_DAY,
     MAX_CONSECUTIVE_LOSS,
     ENABLE_RUNTIME_RECOVERY,
+    LIQUIDITY_SWEEP_REQUIRE_CHOCH,
+    LIQUIDITY_SWEEP_MIN_VOL_RATIO,
 )
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
@@ -1284,19 +1286,32 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _observer_event_types = [e["type"] for e in _observer_events_list]
     is_sweep = (_setup_name == 'LIQUIDITY_SWEEP')
     has_choch = ('CHOCH' in _observer_event_types)
-    # 动能确认：使用 sqzmom vol_ratio > 1.0 作为动量指标
-    has_momentum = (sqz_data.get("vol_ratio", 0.0) > 1.0)
-    # 核心判定：要么不是 Sweep 信号直接放行；若是，必须满足全要素
-    sweep_approved = (not is_sweep) or (has_choch and has_momentum)
-    # 布尔乘法干预：False 转为 0，分数归零触发 ScoreGate 拦截
+        # 动能确认：使用 sqzmom vol_ratio 作为动量指标（阈值从 config 获取，默认 0.3）
+    has_momentum = (sqz_data.get("vol_ratio", 0.0) > LIQUIDITY_SWEEP_MIN_VOL_RATIO)
+    # 核心判定：要么不是 Sweep 信号直接放行；若是，
+    # 若 require_choch=True 需 momentum 并有 CHOCH，否则仅需 momentum 足够即通过
+    if is_sweep and LIQUIDITY_SWEEP_REQUIRE_CHOCH:
+        # config 要求 CHOCH 时必须同时有 momentum 和 CHOCH
+        sweep_approved = has_momentum and has_choch
+        slog.info(f"[{symbol}] LIQUIDITY_SWEEP 判定(config要求CHOCH): has_choch={has_choch} has_momentum={has_momentum} -> sweep_approved={sweep_approved}")
+    else:
+        # config 不要求 CHOCH：只要 momentum 足够即可通过（满足用户“只有动量足够的假清扫也能过”需求）
+        sweep_approved = (not is_sweep) or has_momentum
+        # 布尔乘法干预：False 时扣分或归零（由 config 控制）
     if is_sweep and not sweep_approved:
-        slog.info(f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: setup={_setup_name} has_choch={has_choch} has_momentum={has_momentum}(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) score={_fl_final_score:.1f} -> 0")
-        _fl_final_score = 0.0  # 分数归零，后续 ScoreGate 直接拦截
+        # 默认推荐：只扣 15 分而非零分，让信号仍有机会通过（除非分数本来就低于门槛）
+        _pen_val = 15.0
+        _old_val = _fl_final_score
+        _fl_final_score = max(0.0, _fl_final_score - _pen_val)
+        slog.info(f"[{symbol}] ⚠️ LIQUIDITY_SWEEP 不满足条件: setup={_setup_name} has_choch={has_choch} has_momentum={has_momentum}(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) score={_old_val:.1f} -> {_fl_final_score:.1f} (-{_pen_val:.1f})")
 
-    # ===== 【GATE-4 修复】HTF Regime 拦截同样需要分数归零 =====
+        # ===== 【GATE-4 修复】HTF Regime 拦截/扣分处理 =====
     if result_htf_blocked:
-        slog.info(f"[{symbol}] 🚫 HTF Regime 一票否决: 1H 方向不允许，score={_fl_final_score:.1f} -> 0")
-        _fl_final_score = 0.0  # 分数归零，让 approved=False, rejected=True
+        # 改为扣 20 分而非直接归零，让信号可通过但仍受显著惩罚
+        _htf_pen_val = 20.0
+        _old_htf_val = _fl_final_score
+        _fl_final_score = max(0.0, _fl_final_score - _htf_pen_val)
+        slog.info(f"[{symbol}] ⚠️ HTF Regime 不通过: 1H 方向不允许，score={_old_htf_val:.1f} -> {_fl_final_score:.1f} (-{_htf_pen_val:.1f})")
 
         # 构建兼容返回格式
     return {
@@ -1304,11 +1319,11 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "symbol": symbol,
         "direction": direction,
         # 【EVRealityGuard】归零逻辑：一票否决/风控归零后，EV 同步归零，防止下游误用
-        "expected_value": round(float(_fb_result["ev"]), 4) if _fl_final_score > 0 else 0.0,
-        "score": round(float(_fb_result["weighted_score"]), 2),  # 风控否决/调整后的最终分
+                "expected_value": round(float(_fb_result["ev"]), 4) if _fl_final_score > 0 else 0.0,
+        "score": round(_fl_final_score, 2),  # 风控否决/扣分后的最终分（HTF/Sweep 扣分已计入）
         "orig_score": round(score, 2),  # 原始进入 V56.5 / Calibration 评分，用于 V6 路由判断
-        "final_score": round(float(_fb_result["weighted_score"]), 2),
-        "v6_weighted_score": round(float(_fb_result["weighted_score"]), 2),  # 对外暴露的最终分，供 V6 路由判断
+        "final_score": round(_fl_final_score, 2),
+        "v6_weighted_score": round(_fl_final_score, 2),  # 对外暴露的最终分，供 V6 路由判断
         "rejected": _fl_final_score <= 0.0,  # 被一票否决归零后，路由层必须据此拦截
         "entry": entry_price,
         "sl": sl,
@@ -1892,10 +1907,12 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         slog.warning(f"[V6 分级路由 - 否决拦截] {symbol} {_r_reason} score={result.get('score', 0.0)}，跳过路由与推送")
         return False
 
-    # ===== 【GATE-4 修复】HTF Regime 宏观方向拦截（与旧 check_and_open 对齐）=====
-    if bool(result.get("htf_blocked", False)):
-        slog.warning(f"[V6 分级路由 - HTF拦截] {symbol} 1H 趋势方向不允许，跳过路由与推送")
+        # ===== 【GATE-4 修复】HTF Regime 宏观方向拦截 - 仅当分数归零时才拦截 =====
+    if bool(result.get("htf_blocked", False)) and float(result.get("score", 0.0) or 0.0) <= 0.0:
+        slog.warning(f"[V6 分级路由 - HTF拦截] {symbol} 1H 趋势方向不允许且分数归零，跳过路由与推送")
         return False
+    elif bool(result.get("htf_blocked", False)):
+        slog.info(f"[V6 分级路由 - HTF逆势放行] {symbol} score={result.get('score', 0.0):.1f} > 0（已扣 20 分惩罚），继续路由")
 
     result = evaluate_signal_v6_routing(result)
     route = result["action_route"]
@@ -2300,10 +2317,12 @@ def check_and_open(result: dict | None) -> bool:
     features = result.get("features", {})
     blended_ev = result.get("blended_ev", result.get("expected_value", 0.0))
     
-        # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
-    if htf_blocked:
-        slog.warning(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}: 1H 趋势方向不允许，直接拒绝")
+            # ===== 【优化2 - HTF Regime Filter】大方向拦截 =====
+    if htf_blocked and float(result.get("score", 0.0) or 0.0) <= 0.0:
+        slog.warning(f"[{symbol}] GATE-4 HTF Regime 拦截 {direction}: 1H 趋势方向不允许且分数归零，直接拒绝")
         return False
+    elif htf_blocked:
+        slog.info(f"[{symbol}] GATE-4 HTF 逆势但已扣分，score={result.get('score', 0.0):.1f} > 0，放行")
     
     # ===== 【优化5 - Statistical EV】使用 blended_ev 替代原始 ev =====
     # blended_ev = 历史实际 EV * 0.6 + model_ev * 0.4
