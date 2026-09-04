@@ -27,8 +27,9 @@ from utils.structured_logger import slog
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from utils.structured_logger import slog
 
 EVENT_LOG = "data/events.jsonl"
 
@@ -67,7 +68,7 @@ class EventLogger:
             "schema_version": "58",
             "event_id": event_id,
             "event_type": event_type,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **data,
         }
         try:

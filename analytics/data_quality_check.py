@@ -5,24 +5,41 @@ Provides counts for OPEN/EXIT, missing OPEN/EXIT pairs, duplicate trade_ids, and
 """
 from pathlib import Path
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def _parse_iso(ts: str):
+    """Parse timestamp to aware-UTC datetime.
+
+    Handles: ISO-8601 with/without timezone offset or 'Z' suffix,
+    epoch seconds (int/float str). Naive parsed strings are assumed
+    to represent UTC (semantic fix: all logs written in UTC).
+
+    Returns aware datetime in UTC, or None on failure.
+    """
+    if not ts:
+        return None
     try:
-        return datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
     except Exception:
         try:
-            return datetime.utcfromtimestamp(float(ts))
+            # epoch float seconds
+            return datetime.fromtimestamp(float(ts), timezone.utc)
         except Exception:
             return None
+    if dt.tzinfo is None:
+        # naive assumed UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def run_data_quality_check(target_date: datetime = None) -> dict:
     if target_date is None:
         target_date = datetime.utcnow()
 
-    start = datetime(target_date.year, target_date.month, target_date.day)
+    start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
 
     event_file = Path("data/events.jsonl")

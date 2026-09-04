@@ -6,7 +6,8 @@ Produces a human-readable summary for a given day (default: today).
 from pathlib import Path
 import json
 import sqlite3
-from datetime import datetime, timedelta
+import calendar
+from datetime import datetime, timedelta, timezone
 from analytics.outcome_db import OutcomeDatabase
 from analytics import data_quality_check
 from analytics.ev_monitor import EVMonitor
@@ -18,13 +19,30 @@ except Exception:
 
 
 def _parse_iso(ts: str):
+    """Parse timestamp to aware-UTC datetime.
+
+    Handles: ISO-8601 with/without timezone offset or 'Z' suffix,
+    epoch seconds (int/float str). Naive parsed strings are assumed
+    to represent UTC (semantic fix: all logs written in UTC).
+
+    Returns aware datetime in UTC, or None on failure.
+    """
+    if not ts:
+        return None
     try:
-        return datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
     except Exception:
         try:
-            return datetime.utcfromtimestamp(float(ts))
+            # epoch float seconds
+            return datetime.fromtimestamp(float(ts), timezone.utc)
         except Exception:
             return None
+    if dt.tzinfo is None:
+        # naive assumed UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: datetime) -> list:
@@ -57,9 +75,12 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
         slog.warning("[DailyReport] 云端兜底跳过: v6_research.db 不存在或为空")
         return []
 
+        # 时区说明：start/end 是 aware-UTC datetime
+        # 日历时间计算时用 timezone.utc 构造 start、end，避免 naive.timestamp() 按本地时区(UTC+8)偏移8小时
+        # 对 aware-UTC datetime 调用 .timetuple() 得到 UTC 字段，calendar.timegm 解释为 UTC epoch 一致正确
     try:
-        start_ts = int(start.timestamp())
-        end_ts = int(end.timestamp())
+        start_ts = calendar.timegm(start.timetuple())
+        end_ts = calendar.timegm(end.timetuple())
     except Exception:
         return []
 
@@ -102,7 +123,7 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
             feats = {}
             _fh = str(row["feature_hash"] or "")
             if _fh:
-                feats["cloud_hash"] = _fh[-10:]
+                feats["feature_hash"] = _fh[-10:]
             _mode = str(row["mode"] or "NORMAL")
             if _mode and _mode != "NORMAL":
                 feats["mode"] = _mode
@@ -134,7 +155,7 @@ def generate_daily_report(target_date: datetime = None) -> str:
     if target_date is None:
         target_date = datetime.utcnow()
 
-    start = datetime(target_date.year, target_date.month, target_date.day)
+    start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
 
     event_file = Path("data/events.jsonl")
@@ -158,11 +179,11 @@ def generate_daily_report(target_date: datetime = None) -> str:
                     continue
                 all_events.append(ev)
 
-    # ---- 2) 本地无当日 EXIT → 云端 v6_research.db 兜底 ----
+        # ---- 2) 本地无当日 EXIT → 云端 v6_research.db 兜底 ----
     if not all_events:
         all_events = _backfill_from_cloud_v6_db(target_date, start, end)
 
-        total = 0
+    total = 0
     wins = 0
     losses = 0
     max_loss = 0.0
@@ -215,17 +236,26 @@ def generate_daily_report(target_date: datetime = None) -> str:
         # 聚合用于质量排名：按 (symbol, regime, top_feature) 汇总 profit
         sym = ev.get('symbol') or 'UNK'
         rg = ev.get('regime') or 'UNKNOWN'
-        # 选取一个代表性 feature 名称（尽量挑布尔/标志类），否则第一个 key
+        # 选取一个代表性特征：优先取 `feature_hash`/`cloud_hash` 键的实际值（哈希），
+        # 其次找布尔/标志类 key 名（值 True/非空字符串），最后取第一个 key。
+        # 修复: 之前取的是固定 key 名 (如 cloud_hash) 导致所有云端记录归为一类。
         top_feat = 'NONE'
         if isinstance(features, dict) and features:
-            # 尝试找到值为 True 或非空字符串的 key
             found = None
-            for kk, vv in features.items():
-                if vv is True or (isinstance(vv, str) and vv):
-                    found = kk
+            # 1) 优先从 feature_hash / cloud_hash 键中提取实际哈希值
+            for hash_key in ("feature_hash", "cloud_hash"):
+                hv = features.get(hash_key)
+                if hv and isinstance(hv, str) and hv:
+                    found = hv
                     break
+            # 2) 再尝试找到值为 True 的布尔标志 key
             if not found:
-                # 选择第一个 key
+                for kk, vv in features.items():
+                    if vv is True or (isinstance(vv, str) and vv and kk not in ("feature_hash", "cloud_hash")):
+                        found = kk
+                        break
+            # 3) 最后选择第一个 key
+            if not found:
                 found = next(iter(features.keys()))
             top_feat = found
         combo = (sym, rg, top_feat)
@@ -321,8 +351,19 @@ def send_report_via_telegram(target_date: datetime = None):
     # 增加数据质量摘要
     try:
         dq = data_quality_check.run_data_quality_check(target_date)
+        # 修复: 所有字段加 or 0 兜底，防止 None 拼入字符串导致显示"None"
+        open_count = dq.get('open_count') or 0
+        exit_count = dq.get('exit_count') or 0
+        missing_count = dq.get('missing_open_without_exit') or 0
+        duplicate_count = dq.get('duplicate_trade_ids') or 0
+        features_empty_count = dq.get('features_empty') or 0
         summary = (
-            f"\n\n数据质量:\nOPEN数量: {dq.get('open_count')}\nEXIT数量: {dq.get('exit_count')}\n缺失: {dq.get('missing_open_without_exit')}\ntrade_id重复: {dq.get('duplicate_trade_ids')}\nfeatures为空: {dq.get('features_empty')}\n"
+            f"\n\n数据质量:\n"
+            f"OPEN数量: {open_count}\n"
+            f"EXIT数量: {exit_count}\n"
+            f"缺失: {missing_count}\n"
+            f"trade_id重复: {duplicate_count}\n"
+            f"features为空: {features_empty_count}\n"
         )
         report = report + summary
     except Exception:
