@@ -172,6 +172,11 @@
         "23": 30.0,
         "__default__": 30.0
       }
+    },
+    "a_grade_trend_conflict": {
+      "block_score_ge85": true,
+      "block_70_85": true,
+      "enabled": true
     }
   },
   "micro_guard": {

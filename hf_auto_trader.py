@@ -1068,7 +1068,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "adx": float(exec_ctx.get("adx", 0)) > 25,
         "structure_break": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
         "momentum": abs(_exec_lq - _exec_sq) > 15 if (_exec_lq > 0 or _exec_sq > 0) else False,
-        "trend_direction": direction == str(_htf_state.get("regime", "")).upper().replace("BULL", "Long").replace("BEAR", "Short") or False,
+        # FIX-20260913: RANGE -> True, BULL/BEAR -> direction match
+        "trend_direction": (
+            True if _regime_name == "RANGE"
+            else (direction == "Long") if _regime_name == "BULL"
+            else (direction == "Short") if _regime_name == "BEAR"
+            else False
+        ),
         "atr_expand": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))) > float(curr.get("ATRr_14", 0)) * 1.2 if hasattr(curr, 'get') else False,
         "squeeze_release": str(exec_ctx.get("squeeze", "")).lower() in ("release", "squeeze_release"),
         "volume_break": float(curr.get("volume_ratio", 1)) > 1.5 if hasattr(curr, 'get') else False,
@@ -1832,6 +1838,64 @@ async def async_record_snapshot_and_push(result: dict, kelly_size: float = 0.0):
         slog.error(f"[async_record_snapshot_and_push] 异步记录异常: {exc}")
 
 
+# ===== V59.8 A_GRADE 逆HTF趋势保护（路由层 helpers） =====
+def _load_a_grade_conf_cfg():
+    """读取 v11_full_config -> v565_gate.a_grade_trend_conflict。默认开启（fail-safe）。"""
+    import functools
+    _default = {"enabled": True, "block_70_85": True, "block_score_ge85": True}
+
+    @functools.lru_cache(maxsize=1)
+    def _inner():
+        try:
+            paths = [
+                Path("config/v11_full_config.json"),
+                Path(__file__).resolve().parent / "config" / "v11_full_config.json",
+            ]
+            for _fp in paths:
+                if _fp.exists():
+                    _doc = json.loads(_fp.read_text(encoding="utf-8"))
+                    _sec = (_doc.get("v565_gate", {}) or {}).get("a_grade_trend_conflict", {}) or {}
+                    _merged = dict(_default)
+                    for _k in _default:
+                        if _k in _sec:
+                            _merged[_k] = bool(_sec[_k])
+                    return _merged
+            return dict(_default)
+        except Exception as _e:
+            slog.error(f"[V6 A_GRADE趋势保护] 读取 config 失败，默认全部启用: {_e}")
+            return dict(_default)
+
+    return _inner()
+
+
+def _a_signal_trend_conflict(result: dict):
+    """判断 signal direction 是否与 result/features 的 trend_direction 冲突。
+    兼容 bool 与 str 两种类型。返回 (conflict: bool, tdir)。"""
+    try:
+        _tdir = result.get("trend_direction")
+        if _tdir is None:
+            _feats = result.get("features", {}) or {}
+            _tdir = _feats.get("trend_direction")
+        _sd = str(result.get("direction", "")).lower()
+
+        # bool: False = 逆势, True/None = 不冲突
+        if _tdir is False:
+            return True, _tdir
+        if isinstance(_tdir, bool):
+            return False, _tdir
+        if isinstance(_tdir, str):
+            _t = _tdir.strip().lower()
+            if _t in ("", "false", "0", "no", "unknown", "none"):
+                return True, _tdir   # 空/未知 → 保守视为冲突
+            if _t in ("long", "bull", "up", "uptrend"):
+                return (_sd in ("short", "sell")), _tdir
+            if _t in ("short", "bear", "down", "downtrend"):
+                return (_sd in ("long", "buy")), _tdir
+        return False, _tdir
+    except Exception:
+        return False, None
+
+
 def evaluate_signal_v6_routing(result: dict) -> dict:
     """
     【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
@@ -1847,44 +1911,85 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
     if score >= 70.0:
         result["v6_level"] = "A_GRADE"
         result["action_route"] = "LIVE_FULL_TRADE"
+        # ===== V59.8 A_GRADE 逆HTF趋势红线 =====
+        try:
+            _a_cfg = _load_a_grade_conf_cfg()
+            _a_conflict, _a_tdir = _a_signal_trend_conflict(result)
+            if bool(_a_cfg.get("enabled", True)) and _a_conflict:
+                _a_ge85 = float(score) >= 85.0
+                if _a_ge85 and bool(_a_cfg.get("block_score_ge85", True)):
+                    # 分级1: 逆HTF且score>=85 → 完全禁止REAL TRADE
+                    result["v6_level"] = "RESEARCH_SILENT"
+                    result["action_route"] = "RESEARCH_SILENT"
+                    result["_a_grade_trend_veto"] = True
+                    slog.warning(
+                        f"[V6 A_GRADE红线] {result.get('symbol', '?')} "
+                        f"A({score:.1f}分>=85)逆HTF(td={_a_tdir}) → RESEARCH_SILENT 完全禁止"
+                    )
+                elif (not _a_ge85) and bool(_a_cfg.get("block_70_85", True)):
+                    # 分级2: 70<=A<85 逆HTF → A→B 强制半仓
+                    result["v6_level"] = "B_GRADE"
+                    result["action_route"] = "LIVE_HALF_TRADE"
+                    result["_trend_filter_half"] = True
+                    slog.warning(
+                        f"[V6 A_GRADE红线] {result.get('symbol', '?')} "
+                        f"A({score:.1f}分[70,85))逆HTF(td={_a_tdir}) → A→B 强制半仓"
+                    )
+        except Exception as _a_e:
+            slog.error(f"[V6 A_GRADE红线异常] {_a_e}")
     elif 55.0 <= score < 70.0:
         result["v6_level"] = "B_GRADE"
         result["action_route"] = "LIVE_HALF_TRADE"
-        # ===== 趋势方向硬门槛：逆HTF趋势的B级信号降级为RESEARCH_SILENT（不开仓）=====
-        # 现象：55-70分B级信号中部分与1H趋势相反，开仓后逆势被反复扫止损
-        # 方案：取V56.5引擎输出的trend_direction（features.trend_direction），
-        #       支持 bool（True=顺势/False=逆势）与字符串（"Long"/"Short"/""）两种格式
+        # ===== trend direction hard gate: only downgrade for counter-HTF in BULL/BEAR regime =====
+        # RANGE/CHOP: trend_direction is often False/empty, old logic kills ALL B signals -> RESEARCH_SILENT
+        # FIX: RANGE/CHOP/UNKNOWN -> no hard downgrade, allow half-position live
         try:
-            _tdir = result.get("trend_direction")
-            if _tdir is None:
-                _feats = result.get("features", {}) or {}
-                _tdir = _feats.get("trend_direction")
+            # FIX-20260913: prefer features version (RANGE-aware) over exec_ctx empty string
+            _feats_inner = result.get("features", {}) or {}
+            _tdir = _feats_inner.get("trend_direction")
+            if _tdir is None or _tdir == "":
+                _tdir_tmp = result.get("trend_direction")
+                if _tdir_tmp not in (None, ""):
+                    _tdir = _tdir_tmp
             _sig_dir = str(result.get("direction", "")).lower()
-            _allow_route = True
-            # 情况1：bool 类型 — False 表示逆势
-            if _tdir is False:
-                _allow_route = False
-            # 情况2：str 类型 — 空值/未知保守降级，方向与信号相反时降级
-            elif isinstance(_tdir, str):
-                _tdir_l = _tdir.strip().lower()
-                if _tdir_l in ("", "false", "0", "no", "unknown"):
+            _regime = str(result.get("regime", "") or "").upper().strip()
+            
+            if _regime in ("RANGE", "CHOP", "UNKNOWN", ""):
+                # RANGE/CHOP/UNKNOWN: no hard trend-direction downgrade
+                _allow_route = True
+                if _regime in ("RANGE", "CHOP"):
+                    slog.info(
+                        f"[V6 ROUTE RANGE_PASS] {result.get('symbol', '?')} "
+                        f"B_GRADE({score:.1f}) regime={_regime}, NO trend hard-gate"
+                    )
+            else:
+                _allow_route = True
+                # Case 1: bool - False means counter-trend
+                if _tdir is False:
                     _allow_route = False
-                elif _tdir_l in ("long", "bull", "up", "uptrend"):
-                    if _sig_dir == "short":
+                # Case 2: str
+                elif isinstance(_tdir, str):
+                    _tdir_l = _tdir.strip().lower()
+                    if _tdir_l in ("", "false", "0", "no", "unknown", "none"):
                         _allow_route = False
-                elif _tdir_l in ("short", "bear", "down", "downtrend"):
-                    if _sig_dir == "long":
-                        _allow_route = False
+                    elif _tdir_l in ("long", "bull", "up", "uptrend"):
+                        if _sig_dir in ("short", "sell"):
+                            _allow_route = False
+                    elif _tdir_l in ("short", "bear", "down", "downtrend"):
+                        if _sig_dir in ("long", "buy"):
+                            _allow_route = False
+            
             if not _allow_route:
                 slog.warning(
-                    f"[V6 分级路由 - 趋势方向硬门槛] {result.get('symbol', '?')} "
-                    f"B_GRADE({score:.1f}分) trend_direction={_tdir}（逆HTF趋势），降级为 RESEARCH_SILENT"
+                    f"[V6 trend hard-gate] {result.get('symbol', '?')} "
+                    f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
+                    f"(counter-HTF), downgrade RESEARCH_SILENT"
                 )
                 result["v6_level"] = "OBSERVE_GRADE"
                 result["action_route"] = "RESEARCH_SILENT"
                 result["_trend_filter_downgrade"] = True
         except Exception as _td_e:
-            slog.error(f"[V6 分级路由 - 趋势方向硬门槛异常]: {_td_e}")
+            slog.error(f"[V6 trend hard-gate error]: {_td_e}")
     elif 45.0 <= score < 55.0:
         result["v6_level"] = "OBSERVE_GRADE"
         result["action_route"] = "RESEARCH_SILENT"
