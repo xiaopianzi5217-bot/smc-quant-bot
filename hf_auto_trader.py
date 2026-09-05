@@ -165,10 +165,15 @@ _RECOVERED_POSITIONS: bool = False  # 是否已执行重启恢复
 _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open平仓日志
 
 # ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
+# 扩宽 allowed_hours: 覆盖亚盘早段 + 白天黄金交易时段 + 欧盘衔接 + 美盘前半；
+# 极差时段(4/6/7/23)仍可由 Quality Gate hard_block_hours=[4,6,7,23] 拦截。
 _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=45.0,
-    allowed_hours=(0, 1, 2, 3, 16, 17, 18, 19, 21),
-    # 【20260905】实盘 score 量级为 30~55（trade_journal 92 笔均值 40.8、最高 54.3），
+    allowed_hours=(
+        0, 1, 2, 3, 4, 5,           # 亚盘早段
+        8, 9, 10, 11, 12, 13, 14, 15,  # 白天（原缺失，导致 12:00 的 64+ 分被静默丢弃）
+        16, 17, 18, 19, 20, 21, 22, 23  # 欧美股 + 晚间
+    ),
     strong_tier2_score=50.0,
 ))
 # ---------- EVRealityGuard / ML EV Guard ----------

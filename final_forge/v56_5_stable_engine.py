@@ -311,6 +311,20 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
         return pd.DataFrame()
     cand = candidates[_eligible(candidates, cfg)].copy()
     if cand.empty:
+        # 诊断：候选被 hour/score/setup 滤光时给出原因
+        try:
+            n = len(candidates)
+            sc = pd.to_numeric(candidates.get("score"), errors="coerce")
+            hrs = candidates.get("hour")
+            n_score = int((sc >= float(cfg.min_score)).sum()) if n else 0
+            n_hour = int(hrs.isin(tuple(cfg.allowed_hours)).sum()) if n and hrs is not None else 0
+            print(
+                f"⚠️  V56.5 eligible 为空: candidates={n}, "
+                f"score>={cfg.min_score}:{n_score}, hour_ok:{n_hour}, "
+                f"allowed_hours={cfg.allowed_hours}"
+            )
+        except Exception:
+            pass
         return cand
 
     # Quality gate: pre-filter candidates before Top-N selection.
@@ -353,9 +367,24 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
 
         cand = cand[cand["gate_passed"]].copy()
         if cand.empty:
-            print("⚠️  V56.5 Quality Gate rejected ALL candidates. No trades this run.")
+            from collections import Counter
+            try:
+                _reasons = Counter(cand.get("gate_reason", "?"))
+                hrs_before = pd.to_numeric(candidates.get("hour"), errors="coerce")
+                _hour_before = Counter(int(h) for h in hrs_before.dropna() if int(h) in cfg.allowed_hours)
+                _hour_all = Counter(int(h) for h in hrs_before.dropna())
+                _score_before = pd.to_numeric(candidates.get("score"), errors="coerce")
+                _score_ge = int((_score_before >= float(cfg.min_score)).sum())
+                print(
+                    f"⚠️  V56.5 Quality Gate rejected ALL candidates. No trades this run.\n"
+                    f"    gate_reasons: {dict(_reasons)}\n"
+                    f"    hours_in_allowed: {dict(sorted(_hour_before.items()))}\n"
+                    f"    hours_total: {dict(sorted(_hour_all.items()))}\n"
+                    f"    candidates_score>={cfg.min_score}: {_score_ge}/{len(candidates)}"
+                )
+            except Exception:
+                pass
             return pd.DataFrame()
-
         # ⚡ 第二层：Engine 软排名调整
         # 使用 liquidity_penalty 降低 decision_score（不修改原始 score）
         lp = pd.to_numeric(cand.get("gate_liquidity_penalty", 0.0), errors="coerce").fillna(0.0)
