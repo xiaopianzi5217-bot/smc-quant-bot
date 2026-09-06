@@ -311,20 +311,71 @@ def select_v565_portfolio(candidates: pd.DataFrame, cfg: Optional[V565Config] = 
         return pd.DataFrame()
     cand = candidates[_eligible(candidates, cfg)].copy()
     if cand.empty:
-        # 诊断：候选被 hour/score/setup 滤光时给出原因
+        # 诊断：候选被 hour/score/setup/tier 滤光时给出精确原因（2026-09-06 增强）
         try:
             n = len(candidates)
             sc = pd.to_numeric(candidates.get("score"), errors="coerce")
             hrs = candidates.get("hour")
+            setups = candidates.get("setup_type")
+            tiers = candidates.get("tier")
             n_score = int((sc >= float(cfg.min_score)).sum()) if n else 0
             n_hour = int(hrs.isin(tuple(cfg.allowed_hours)).sum()) if n and hrs is not None else 0
+
+            # setup / tier 细分
+            is_primary_loose = setups.isin(cfg.primary_setups) if setups is not None else pd.Series(False, index=candidates.index)
+            n_primary = int(is_primary_loose.sum()) if n else 0
+            n_tier1 = int((tiers == 1).sum()) if n and tiers is not None else 0
+            n_tier2 = int((tiers == 2).sum()) if n and tiers is not None else 0
+
+            # 强 Tier2 条件
+            strong_t2_thresh = max(55.0, float(cfg.strong_tier2_score) * 0.85)
+            is_strong_t2 = (
+                bool(cfg.allow_tier2_if_strong)
+                & (tiers == 2)
+                & (sc >= strong_t2_thresh)
+            ) if n and tiers is not None else pd.Series(False, index=candidates.index)
+            n_strong_t2 = int(is_strong_t2.sum()) if n else 0
+
+            # 逐条打印被拒原因（最多前 8 条，避免刷屏）
+            reject_details = []
+            for idx, row in candidates.head(8).iterrows():
+                reasons = []
+                row_score = float(pd.to_numeric(row.get("score"), errors="coerce") or 0)
+                row_hour = row.get("hour")
+                row_setup = str(row.get("setup_type", "?"))
+                row_tier = row.get("tier")
+                if row_score < float(cfg.min_score):
+                    reasons.append(f"score={row_score:.1f}<{cfg.min_score}")
+                if hrs is not None and row_hour not in tuple(cfg.allowed_hours):
+                    reasons.append(f"hour={row_hour} not in allowed")
+                if row_setup not in cfg.primary_setups:
+                    reasons.append(f"setup={row_setup} not in primary={cfg.primary_setups}")
+                if not (row_setup in cfg.primary_setups or (cfg.allow_tier2_if_strong and row_tier == 2 and row_score >= strong_t2_thresh)):
+                    if row_tier == 2 and not cfg.allow_tier2_if_strong:
+                        reasons.append("tier2 blocked (allow_tier2_if_strong=False)")
+                    elif row_tier == 2 and row_score < strong_t2_thresh:
+                        reasons.append(f"tier2 score={row_score:.1f}<{strong_t2_thresh:.1f}")
+                if not reasons:
+                    reasons.append("unknown (check is_primary_loose | is_strong_tier2_loose)")
+                reject_details.append(
+                    f"  [{row.get('symbol','?')} idx={row.get('idx','?')}] "
+                    f"setup={row_setup} tier={row_tier} score={row_score:.1f} → {', '.join(reasons)}"
+                )
+
             print(
                 f"⚠️  V56.5 eligible 为空: candidates={n}, "
                 f"score>={cfg.min_score}:{n_score}, hour_ok:{n_hour}, "
+                f"primary_setup_ok:{n_primary}, tier1:{n_tier1}, tier2:{n_tier2}, "
+                f"strong_tier2_ok:{n_strong_t2}, "
+                f"allow_tier2={cfg.allow_tier2_if_strong}, primary_setups={cfg.primary_setups}, "
                 f"allowed_hours={cfg.allowed_hours}"
             )
-        except Exception:
-            pass
+            if reject_details:
+                print("    逐条过滤原因:")
+                for line in reject_details:
+                    print(line)
+        except Exception as _diag_e:
+            print(f"⚠️  V56.5 eligible 诊断异常: {_diag_e}")
         return cand
 
     # Quality gate: pre-filter candidates before Top-N selection.
