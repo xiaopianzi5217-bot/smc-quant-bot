@@ -215,7 +215,7 @@ def check_partial_close_and_trail(
     # 计算 risk（兼容保本后 sl == entry 的情况）
     # ============================
     # 【V59.7 修复】保本后 current_sl == entry ʱ risk=0，导致所有ƽ仓信号ʧЧ。
-    # 方案：优先ʹ用 initial_risk（开仓ʱ保存），其次用 ATR fallback，
+        # 方案：优先ʹ用 initial_risk（开仓ʱ保存），其次用 ATR fallback，
     # 保֤保本后 TP1/TP2/׷踪ֹ损仍能正ȷ触发。
     atr = float(position.get("atr") or position.get("ATRr_14") or 0)
     if atr <= 0:
@@ -226,13 +226,13 @@ def check_partial_close_and_trail(
 
     if risk_abs > 0:
         risk = risk_abs
-        # 首次计算ʱ保存 initial_risk（便于保本后׷溯）
+        # 首次计算时保存 initial_risk（便于保本后回溯）
         if initial_risk <= 0:
             initial_risk = risk_abs
     elif initial_risk > 0:
         risk = initial_risk
     else:
-        # 保本后无初ʼ风险记¼，用 ATR 作Ϊ合理 fallback
+        # 保本后无初始风险记录，用 ATR 作为合理 fallback
         risk = atr
 
     if risk <= 0:
@@ -241,10 +241,19 @@ def check_partial_close_and_trail(
     # ============================
     # 计算 R（基于ʵ际 risk，保本后仍可正ȷ计算）
     # ============================
-    if str(side or "").lower().startswith("long"):
-        profit_r = (current_price - entry) / risk
+    _MIN_RISK = max(abs(entry) * 0.0005, 1e-9)
+    if stage >= 1 and initial_risk > 0:
+        risk_for_r = max(initial_risk, _MIN_RISK)
     else:
-        profit_r = (entry - current_price) / risk
+        risk_for_r = max(risk, _MIN_RISK)
+
+    if str(side or "").lower().startswith("long"):
+        _profit_r_raw = (current_price - entry) / risk_for_r
+    else:
+        _profit_r_raw = (entry - current_price) / risk_for_r
+
+    # 【V59.8】R 倍数硬帽 -20 ~ +20，防脏值污染 EV/Outcome
+    profit_r = max(-20.0, min(20.0, _profit_r_raw))
 
     # ============================
     # 1. 首先检查Ӳֹ损（无条件，即ʹ保本后Ҳ能触发）

@@ -1,30 +1,26 @@
 ======== DAILY REPORT ========
 Date: 2026-08-16
 
-交易: 4
-胜: 1
-败: 3
-WinRate: 25.0%
+交易: 2
+胜: 0
+败: 2
+WinRate: 0.0%
 PF: N/A
 
-最佳 Regime: RANGE
-最佳 Feature: cloud_hash=bb14e702
+最佳 Regime: MIXED
+最佳 Feature: feature_hash=a6249fc5
 最大亏损: -1.1244R
-平均MFE: 4.8738R
-平均MAE: -40.8137R
+平均MFE: 9.7475R
+平均MAE: -81.6275R
 ==============================
 
 Top 赚钱组合（symbol, regime, feature）:
-ETH/USDT | RANGE | cloud_hash -> total_R=0.1083 count=1
-BTC/USDT | RANGE | cloud_hash -> total_R=-0.5609 count=1
-BTC/USDT | MIXED | cloud_hash -> total_R=-1.0089 count=1
-ETH/USDT | MIXED | cloud_hash -> total_R=-1.1244 count=1
+BTC/USDT | MIXED | 64e91caa -> total_R=-1.0089 count=1
+ETH/USDT | MIXED | a6249fc5 -> total_R=-1.1244 count=1
 
 亏损最多组合：
-ETH/USDT | MIXED | cloud_hash -> total_R=-1.1244 count=1
-BTC/USDT | MIXED | cloud_hash -> total_R=-1.0089 count=1
-BTC/USDT | RANGE | cloud_hash -> total_R=-0.5609 count=1
-ETH/USDT | RANGE | cloud_hash -> total_R=0.1083 count=1
+ETH/USDT | MIXED | a6249fc5 -> total_R=-1.1244 count=1
+BTC/USDT | MIXED | 64e91caa -> total_R=-1.0089 count=1
 
 EV -> 性能摘要:
-EV=0-1: samples=4 winrate=25.0% avg_R=-0.646 avg_EV=0.577 EV_error=-1.224
+EV=0-1: samples=2 winrate=0.0% avg_R=-1.067 avg_EV=0.576 EV_error=-1.642

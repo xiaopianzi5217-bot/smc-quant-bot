@@ -1,0 +1,26 @@
+======== DAILY REPORT ========
+Date: 2026-08-15
+
+交易: 2
+胜: 1
+败: 1
+WinRate: 50.0%
+PF: N/A
+
+最佳 Regime: RANGE
+最佳 Feature: feature_hash=bb14e702
+最大亏损: -0.5609R
+平均MFE: 0.0R
+平均MAE: 0.0R
+==============================
+
+Top 赚钱组合（symbol, regime, feature）:
+ETH/USDT | RANGE | bb14e702 -> total_R=0.1083 count=1
+BTC/USDT | RANGE | f6b87de3 -> total_R=-0.5609 count=1
+
+亏损最多组合：
+BTC/USDT | RANGE | f6b87de3 -> total_R=-0.5609 count=1
+ETH/USDT | RANGE | bb14e702 -> total_R=0.1083 count=1
+
+EV -> 性能摘要:
+EV=0-1: samples=2 winrate=50.0% avg_R=-0.226 avg_EV=0.579 EV_error=-0.805
