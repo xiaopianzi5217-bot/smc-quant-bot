@@ -1,4 +1,4 @@
-﻿"""
+"""
 Daily report generator for outcomes and events.
 
 Produces a human-readable summary for a given day (default: today).
@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import sqlite3
 import calendar
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from analytics.outcome_db import OutcomeDatabase
 from analytics import data_quality_check
@@ -420,3 +421,60 @@ def start_daily_report_scheduler():
     t.start()
     return t
 
+
+
+# ============================================================
+#   compatible in-memory DailyReport singleton
+#   (legacy counter used by hf_auto_trader / reject_analytics)
+# ============================================================
+class DailyReport:
+    """轻量兼容计数器——被 hf_auto_trader / reject_analytics 依赖。
+
+    注意: 新版 generate_daily_report() 走 events.jsonl + v6_research.db
+    双链路生成报告；这里保留的 record_candidate / record_trade /
+    record_reject 仅为保持 V56.5 遗留导入不报错，并提供
+    candidates/trades/probes/daily 的进程内统计。
+    """
+
+    def __init__(self):
+        self.daily = defaultdict(int)
+        self.trades = 0
+        self.probes = 0
+        self.candidates = 0
+
+    def record_candidate(self):
+        self.candidates += 1
+
+    def record_trade(self, mode="NORMAL"):
+        self.trades += 1
+        if mode == "PROBE":
+            self.probes += 1
+
+    def record_reject(self, stage, reason):
+        key = f"{stage}:{reason}"
+        self.daily[key] += 1
+
+    def generate(self) -> str:
+        """进程内统计的快照文本（供调试/日志）。"""
+        lines = []
+        lines.append("========== V56 DAILY REPORT (in-memory) ==========")
+        lines.append("")
+        lines.append(f"候选信号: {self.candidates}")
+        lines.append(f"正式交易: {self.trades - self.probes}")
+        lines.append(f"Probe交易: {self.probes}")
+        lines.append("")
+        lines.append("---- Reject统计 ----")
+        total = sum(self.daily.values())
+        if total:
+            for k, v in sorted(self.daily.items(), key=lambda x: x[1], reverse=True):
+                pct = v / total * 100
+                lines.append(f"{k}: {v} ({pct:.1f}%)")
+        else:
+            lines.append("暂无拒绝数据")
+        lines.append("")
+        lines.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        return "\n".join(lines)
+
+
+# 全局兼容单例，供 hf_auto_trader / reject_analytics 导入
+daily_report = DailyReport()
