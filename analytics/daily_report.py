@@ -1,4 +1,4 @@
-"""
+﻿"""
 Daily report generator for outcomes and events.
 
 Produces a human-readable summary for a given day (default: today).
@@ -52,12 +52,18 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
     策略：仅当本地 events.jsonl 无当日 EXIT 时才调用。
           查询条件与 events.jsonl 相同的时间窗口 [start, end)，
           过滤 exit_reason != 'OPEN' 且 pnl_r 非空。
-    防重：进程内 _backfilled 标记，仅首次执行一次，避免重复查询。
+    防重：进程级_按目标日期 key 去重（_backfilled_date_keys），保证每日期独立执行。
     失败/无数据静默返回 []，不影响原逻辑。
     """
-    if getattr(_backfill_from_cloud_v6_db, "_backfilled", False):
+    # [修复] 进程级一次性全局标记问题导致的跨日期失效：
+    #   原实现: 单个 _backfilled=True 使首日成功后其它日期永远跳过 DB backfill。
+    #   改为按目标日期 key 去重，保证每个日期独立执行 DB 兜底。
+    if not hasattr(_backfill_from_cloud_v6_db, "_backfilled_date_keys"):
+        _backfill_from_cloud_v6_db._backfilled_date_keys = set()
+    date_key = target_date.date().isoformat()
+    if date_key in _backfill_from_cloud_v6_db._backfilled_date_keys:
         return []
-    _backfill_from_cloud_v6_db._backfilled = True
+    _backfill_from_cloud_v6_db._backfilled_date_keys.add(date_key)
 
     db_path = Path("data/v6_research.db")
     try:
@@ -98,7 +104,8 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
             WHERE exit_reason IS NOT NULL
               AND exit_reason != ''
               AND exit_reason != 'OPEN'
-              AND pnl_r IS NOT NULL
+                            AND exit_reason NOT IN ('MANUAL_CLEANUP_DEPRECATED', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE')
+                            AND pnl_r IS NOT NULL
               AND exit_timestamp IS NOT NULL
               AND exit_timestamp > 0
               AND exit_timestamp >= ?
@@ -176,6 +183,10 @@ def generate_daily_report(target_date: datetime = None) -> str:
                 if not ts or not (start <= ts < end):
                     continue
                 if ev.get('event') != 'EXIT':
+                    continue
+                # [修复] 剔除伪造/测试/占位事件（bad_/debug/test 开头）与异常重复刷屏事件
+                tid = str(ev.get('trade_id') or '')
+                if tid.startswith(('bad_', 'test_', 'debug_', 'manual_', 'stale_')):
                     continue
                 all_events.append(ev)
 
@@ -408,49 +419,4 @@ def start_daily_report_scheduler():
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     return t
-# analytics/daily_report.py
-import time
-from collections import defaultdict
 
-
-class DailyReport:
-    def __init__(self):
-        self.daily = defaultdict(int)
-        self.trades = 0
-        self.probes = 0
-        self.candidates = 0
-
-    def record_candidate(self):
-        self.candidates += 1
-
-    def record_trade(self, mode="NORMAL"):
-        self.trades += 1
-        if mode == "PROBE":
-            self.probes += 1
-
-    def record_reject(self, stage, reason):
-        key = f"{stage}:{reason}"
-        self.daily[key] += 1
-
-    def generate(self):
-        lines = []
-        lines.append("========== V56 DAILY REPORT ==========")
-        lines.append("")
-        lines.append(f"候选信号: {self.candidates}")
-        lines.append(f"正式交易: {self.trades - self.probes}")
-        lines.append(f"Probe交易: {self.probes}")
-        lines.append("")
-        lines.append("---- Reject统计 ----")
-        total = sum(self.daily.values())
-        if total:
-            for k, v in sorted(self.daily.items(), key=lambda x: x[1], reverse=True):
-                pct = v / total * 100
-                lines.append(f"{k}: {v} ({pct:.1f}%)")
-        else:
-            lines.append("暂无拒绝数据")
-        lines.append("")
-        lines.append(time.strftime("%Y-%m-%d %H:%M:%S"))
-        return "\n".join(lines)
-
-
-daily_report = DailyReport()
