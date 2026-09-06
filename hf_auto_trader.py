@@ -1985,14 +1985,36 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                             _allow_route = False
             
             if not _allow_route:
-                slog.warning(
-                    f"[V6 trend hard-gate] {result.get('symbol', '?')} "
-                    f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
-                    f"(counter-HTF), downgrade RESEARCH_SILENT"
-                )
-                result["v6_level"] = "OBSERVE_GRADE"
-                result["action_route"] = "RESEARCH_SILENT"
-                result["_trend_filter_downgrade"] = True
+                # ===== V6 Soft Counter-HTF Gate (2026-09-06) =====
+                # 原硬降级改为可配置弹性放行：高分逆势信号允许半仓实盘
+                # 环境变量 V6_COUNTER_HTF_MIN_SCORE 控制门槛（默认 58.0）
+                # 设为 999 可恢复原硬拦截行为
+                try:
+                    _min_counter_score = float(os.getenv("V6_COUNTER_HTF_MIN_SCORE", "58.0"))
+                except (TypeError, ValueError):
+                    _min_counter_score = 58.0
+
+                if score >= _min_counter_score:
+                    slog.info(
+                        f"[V6 trend soft-gate] {result.get('symbol', '?')} "
+                        f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
+                        f"(counter-HTF but score>={_min_counter_score:.1f}), "
+                        f"allow LIVE_HALF_TRADE"
+                    )
+                    result["v6_level"] = "B_GRADE"
+                    result["action_route"] = "LIVE_HALF_TRADE"
+                    result["_trend_filter_half"] = True
+                    result["_counter_htf_soft"] = True
+                else:
+                    slog.warning(
+                        f"[V6 trend hard-gate] {result.get('symbol', '?')} "
+                        f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
+                        f"(counter-HTF, score<{_min_counter_score:.1f}), "
+                        f"downgrade RESEARCH_SILENT"
+                    )
+                    result["v6_level"] = "OBSERVE_GRADE"
+                    result["action_route"] = "RESEARCH_SILENT"
+                    result["_trend_filter_downgrade"] = True
         except Exception as _td_e:
             slog.error(f"[V6 trend hard-gate error]: {_td_e}")
     elif 45.0 <= score < 55.0:
