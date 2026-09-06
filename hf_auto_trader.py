@@ -2053,6 +2053,18 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     elif bool(result.get("htf_blocked", False)):
         slog.info(f"[V6 分级路由 - HTF逆势放行] {symbol} score={result.get('score', 0.0):.1f} > 0（已扣 20 分惩罚），继续路由")
 
+
+    # ===== FeedbackLoop + EV hard-block (2026-09-06) =====
+    _hard_block = os.getenv('V6_FB_EV_HARD_BLOCK', '1') != '0'
+    if _hard_block:
+        _fb_res = result.get('_feedback_result') or {}
+        if bool(_fb_res.get('should_reject', False)):
+            slog.warning('[FB-fuse] {symbol} reject'.format(symbol=symbol))
+            return False
+        _ev = float(result.get('_feedback_ev') or result.get('expected_value') or result.get('ev') or 0.0)
+        if _ev < float(os.getenv('V6_MIN_EV_LIVE', '0.0')):
+            slog.warning('[EV-fuse] {symbol} reject'.format(symbol=symbol))
+            return False
     result = evaluate_signal_v6_routing(result)
     route = result["action_route"]
     level = result["v6_level"]
