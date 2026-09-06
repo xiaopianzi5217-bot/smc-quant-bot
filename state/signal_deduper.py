@@ -22,10 +22,11 @@ from typing import Optional
 from utils.structured_logger import slog
 
 
-DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(4 * 3600)))  # 临时 4 小时
-DEFAULT_SYMBOL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SYMBOL_COOLDOWN_SEC", "900"))
-DEFAULT_SAME_SETUP_COOLDOWN_SEC = int(os.getenv("SIGNAL_SAME_SETUP_COOLDOWN_SEC", str(5 * 75)))
-DEFAULT_SL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SL_COOLDOWN_SEC", "300"))
+DEFAULT_SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_DEDUP_TTL_SEC", str(6 * 3600)))  # 6 小时
+# 2026-09-07: 拉长冷却，防止同一 LIQUIDITY_SWEEP 等结构在短时间内反复开单
+DEFAULT_SYMBOL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SYMBOL_COOLDOWN_SEC", "3600"))       # 同品种 1h
+DEFAULT_SAME_SETUP_COOLDOWN_SEC = int(os.getenv("SIGNAL_SAME_SETUP_COOLDOWN_SEC", "7200"))  # 同方向+同setup 2h
+DEFAULT_SL_COOLDOWN_SEC = int(os.getenv("SIGNAL_SL_COOLDOWN_SEC", "900"))                 # 止损后 15min
 STATE_DIR = Path(os.getenv("SMC_STATE_DIR", "state"))
 DEDUP_FILE = STATE_DIR / "signal_deduper.json"
 

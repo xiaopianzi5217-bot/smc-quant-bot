@@ -2053,18 +2053,6 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     elif bool(result.get("htf_blocked", False)):
         slog.info(f"[V6 分级路由 - HTF逆势放行] {symbol} score={result.get('score', 0.0):.1f} > 0（已扣 20 分惩罚），继续路由")
 
-
-    # ===== FeedbackLoop + EV hard-block (2026-09-06) =====
-    _hard_block = os.getenv('V6_FB_EV_HARD_BLOCK', '1') != '0'
-    if _hard_block:
-        _fb_res = result.get('_feedback_result') or {}
-        if bool(_fb_res.get('should_reject', False)):
-            slog.warning('[FB-fuse] {symbol} reject'.format(symbol=symbol))
-            return False
-        _ev = float(result.get('_feedback_ev') or result.get('expected_value') or result.get('ev') or 0.0)
-        if _ev < float(os.getenv('V6_MIN_EV_LIVE', '0.0')):
-            slog.warning('[EV-fuse] {symbol} reject'.format(symbol=symbol))
-            return False
     result = evaluate_signal_v6_routing(result)
     route = result["action_route"]
     level = result["v6_level"]
@@ -2156,19 +2144,47 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     # 根因：此前该函数推送开单通知时未调用 is_symbol_cooled，
     #      且 sig_id 使用秒级时间戳导致 should_process 永远通过，
     #      造成每根新 15min K 线都推送一次相同开单信号。
+    # 【修复20260907】冷却 reason 必须带 setup_type，否则同一 LIQUIDITY_SWEEP
+    #      平仓后短时间内可反复以 LIVE_HALF_TRADE 开出（日志已证实 7 次）。
     _route_direction = str(result.get("direction", ""))
-    _route_reason = str(route or "LIVE_ROUTE")
+    _setup_type = str(
+        result.get("setup_type")
+        or result.get("setup")
+        or (result.get("decision") or {}).get("signal", {}).get("setup_type")
+        or (result.get("features") or {}).get("setup_type")
+        or "UNK"
+    ).upper().strip()
+    # 从 reason 字段兜底解析 V56.5_LIQUIDITY_SWEEP_...
+    if _setup_type in ("", "UNK", "NONE", "UNKNOWN"):
+        _rs = str(result.get("reason") or "")
+        if _rs.startswith("V56.5_"):
+            _parts = _rs.split("_")
+            if len(_parts) >= 3:
+                _setup_type = "_".join(_parts[1:-1]) if len(_parts) > 3 else _parts[1]
+                _setup_type = _setup_type.upper().strip() or "UNK"
+    _route_reason = f"{route or 'LIVE_ROUTE'}|{_setup_type}"
     if signal_deduper.is_symbol_cooled(symbol, _route_direction, _route_reason):
-        slog.warning(f"[V6 分级路由 - 冷却拦截] {symbol} {level} {route} 方向={_route_direction} 仍在冷却中，跳过推送")
+        slog.warning(
+            f"[V6 分级路由 - 冷却拦截] {symbol} {level} {route} "
+            f"方向={_route_direction} setup={_setup_type} 仍在冷却中，跳过推送"
+        )
         return False
-    # 记录一次信号指纹去重（兼容旧链路）
+    # 结构指纹去重：同品种+方向+setup+入场价桶，避免时间戳 sig_id 永远通过
     try:
+        _entry = float(result.get("entry") or result.get("price") or 0.0)
+        _entry_bucket = int(round(_entry / max(_entry * 0.001, 1e-9))) if _entry > 0 else 0
+        _fp_id = f"FP_{symbol.replace('/', '')}_{_route_direction}_{_setup_type}_{_entry_bucket}"
+        if _is_signal_already_processed(_fp_id) or not signal_deduper.should_process(_fp_id):
+            slog.warning(
+                f"[V6 分级路由 - 结构指纹去重] {symbol} {_fp_id} 近期已开过同类结构，跳过"
+            )
+            return False
         if _is_signal_already_processed(sig_id):
             slog.warning(f"[V6 分级路由 - 信号去重] {symbol} {sig_id} 已处理过，跳过推送")
             return False
         signal_deduper.should_process(sig_id)
-    except Exception:
-        pass
+    except Exception as _dedup_e:
+        slog.error(f"[V6 分级路由] 去重检查异常: {_dedup_e}")
     # ===== 【修复20260826】持仓感知：同向加仓 / 反向平仓 =====
     _existing_pos = position_manager.get(symbol)
     if _existing_pos is not None:
