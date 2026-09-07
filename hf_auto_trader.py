@@ -2046,6 +2046,35 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         slog.warning(f"[V6 分级路由 - 否决拦截] {symbol} {_r_reason} score={result.get('score', 0.0)}，跳过路由与推送")
         return False
 
+    # ===== 【2026-09-07】FeedbackLoop + EV 硬熔断（主路由入口）=====
+    # 旧链路有 BREAKER，但 main_loop 直接调用本函数，导致 reject=True 仍能开单。
+    # V6_FB_EV_HARD_BLOCK=0 可关闭；V6_MIN_EV_LIVE 控制实盘最低 EV（默认 0）。
+    _hard_block = os.getenv("V6_FB_EV_HARD_BLOCK", "1") != "0"
+    if _hard_block:
+        _fb_res = result.get("_feedback_result") or {}
+        if bool(_fb_res.get("should_reject", False)):
+            slog.warning(
+                f"[FB-fuse] {symbol} reject "
+                f"ev={_fb_res.get('ev', 0):.4f} conf={_fb_res.get('confidence', 0):.3f} "
+                f"< threshold={_fb_res.get('reject_threshold', 0.25)}"
+            )
+            return False
+        try:
+            _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.0"))
+        except (TypeError, ValueError):
+            _min_ev_live = 0.0
+        _ev_check = float(
+            result.get("_feedback_ev")
+            or (_fb_res.get("ev") if _fb_res else None)
+            or result.get("expected_value")
+            or 0.0
+        )
+        if _ev_check < _min_ev_live:
+            slog.warning(
+                f"[V6 分级路由 - EV熔断] {symbol} ev={_ev_check:.4f} < {_min_ev_live}，拒绝开单"
+            )
+            return False
+
         # ===== 【GATE-4 修复】HTF Regime 宏观方向拦截 - 仅当分数归零时才拦截 =====
     if bool(result.get("htf_blocked", False)) and float(result.get("score", 0.0) or 0.0) <= 0.0:
         slog.warning(f"[V6 分级路由 - HTF拦截] {symbol} 1H 趋势方向不允许且分数归零，跳过路由与推送")
@@ -2356,6 +2385,25 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         # 生成 trade_id 并保存到 position，供 ExitEventLogger 与 Outcome 去重使用
         _trade_id = str(uuid.uuid4())
         _open_short_id = _short_signal_id(sig_id)
+        _orig_score = float(
+            result.get("orig_score")
+            or result.get("v6_final_score")
+            or score
+            or 0.0
+        )
+        _final_score = float(
+            result.get("v6_weighted_score")
+            or result.get("score")
+            or result.get("v6_final_score")
+            or score
+            or 0.0
+        )
+        _setup_for_pos = str(
+            result.get("setup_type")
+            or (result.get("decision") or {}).get("signal", {}).get("setup_type")
+            or _setup_type
+            or "UNK"
+        )
         position_manager.update(symbol, {
             "direction": result.get("direction", "Long"),
             "short_id": _open_short_id,
@@ -2369,20 +2417,36 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             "stage": 0,
             "sl_hit": False,
             "last_sl_msg": "",
-            "score": float(result.get("v6_weighted_score", result.get("v6_final_score", score))),  # FIX-20260913 prefer FeedbackLoop weighted score
+            # 双分数字段：raw=引擎原始分，score=惩罚后最终分（兼容旧逻辑）
+            "orig_score": _orig_score,
+            "score": _final_score,
+            "final_score": _final_score,
+            "setup_type": _setup_for_pos,
             "confidence": result.get("confidence", 0.5),
             "regime": str(result.get("regime", "UNKNOWN")),
             "features": result.get("_feedback_features", []),
+            "feature_raw_scores": result.get("_feedback_raw_scores", {}) or {},
             "ev": float(result.get("_feedback_ev", ev)),
             "signal_id": sig_id,
             "atr": float(result.get("atr") or 0.0),
             "ml_prob": float(result.get("ml_prob") or result.get("p_win_raw") or 0.0),
-                        "ml_active": bool(result.get("ml_active", False)),
+            "ml_active": bool(result.get("ml_active", False)),
             "trade_id": _trade_id,
-            "open_time": time.time(),     # 新增：持仓超时保护需要
-            "max_hold_seconds": 14400.0,  # 新增：4小时未到TP1强制平仓
+            "open_time": time.time(),
+            "max_hold_seconds": 14400.0,
         })
-        slog.info(f"[V6路由] {symbol} 持仓已写入 position_manager: {position_manager.get(symbol)}")
+        slog.info(
+            f"[V6路由] {symbol} 持仓已写入 position_manager: "
+            f"orig_score={_orig_score:.2f} final_score={_final_score:.2f} setup={_setup_for_pos}"
+        )
+        # FeatureLearning 开仓快照（此前 V6 实盘路径从未调用，权重永远停在 1.0）
+        try:
+            _fb_raw = result.get("_feedback_raw_scores") or {}
+            if isinstance(_fb_raw, dict) and _fb_raw:
+                _feature_learner.record_features(signal_id=sig_id, features=_fb_raw)
+                slog.info(f"[FeatureLearning] 已记录开仓特征 snapshot signal_id={sig_id} n={len(_fb_raw)}")
+        except Exception as _fl_rec_e:
+            slog.error(f"[FeatureLearning] record_features 失败: {_fl_rec_e}")
         try:
             # 记录 OPEN 事件，便于后续与 EXIT 关联
             try:
@@ -3521,6 +3585,25 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         )
     except Exception as _fb_err:
         slog.error(f"[{symbol}] FeedbackLoop 平仓记录失败: {_fb_err}")
+
+    # FeatureLearning 权重更新（此前平仓路径从未调用 → 权重永久 1.0）
+    try:
+        _fl_sid = str(pos.get("signal_id") or "")
+        if _fl_sid:
+            # 若开仓时未 record，用持仓里的 feature_raw_scores 补一次
+            _fl_feats = pos.get("feature_raw_scores") or {}
+            if isinstance(_fl_feats, dict) and _fl_feats:
+                try:
+                    _feature_learner.record_features(signal_id=_fl_sid, features=_fl_feats)
+                except Exception:
+                    pass
+            _feature_learner.update(signal_id=_fl_sid, pnl_r=float(pnl_r))
+            slog.info(
+                f"[FeatureLearning] 平仓更新权重 signal_id={_fl_sid} pnl_r={float(pnl_r):+.2f}R "
+                f"weights={_feature_learner.get_all_weights()}"
+            )
+    except Exception as _fl_upd_e:
+        slog.error(f"[{symbol}] FeatureLearning 平仓更新失败: {_fl_upd_e}")
 
     # 每日凌晨跨日时自动推送日报（仅一次）
     try:
