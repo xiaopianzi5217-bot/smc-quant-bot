@@ -3250,12 +3250,25 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
         tp2 = pos.get("tp2", 0)
         # 更新最大有利/不利波动（MFE / MAE）并回写持仓
         try:
+            # 已平仓禁止继续更新（防止 MAE 溢出）
+            if pos.get("sl_hit") or pos.get("closed") or pos.get("exit_reason") not in (None, "", "OPEN"):
+                return
+            _risk_m = float(pos.get("initial_risk") or abs(entry - float(pos.get("current_sl") or pos.get("sl") or 0)) or 0.0)
             if str(pos.get("direction", "")).lower().startswith("long"):
-                pos["mfe"] = max(pos.get("mfe", 0), current_price - entry)
-                pos["mae"] = min(pos.get("mae", 0), current_price - entry)
+                _fav = current_price - entry
+                _adv = entry - current_price
             else:
-                pos["mfe"] = max(pos.get("mfe", 0), entry - current_price)
-                pos["mae"] = min(pos.get("mae", 0), entry - current_price)
+                _fav = entry - current_price
+                _adv = current_price - entry
+            pos["mfe"] = max(float(pos.get("mfe") or 0), _fav)
+            pos["mae"] = min(float(pos.get("mae") or 0), -_adv if _adv > 0 else _adv)
+            # audit_* 统一存 R 倍数，避免把价格差当 R 写入 DB
+            if _risk_m > 1e-12:
+                pos["audit_forward"] = max(float(pos.get("audit_forward") or 0), _fav / _risk_m)
+                pos["audit_adverse"] = min(float(pos.get("audit_adverse") or 0), -(_adv / _risk_m) if _adv > 0 else 0.0)
+                # 硬钳制，防止异常
+                pos["audit_forward"] = min(15.0, float(pos["audit_forward"]))
+                pos["audit_adverse"] = max(-10.0, float(pos["audit_adverse"]))
             try:
                 position_manager.update_fields(symbol, **pos)
                 try:
@@ -3454,6 +3467,11 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
 
     max_fwd = float(pos.get("audit_forward") or 0.0)
     max_adv = float(pos.get("audit_adverse") or 0.0)
+    # 二次钳制：禁止把价格单位误当成 R 写入
+    if max_fwd > 15.0 or max_fwd < -5.0:
+        max_fwd = max(0.0, min(15.0, max_fwd))
+    if max_adv < -10.0 or max_adv > 10.0:
+        max_adv = -1.0 if max_adv < 0 else min(10.0, max_adv)
 
     slog.info(
         f"[{symbol}] 平仓触发: {reason} direction={direction} "

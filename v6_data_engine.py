@@ -105,9 +105,149 @@ def _get_hf_config():
     token = os.environ.get("HF_TOKEN", "").strip()                    
     return repo_id, token
 
+def merge_databases(local_db_path: Path, downloaded_db_path: Path) -> int:
+    """将云端 DB 增量合并进本地（INSERT OR IGNORE，按 signal_id 主键去重）。"""
+    if not Path(downloaded_db_path).exists():
+        return 0
+    local_db_path = Path(local_db_path)
+    local_db_path.parent.mkdir(parents=True, exist_ok=True)
+    inserted = 0
+    conn = None
+    try:
+        conn = sqlite3.connect(str(local_db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='trade_snapshots'"
+        )
+        if not cursor.fetchone():
+            conn.close()
+            shutil.copy(str(downloaded_db_path), str(local_db_path))
+            slog.info("[V6 DataEngine] 本地无表，直接使用云端库作为初始库")
+            return -1
+
+        # ATTACH 路径转义单引号
+        remote_path = str(downloaded_db_path).replace("'", "''")
+        cursor.execute(f"ATTACH DATABASE '{remote_path}' AS remote_db")
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO main.trade_snapshots
+            SELECT * FROM remote_db.trade_snapshots
+            """
+        )
+        inserted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        try:
+            cursor.execute(
+                """
+                UPDATE main.trade_snapshots
+                SET
+                    exit_reason = (
+                        SELECT r.exit_reason FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    ),
+                    exit_timestamp = (
+                        SELECT r.exit_timestamp FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    ),
+                    exit_price = (
+                        SELECT r.exit_price FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    ),
+                    pnl_r = (
+                        SELECT r.pnl_r FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    ),
+                    max_forward_r = (
+                        SELECT r.max_forward_r FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    ),
+                    max_adverse_r = (
+                        SELECT r.max_adverse_r FROM remote_db.trade_snapshots r
+                        WHERE r.signal_id = main.trade_snapshots.signal_id
+                    )
+                WHERE main.trade_snapshots.exit_reason = 'OPEN'
+                  AND main.trade_snapshots.signal_id IN (
+                      SELECT signal_id FROM remote_db.trade_snapshots
+                      WHERE exit_reason IS NOT NULL AND exit_reason != 'OPEN'
+                  )
+                """
+            )
+        except Exception as _merge_upd_e:
+            slog.warning(f"[V6 DataEngine] 合并补全平仓字段跳过: {_merge_upd_e}")
+
+        conn.commit()
+        cursor.execute("DETACH DATABASE remote_db")
+        conn.close()
+        slog.info(f"[V6 DataEngine] 云端→本地增量合并完成，新增约 {inserted} 行")
+    except Exception as e:
+        slog.error(f"[V6 DataEngine] merge_databases 失败: {e}")
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+    return inserted
+
+
+def cleanup_dirty_trade_snapshots() -> dict:
+    """清理废弃/空 pnl 脏数据，并钳制异常 MAE/MFE。"""
+    stats = {"deleted": 0, "clamped": 0}
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return stats
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM trade_snapshots
+            WHERE exit_reason = 'MANUAL_CLEANUP_DEPRECATED'
+               OR (
+                    exit_reason IS NOT NULL
+                    AND exit_reason != 'OPEN'
+                    AND pnl_r IS NULL
+               )
+            """
+        )
+        stats["deleted"] = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        cursor.execute(
+            """
+            UPDATE trade_snapshots
+            SET max_adverse_r = CASE
+                    WHEN max_adverse_r < -10.0 THEN -1.0
+                    WHEN max_adverse_r > 10.0 THEN -1.0
+                    ELSE max_adverse_r
+                END,
+                max_forward_r = CASE
+                    WHEN max_forward_r > 15.0 THEN 15.0
+                    WHEN max_forward_r < -5.0 THEN 0.0
+                    ELSE max_forward_r
+                END
+            WHERE max_adverse_r < -10.0 OR max_adverse_r > 10.0
+               OR max_forward_r > 15.0 OR max_forward_r < -5.0
+            """
+        )
+        stats["clamped"] = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        cursor.execute(
+            """
+            UPDATE trade_snapshots
+            SET max_adverse_r = -1.0
+            WHERE signal_id = 'V6_BTCUSDT_1786833009'
+              AND (max_adverse_r IS NULL OR max_adverse_r < -5.0 OR max_adverse_r > 5.0)
+            """
+        )
+        conn.commit()
+        conn.close()
+        if stats["deleted"] or stats["clamped"]:
+            slog.info(
+                f"[V6 DataEngine] 脏数据清理完成 deleted={stats['deleted']} clamped={stats['clamped']}"
+            )
+    except Exception as e:
+        slog.error(f"[V6 DataEngine] cleanup_dirty_trade_snapshots 失败: {e}")
+    return stats
+
+
 def pull_database_from_hub():
-    """【启动恢复】从 HF Dataset 下载历史最新的数据库，防止容器重置导致数据流断裂"""
-    # 【根本修复】已拉取过（无论成功/确认不存在），跳过重复请求
+    """【启动恢复】从 HF Dataset 下载历史库；本地已有数据时合并而非覆盖。"""
     if _DB_INIT_SENTINEL.exists():
         slog.warning("[V6 DataEngine] 已确认过云端状态，跳过拉取。")
         return
@@ -129,15 +269,17 @@ def pull_database_from_hub():
             repo_type="dataset",
             token=token
         )
-        shutil.copy(downloaded, str(db_path))
-        # 拉取成功 -> 写标记
+        if db_path.exists() and db_path.stat().st_size > 0:
+            merge_databases(db_path, Path(downloaded))
+            slog.info("[V6 DataEngine] 云端库已与本地合并（保留本地新单）")
+        else:
+            shutil.copy(downloaded, str(db_path))
+            slog.info("[V6 DataEngine] 历史交易快照库同步恢复成功！")
         _DB_INIT_SENTINEL.write_text("pulled_ok", encoding="utf-8")
-        slog.info("[V6 DataEngine] 历史交易快照库同步恢复成功！")
     except Exception as e:
         err_str = str(e)
         if "404" in err_str or "Entry Not Found" in err_str:
             slog.info("[V6 DataEngine] 云端无历史备份 (首次部署)，初始化全新本地库。")
-            # 确认不存在 -> 写标记，下次不重复尝试
             _DB_INIT_SENTINEL.write_text("no_cloud_backup_404", encoding="utf-8")
         else:
             slog.error(f"[V6 DataEngine] io 云端数据库拉取异常: {e}")
@@ -242,7 +384,8 @@ def init_v6_database():
     """初始化数据库流程"""
     db_path = _get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if IS_HF_SPACE and not db_path.exists():
+    # HF 环境：无论本地是否已有库都尝试拉取合并（pull 内部有 sentinel 防重复）
+    if IS_HF_SPACE:
         pull_database_from_hub()
         
     conn = sqlite3.connect(str(db_path))
@@ -297,6 +440,10 @@ def init_v6_database():
     conn.commit()
     conn.close()
     expand_v6_table_for_smc()
+    try:
+        cleanup_dirty_trade_snapshots()
+    except Exception as _c_e:
+        slog.error(f"[V6 DataEngine] 启动清理失败: {_c_e}")
     slog.info(f"[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
 
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
@@ -364,17 +511,27 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: int = None, exit_price: float = None):
-    """横向拼接真实结局标签"""
+    """横向拼接真实结局标签（冻结 MAE/MFE，禁止后续再改）"""
     if not signal_id:
         return
     try:
+        # 钳制异常 R，防止价格单位误写入导致 -159R 等溢出
+        _mf = float(max_fwd or 0.0)
+        _ma = float(max_adv or 0.0)
+        if _mf > 15.0 or _mf < -5.0:
+            slog.warning(f"[V6 DataEngine] max_forward_r 异常 {_mf:.2f} → 钳制")
+            _mf = max(-5.0, min(15.0, _mf))
+        if _ma < -10.0 or _ma > 10.0:
+            slog.warning(f"[V6 DataEngine] max_adverse_r 异常 {_ma:.2f} → 钳制为 -1.0")
+            _ma = -1.0 if _ma < 0 else min(10.0, _ma)
         conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
+        # 仅更新仍为 OPEN 的行，已平仓的禁止再改 MAE/MFE
         cursor.execute("""
             UPDATE trade_snapshots 
             SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
-            WHERE signal_id = ?
-        """, (exit_reason, int(exit_timestamp or int(time.time())), exit_price or 0.0, float(pnl_r), float(max_fwd), float(max_adv), signal_id))
+            WHERE signal_id = ? AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+        """, (exit_reason, int(exit_timestamp or int(time.time())), exit_price or 0.0, float(pnl_r), _mf, _ma, signal_id))
         # 【修复20260904】先读取 rowcount 再 commit，避免假「已回写」
         _rows = cursor.rowcount
         conn.commit()
@@ -420,7 +577,13 @@ class DynamicFeatureOptimizer:
             return self.feature_weights
         try:
             conn = sqlite3.connect(str(_get_db_path()))
-            query = "SELECT raw_features_json, pnl_r FROM trade_snapshots WHERE pnl_r IS NOT NULL ORDER BY timestamp DESC LIMIT ?"
+            query = """
+                SELECT raw_features_json, pnl_r FROM trade_snapshots
+                WHERE pnl_r IS NOT NULL
+                  AND exit_reason IS NOT NULL
+                  AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED')
+                ORDER BY timestamp DESC LIMIT ?
+            """
             df = pd.read_sql_query(query, conn, params=(self.window_size,))
             conn.close()
 

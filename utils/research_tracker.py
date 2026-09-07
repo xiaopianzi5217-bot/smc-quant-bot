@@ -105,18 +105,20 @@ class ResearchSignalTracker:
                 sl = pos["sl_price"]
                 tp1 = pos["tp1_price"]
 
-                # 更新 max_fwd / max_adv
+                # 更新 max_fwd / max_adv（R 倍数；adverse 用负值）
                 if direction in ("long", "buy"):
                     fwd_r = (current_price - entry) / risk
-                    adv_r = (entry - current_price) / risk
+                    adv_r = (entry - current_price) / risk  # 不利为正距离
                 else:
                     fwd_r = (entry - current_price) / risk
                     adv_r = (current_price - entry) / risk
 
                 if fwd_r > pos["max_fwd"]:
-                    pos["max_fwd"] = fwd_r
-                if adv_r > pos["max_adv"]:
-                    pos["max_adv"] = adv_r
+                    pos["max_fwd"] = min(15.0, fwd_r)
+                # 存为负的 adverse R，并钳制
+                _signed_adv = -abs(adv_r) if adv_r > 0 else 0.0
+                if _signed_adv < pos.get("max_adv", 0.0):
+                    pos["max_adv"] = max(-10.0, _signed_adv)
 
                 pos["last_price"] = current_price
 
