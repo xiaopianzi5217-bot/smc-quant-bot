@@ -61,12 +61,19 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
     #   改为按目标日期 key 去重，保证每个日期独立执行 DB 兜底。
     if not hasattr(_backfill_from_cloud_v6_db, "_backfilled_date_keys"):
         _backfill_from_cloud_v6_db._backfilled_date_keys = set()
-    date_key = target_date.date().isoformat()
-    if date_key in _backfill_from_cloud_v6_db._backfilled_date_keys:
-        return []
+    try:
+        date_key = target_date.date().isoformat() if target_date is not None else start.date().isoformat()
+    except Exception:
+        date_key = str(start.date())
+    # 允许重复查询（日报/质量检查可能多次调用），不再永久跳过
     _backfill_from_cloud_v6_db._backfilled_date_keys.add(date_key)
 
-    db_path = Path("data/v6_research.db")
+    db_candidates = [
+        Path("data/v6_research.db"),
+        Path("/app/data/v6_research.db"),
+        Path(__file__).resolve().parent.parent / "data" / "v6_research.db",
+    ]
+    db_path = next((p for p in db_candidates if p.exists()), db_candidates[0])
     try:
         # 本地库缺失/为空时，尝试拉取云端最新
         if not db_path.exists() or db_path.stat().st_size == 0:
@@ -159,17 +166,33 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
     return events
 
 
-def generate_daily_report(target_date: datetime = None) -> str:
+def _day_bounds_utc8(target_date: datetime = None):
+    """按 UTC+8 自然日切分（与 bot 日志时区一致）。返回 (start_utc, end_utc, date_str)。"""
     if target_date is None:
-        target_date = datetime.utcnow()
+        # 默认：UTC+8 的“昨天”（日报在次日凌晨发前一天）
+        now_utc8 = datetime.utcnow() + timedelta(hours=8)
+        target_date = (now_utc8 - timedelta(days=1)).replace(tzinfo=None)
+    # target_date 视为 UTC+8 日历日
+    if getattr(target_date, "tzinfo", None) is not None:
+        local = target_date.astimezone(timezone(timedelta(hours=8)))
+    else:
+        local = target_date
+    start_local = datetime(local.year, local.month, local.day)
+    end_local = start_local + timedelta(days=1)
+    # 转 UTC 用于 timestamp 过滤
+    start = (start_local - timedelta(hours=8)).replace(tzinfo=timezone.utc)
+    end = (end_local - timedelta(hours=8)).replace(tzinfo=timezone.utc)
+    return start, end, start_local.strftime("%Y-%m-%d")
 
-    start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+
+def generate_daily_report(target_date: datetime = None) -> str:
+    start, end, date_str = _day_bounds_utc8(target_date)
 
     event_file = Path("data/events.jsonl")
 
-    # ---- 1) 优先读取本地 events.jsonl ----
+    # ---- 1) 读取本地 events.jsonl 的 EXIT ----
     all_events = []
+    seen_ids = set()
     if event_file.exists():
         with event_file.open('r', encoding='utf-8') as f:
             for line in f:
@@ -185,15 +208,36 @@ def generate_daily_report(target_date: datetime = None) -> str:
                     continue
                 if ev.get('event') != 'EXIT':
                     continue
-                # [修复] 剔除伪造/测试/占位事件（bad_/debug/test 开头）与异常重复刷屏事件
-                tid = str(ev.get('trade_id') or '')
+                tid = str(ev.get('trade_id') or ev.get('signal_id') or '')
                 if tid.startswith(('bad_', 'test_', 'debug_', 'manual_', 'stale_')):
                     continue
+                if not tid:
+                    tid = f"anon_{ev.get('event_id') or id(ev)}"
+                if tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                # 统一字段
+                if ev.get('profit_r') is None and ev.get('pnl_r') is not None:
+                    ev['profit_r'] = ev.get('pnl_r')
                 all_events.append(ev)
 
-        # ---- 2) 本地无当日 EXIT → 云端 v6_research.db 兜底 ----
-    if not all_events:
-        all_events = _backfill_from_cloud_v6_db(target_date, start, end)
+    # ---- 2) 始终用 v6_research.db 合并补全（不再仅在 events 为空时）----
+    try:
+        db_events = _backfill_from_cloud_v6_db(target_date, start, end)
+        for ev in db_events:
+            tid = str(ev.get('trade_id') or '')
+            if not tid or tid in seen_ids:
+                continue
+            if tid.startswith(('bad_', 'test_', 'debug_', 'manual_', 'stale_')):
+                continue
+            seen_ids.add(tid)
+            all_events.append(ev)
+    except Exception as _bf_e:
+        try:
+            from utils.structured_logger import slog
+            slog.warning(f"[DailyReport] DB 合并失败: {_bf_e}")
+        except Exception:
+            pass
 
     total = 0
     wins = 0
@@ -207,11 +251,17 @@ def generate_daily_report(target_date: datetime = None) -> str:
     feature_counts = {}
     group_sums = {}
     group_counts = {}
+    gross_win = 0.0
+    gross_loss = 0.0
     ev_monitor = EVMonitor()
 
     for ev in all_events:
         total += 1
-        pr = float(ev.get('profit_r') or 0.0)
+        pr = float(ev.get('profit_r') if ev.get('profit_r') is not None else (ev.get('pnl_r') or 0.0))
+        if pr > 0:
+            gross_win += pr
+        elif pr < 0:
+            gross_loss += abs(pr)
         # feed EV monitor
         try:
             ev_val = ev.get('ev')
@@ -275,19 +325,16 @@ def generate_daily_report(target_date: datetime = None) -> str:
         group_counts[combo] = group_counts.get(combo, 0) + 1
 
     win_rate = (wins / total * 100.0) if total > 0 else 0.0
-    pf = "N/A"
+    # 当日 PF：当日毛利 / 当日毛亏（不再用全局 OutcomeDatabase 污染）
     try:
-        total_wins_r = 0.0
-        total_losses_r = 0.0
-        # use OutcomeDatabase to compute PF roughly via get_top_features sample
-        db = OutcomeDatabase()
-        # approximate: use global sums
-        # Not perfect, but provide something useful
-        for h, s in db.data.items():
-            total_wins_r += s.get('wins_r', 0.0)
-            total_losses_r += s.get('losses_r', 0.0)
-        if total_losses_r > 0:
-            pf = round(total_wins_r / total_losses_r, 2)
+        if total <= 0:
+            pf = "N/A"
+        elif gross_loss > 1e-12:
+            pf = round(gross_win / gross_loss, 2)
+        elif gross_win > 0:
+            pf = "inf"
+        else:
+            pf = "N/A"
     except Exception:
         pf = "N/A"
 
@@ -306,7 +353,7 @@ def generate_daily_report(target_date: datetime = None) -> str:
 
     report = []
     report.append("======== DAILY REPORT ========")
-    report.append(f"Date: {start.date().isoformat()}")
+    report.append(f"Date: {date_str}")
     report.append("")
     report.append(f"交易: {total}")
     report.append(f"胜: {wins}")

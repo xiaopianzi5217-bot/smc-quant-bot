@@ -189,9 +189,14 @@ class ExitEventLogger:
 
                 "trade_id":
 
-                    position.get(
-                        "trade_id"
-                    ),
+                    position.get("trade_id")
+                    or position.get("signal_id")
+                    or str(uuid.uuid4()),
+
+                "signal_id":
+
+                    position.get("signal_id")
+                    or position.get("trade_id"),
 
                 # ------------------
                 # 价格
@@ -245,16 +250,22 @@ class ExitEventLogger:
 
                 "features":
 
-                    position.get(
-                        "features",
-                        {}
+                    (
+                        {str(x): True for x in position.get("features")}
+                        if isinstance(position.get("features"), list)
+                        else (position.get("features") or {})
                     ),
 
                 "regime":
 
-                    position.get(
-                        "regime",
-                        {}
+                    (
+                        position.get("regime")
+                        if isinstance(position.get("regime"), str) and position.get("regime")
+                        else (
+                            str(position.get("regime"))
+                            if position.get("regime") not in (None, {}, [])
+                            else "UNKNOWN"
+                        )
                     ),
 
                 "score":
