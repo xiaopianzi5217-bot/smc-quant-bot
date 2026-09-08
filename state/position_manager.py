@@ -83,6 +83,105 @@ class PositionManager:
                 slog.info(f"[PositionManager] 从磁盘恢复持仓: {symbols}")
             return symbols
 
+    def recover_open_from_research_db(self) -> list:
+        """从 v6_research.db 中仍为 OPEN 的快照恢复持仓（HF 重启后磁盘 state 丢失时的兜底）。"""
+        import sqlite3
+        import time as _time
+        from pathlib import Path as _Path
+        candidates = [
+            _Path("data/v6_research.db"),
+            _Path("/app/data/v6_research.db"),
+            _Path(__file__).resolve().parents[1] / "data" / "v6_research.db",
+        ]
+        db_path = next((p for p in candidates if p.exists()), None)
+        if db_path is None:
+            return []
+        recovered = []
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT signal_id, timestamp, symbol, direction, regime,
+                       entry_price, initial_sl, initial_tp1, atr_14,
+                       model_ev, confidence, kelly_size, raw_features_json
+                FROM trade_snapshots
+                WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                ORDER BY timestamp DESC
+                """
+            )
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"[PositionManager] recover_open_from_research_db query failed: {e}")
+            return []
+
+        # 每个 symbol 只恢复最新一笔 OPEN
+        seen_sym = set()
+        for row in rows:
+            try:
+                symbol = str(row["symbol"] or "")
+                if not symbol or symbol in seen_sym:
+                    continue
+                # 已有内存持仓则不覆盖
+                with self._lock:
+                    if symbol in self._positions:
+                        seen_sym.add(symbol)
+                        continue
+                entry = float(row["entry_price"] or 0)
+                sl = float(row["initial_sl"] or 0)
+                if entry <= 0 or sl <= 0:
+                    continue
+                direction = str(row["direction"] or "Long")
+                risk = abs(entry - sl)
+                tp1 = float(row["initial_tp1"] or 0)
+                # 粗略补 TP2/TP3（若库中无）
+                if tp1 <= 0 and risk > 0:
+                    if direction.lower().startswith("long"):
+                        tp1 = entry + risk
+                    else:
+                        tp1 = entry - risk
+                if direction.lower().startswith("long"):
+                    tp2 = entry + risk * 1.8
+                    tp3 = entry + risk * 2.8
+                else:
+                    tp2 = entry - risk * 1.8
+                    tp3 = entry - risk * 2.8
+                sig = str(row["signal_id"] or "")
+                pos = {
+                    "direction": direction,
+                    "signal_id": sig,
+                    "short_id": (sig[-8:] if sig else "REC"),
+                    "entry": entry,
+                    "current_sl": sl,
+                    "initial_risk": risk,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3,
+                    "stage": 0,
+                    "sl_hit": False,
+                    "score": 0.0,
+                    "confidence": float(row["confidence"] or 0.5),
+                    "regime": str(row["regime"] or "UNKNOWN"),
+                    "features": [],
+                    "ev": float(row["model_ev"] or 0),
+                    "atr": float(row["atr_14"] or 0),
+                    "trade_id": sig,
+                    "open_time": float(row["timestamp"] or _time.time()),
+                    "max_hold_seconds": 14400.0,
+                    "size": float(row["kelly_size"] or 0.025) or 0.025,
+                    "recovered_from_db": True,
+                }
+                self.update(symbol, pos)
+                seen_sym.add(symbol)
+                recovered.append(symbol)
+                print(f"[PositionManager] 从 research.db 恢复 OPEN: {symbol} {direction} entry={entry} sid={sig}")
+            except Exception as _e:
+                print(f"[PositionManager] restore row failed: {_e}")
+                continue
+        return recovered
+
     def _save_at_exit(self):
         """程序退出时强制保存"""
         if self._dirty:

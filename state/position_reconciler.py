@@ -109,6 +109,14 @@ class PositionReconciler:
         try:
             recovered = position_manager.recover_from_disk()
             report.recovered_symbols = list(recovered or [])
+            # HF 临时盘丢失 managed_positions.json 时，从 v6_research.db OPEN 行兜底
+            try:
+                db_rec = position_manager.recover_open_from_research_db()
+                for _s in (db_rec or []):
+                    if _s not in report.recovered_symbols:
+                        report.recovered_symbols.append(_s)
+            except Exception as _db_rec_e:
+                report.errors.append(f"research_db recover: {_db_rec_e}")
             report.local_count = len(position_manager)
         except Exception as exc:
             report.errors.append(f"disk recover: {exc}")

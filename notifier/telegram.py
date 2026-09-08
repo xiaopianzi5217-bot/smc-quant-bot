@@ -7,9 +7,11 @@ from utils.time_utils import now_bj_str
 from utils.structured_logger import slog
 
 # --- V59.2 微信双发频率保护：全局状态 ---
-_WECHAT_MIN_INTERVAL_SECONDS = 30       # 同一 bot 两次微信推送最小间隔（秒）
-_last_wechat_time = 0.0                  # 上次微信推送时间戳
-_wechat_lock = False                     # 互斥锁：防止并发重入
+_WECHAT_MIN_INTERVAL_SECONDS = float(os.getenv('WECHAT_MIN_INTERVAL_SECONDS', '3'))
+_last_wechat_time = 0.0
+_wechat_lock = False
+_wechat_pending = []
+_WECHAT_QUEUE_MAX = 20
 
 # 自动加载 .env 文件（如果存在）
 _env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -96,24 +98,15 @@ def send_telegram(message: str) -> str:
     now = time.time()
 
     # ① 检查冷却 + 互斥
-    can_send_wechat = False
-    if wechat_token:
-        if _wechat_lock:
-            slog.debug("[微信] 上一轮仍在发送中，本轮跳过")
-        elif (now - _last_wechat_time) < _WECHAT_MIN_INTERVAL_SECONDS:
-            slog.debug(f"[微信] 距上次仅 {(now - _last_wechat_time):.1f}s，触发冷却保护，跳过本轮双发")
-        else:
-            can_send_wechat = True
-
-    if wechat_token and can_send_wechat:
+    def _flush_wechat_one(content: str) -> None:
+        global _last_wechat_time, _wechat_lock
         _wechat_lock = True
         try:
             resp = requests.post(
                 "https://www.pushplus.plus/send",
-                data={"token": wechat_token, "title": "SMC量化通知", "content": str(message), "template": "html"},
+                data={"token": wechat_token, "title": "SMC量化通知", "content": str(content), "template": "html"},
                 timeout=(5, 10),
             )
-            # 无论成败，刷新上次时间戳（防止失败后仍连续重试打满限制）
             _last_wechat_time = time.time()
             if resp.status_code != 200:
                 slog.warning(f"[DEBUG] 微信推送失败: HTTP {resp.status_code}｜{resp.text[:300]}")
@@ -125,7 +118,27 @@ def send_telegram(message: str) -> str:
             print(f"[DEBUG] 微信异常: {e}")
         finally:
             _wechat_lock = False
-    elif wechat_token:
+
+    if wechat_token:
+        global _wechat_pending
+        # 冷却中：排队，不丢弃（尤其是开仓/平仓）
+        if _wechat_lock or (now - _last_wechat_time) < _WECHAT_MIN_INTERVAL_SECONDS:
+            if len(_wechat_pending) < _WECHAT_QUEUE_MAX:
+                _wechat_pending.append(str(message))
+                slog.info(
+                    f"[微信] 距上次仅 {(now - _last_wechat_time):.1f}s，消息已入队 "
+                    f"(queue={len(_wechat_pending)})，稍后补发"
+                )
+            else:
+                slog.warning("[微信] 队列已满，丢弃最旧一条后入队")
+                _wechat_pending = _wechat_pending[1:] + [str(message)]
+        else:
+            _flush_wechat_one(message)
+            # 尝试顺带清空队列中的积压（最多再发 1 条，避免打爆）
+            if _wechat_pending and (time.time() - _last_wechat_time) >= _WECHAT_MIN_INTERVAL_SECONDS:
+                _next = _wechat_pending.pop(0)
+                _flush_wechat_one(_next)
+    elif False and wechat_token:
         slog.debug("[微信] 本轮双发被冷却拦截，仅走 Telegram")
     else:
         slog.warning("[DEBUG] 微信跳过: 未找到 PushPlus/WeChat Token。请在 HuggingFace Secrets 中配置 PUSHPLUS_TOKEN 或 WX_BOT_KEY")
