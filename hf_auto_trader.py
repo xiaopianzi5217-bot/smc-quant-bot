@@ -3375,9 +3375,22 @@ stage={action_plan.get('stage')}
         )
 
         if action_plan.get("action") == "PARTIAL_CLOSE":
-            if action_plan.get('new_sl') is not None:
-                pos["current_sl"] = action_plan.get("new_sl")
-            pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
+            # 解析新 SL：优先 action_plan，否则保本用 entry，再退回原 SL（绝不为 None）
+            _new_sl = action_plan.get("new_sl")
+            if _new_sl is None:
+                _new_sl = entry if entry else pos.get("current_sl") or pos.get("sl")
+            try:
+                _new_sl = float(_new_sl) if _new_sl is not None else None
+            except (TypeError, ValueError):
+                _new_sl = None
+            if _new_sl is None or _new_sl <= 0:
+                slog.error(
+                    f"[check_trailing] {symbol} PARTIAL_CLOSE 无法得到有效 new_sl，"
+                    f"action_plan={action_plan} pos_entry={entry}，跳过改 SL"
+                )
+            else:
+                pos["current_sl"] = _new_sl
+            pos["stage"] = action_plan.get("stage", pos.get("stage", 0))
             position_manager.update_fields(symbol, **pos)
             try:
                 from analytics.state_recovery import save_positions
@@ -3387,21 +3400,47 @@ stage={action_plan.get('stage')}
             _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id") or "")
             _partial_reason_cn = _exit_reason_cn(action_plan.get("reason") or "TP1_HIT")
             _partial_r = action_plan.get("profit_r", 0.0) or 0.0
-            _partial_sl_txt = f" | SL推至 {action_plan.get('new_sl')}" if action_plan.get('new_sl') else ""
-            safe_send(f"🟡 部分{_partial_reason_cn} #{_short_id} {symbol} {direction} | 入场 {entry:.2f} → 现价 {current_price:.2f} | {_partial_r:+.2f}R{_partial_sl_txt}", priority="TRADE")
-        elif action_plan.get("action") == "MOVE_SL" and action_plan.get('new_sl') is not None:
-            pos["current_sl"] = action_plan.get('new_sl')
-            pos["stage"] = action_plan.get("stage", pos.get('stage', 0))
-            position_manager.update_fields(symbol, **pos)
+            if _new_sl is not None and _new_sl > 0:
+                _partial_sl_txt = f" | 止损移至 {_new_sl:.2f}"
+            else:
+                _partial_sl_txt = " | 止损移至 保本位(未解析到数值，已保留原SL)"
+            safe_send(
+                f"🟡 部分{_partial_reason_cn} #{_short_id} {symbol} {direction} | "
+                f"入场 {entry:.2f} → 现价 {current_price:.2f} | {_partial_r:+.2f}R{_partial_sl_txt}",
+                priority="TRADE",
+            )
+        elif action_plan.get("action") == "MOVE_SL":
+            _new_sl = action_plan.get("new_sl")
             try:
-                from analytics.state_recovery import save_positions
-                save_positions(position_manager.get())
-            except Exception:
-                pass
-            _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id"))
-            _trail_suffix = f" | 浮盈 {action_plan.get('profit_r', 0.0):+.2f}R" if action_plan.get('profit_r') is not None else ""
-            _move_reason_cn = _exit_reason_cn(action_plan.get("reason") or "MOVE_SL")
-            safe_send(f"🛡️ {_move_reason_cn} #{_short_id} {symbol} {direction} | 新SL {action_plan.get('new_sl')}{_trail_suffix}", priority="TRADE")
+                _new_sl = float(_new_sl) if _new_sl is not None else None
+            except (TypeError, ValueError):
+                _new_sl = None
+            if _new_sl is None or _new_sl <= 0:
+                slog.error(
+                    f"[check_trailing] {symbol} MOVE_SL 计算出的 new_sl 无效: {action_plan.get('new_sl')} "
+                    f"pos={{{'entry': entry, 'current_sl': pos.get('current_sl')}}}"
+                )
+            else:
+                pos["current_sl"] = _new_sl
+                pos["stage"] = action_plan.get("stage", pos.get("stage", 0))
+                position_manager.update_fields(symbol, **pos)
+                try:
+                    from analytics.state_recovery import save_positions
+                    save_positions(position_manager.get())
+                except Exception:
+                    pass
+                _short_id = pos.get("short_id") or _short_signal_id(pos.get("signal_id"))
+                _trail_suffix = (
+                    f" | 浮盈 {action_plan.get('profit_r', 0.0):+.2f}R"
+                    if action_plan.get("profit_r") is not None
+                    else ""
+                )
+                _move_reason_cn = _exit_reason_cn(action_plan.get("reason") or "MOVE_SL")
+                safe_send(
+                    f"🛡️ {_move_reason_cn} #{_short_id} {symbol} {direction} | "
+                    f"止损移至 {_new_sl:.2f}{_trail_suffix}",
+                    priority="TRADE",
+                )
 
         elif action_plan["action"] == "CLOSE_ALL":
             _trigger_stop_loss(symbol, pos, current_price, reason=action_plan.get('reason') or 'CLOSE_ALL')

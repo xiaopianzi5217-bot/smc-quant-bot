@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Dynamic risk plan: liquidity/structure stop + ATR targets + Trailing Stop + Kelly Size."""
 from __future__ import annotations
 from typing import Any, Dict, Tuple
@@ -305,12 +305,21 @@ def check_partial_close_and_trail(
             hit_tp1 = (current_price <= tp1)
 
         if hit_tp1:
+            # TP1 半仓后必须推保本止损；缺 new_sl 会导致推送/写库出现 None
+            _be_sl = float(entry)
+            # 略加缓冲，避免刚保本就被扫（方向相关）
+            _buf = max(risk_for_r * 0.02, abs(entry) * 1e-5)
+            if str(side or "").lower().startswith("long"):
+                _be_sl = float(entry) + _buf
+            else:
+                _be_sl = float(entry) - _buf
             return {
                 "action": "PARTIAL_CLOSE",
                 "close_percent": 50,
                 "reason": "TP1_HIT",
+                "new_sl": _be_sl,
                 "stage": 2,
-                "profit_r": round(profit_r, 3)
+                "profit_r": round(profit_r, 3),
             }
 
         # ============================
@@ -318,12 +327,20 @@ def check_partial_close_and_trail(
     # 原 0.8R 过早，15m 上容易在到 TP2 前被洗到保本出局
     # ============================
     if profit_r >= 1.2 and stage < 1:
+        _be = float(entry)
+        if _be <= 0:
+            return {
+                "action": "HOLD",
+                "reason": "INVALID_ENTRY_FOR_BE",
+                "profit_r": round(profit_r, 3),
+                "stage": stage,
+            }
         return {
             "action": "MOVE_SL",
-            "new_sl": entry,
+            "new_sl": _be,
             "reason": "BREAKEVEN_PROTECT",
             "stage": 1,
-            "profit_r": round(profit_r, 3)
+            "profit_r": round(profit_r, 3),
         }
 
     # ============================
