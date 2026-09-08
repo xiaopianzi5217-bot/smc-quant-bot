@@ -246,6 +246,69 @@ def cleanup_dirty_trade_snapshots() -> dict:
     return stats
 
 
+
+def reconcile_stale_open_snapshots(max_age_sec: int = 14400, default_pnl_r: float = 0.0) -> int:
+    """将超时仍为 OPEN、且本地无对应持仓的快照强制对账关闭。
+
+    - max_age_sec: 默认 4h（与 position max_hold_seconds 一致）
+    - 仅处理 exit_reason='OPEN' 且 timestamp 过旧的行
+    - 标记 exit_reason=STALE_OPEN_TIMEOUT，pnl_r 默认 0（未知结局不污染学习）
+    返回关闭条数。
+    """
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return 0
+    closed = 0
+    try:
+        now = int(time.time())
+        cutoff = now - int(max_age_sec)
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT signal_id, timestamp, symbol, entry_price, initial_sl
+            FROM trade_snapshots
+            WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+              AND timestamp IS NOT NULL
+              AND timestamp > 0
+              AND timestamp < ?
+            """,
+            (cutoff,),
+        )
+        rows = cursor.fetchall()
+        for signal_id, ts, symbol, entry, sl in rows:
+            try:
+                cursor.execute(
+                    """
+                    UPDATE trade_snapshots
+                    SET exit_reason = 'STALE_OPEN_TIMEOUT',
+                        exit_timestamp = ?,
+                        exit_price = COALESCE(exit_price, entry_price, 0),
+                        pnl_r = COALESCE(pnl_r, ?)
+                    WHERE signal_id = ?
+                      AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                    """,
+                    (now, float(default_pnl_r), signal_id),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    closed += 1
+                    slog.warning(
+                        f"[V6 DataEngine] 超时 OPEN 对账关闭: {signal_id} symbol={symbol} "
+                        f"age={(now - int(ts or now))/3600.0:.1f}h -> STALE_OPEN_TIMEOUT"
+                    )
+            except Exception as _one_e:
+                slog.error(f"[V6 DataEngine] 对账单笔失败 {signal_id}: {_one_e}")
+        conn.commit()
+        conn.close()
+        if closed:
+            slog.info(f"[V6 DataEngine] reconcile_stale_open_snapshots 关闭 {closed} 笔超时 OPEN")
+            if IS_HF_SPACE:
+                request_push_database_to_hub()
+    except Exception as e:
+        slog.error(f"[V6 DataEngine] reconcile_stale_open_snapshots 失败: {e}")
+    return closed
+
+
 def pull_database_from_hub():
     """【启动恢复】从 HF Dataset 下载历史库；本地已有数据时合并而非覆盖。"""
     if _DB_INIT_SENTINEL.exists():
@@ -444,6 +507,10 @@ def init_v6_database():
         cleanup_dirty_trade_snapshots()
     except Exception as _c_e:
         slog.error(f"[V6 DataEngine] 启动清理失败: {_c_e}")
+    try:
+        reconcile_stale_open_snapshots(max_age_sec=14400)
+    except Exception as _r_e:
+        slog.error(f"[V6 DataEngine] 启动 OPEN 对账失败: {_r_e}")
     slog.info(f"[V6 DataEngine] 工作数据库就绪: {DB_PATH}")
 
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
@@ -581,7 +648,7 @@ class DynamicFeatureOptimizer:
                 SELECT raw_features_json, pnl_r FROM trade_snapshots
                 WHERE pnl_r IS NOT NULL
                   AND exit_reason IS NOT NULL
-                  AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED')
+                  AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED', 'STALE_OPEN_TIMEOUT', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE')
                 ORDER BY timestamp DESC LIMIT ?
             """
             df = pd.read_sql_query(query, conn, params=(self.window_size,))

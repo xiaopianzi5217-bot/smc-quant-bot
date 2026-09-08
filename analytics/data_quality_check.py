@@ -53,7 +53,8 @@ def run_data_quality_check(target_date: datetime = None) -> dict:
     ev_empty = 0
     confidence_empty = 0
     regime_empty = 0
-    dup_counts = {}
+    open_id_counts = {}
+    exit_id_counts = {}
 
     event_file = Path("data/events.jsonl")
     if event_file.exists():
@@ -70,16 +71,16 @@ def run_data_quality_check(target_date: datetime = None) -> dict:
                 if not ts or not (start <= ts < end):
                     continue
                 tid = ev.get("trade_id") or ev.get("signal_id") or ev.get("event_id")
-                if tid:
-                    dup_counts[tid] = dup_counts.get(tid, 0) + 1
                 if ev.get("event") == "OPEN":
                     open_count += 1
                     if tid:
                         open_tids[tid] = ev
+                        open_id_counts[tid] = open_id_counts.get(tid, 0) + 1
                 elif ev.get("event") == "EXIT":
                     exit_count += 1
                     if tid:
                         exit_tids[tid] = ev
+                        exit_id_counts[tid] = exit_id_counts.get(tid, 0) + 1
                     features = ev.get("features") or {}
                     if not features:
                         features_empty += 1
@@ -133,7 +134,10 @@ def run_data_quality_check(target_date: datetime = None) -> dict:
     exit_count = max(exit_count, db_exit)
 
     missing_open = [t for t in open_tids.keys() if t not in exit_tids]
-    duplicate_trade_ids = sum(1 for c in dup_counts.values() if c > 1)
+    # 仅统计同类型重复（OPEN 或 EXIT 出现两次），OPEN+EXIT 配对不算重复
+    duplicate_trade_ids = sum(1 for c in open_id_counts.values() if c > 1) + sum(
+        1 for c in exit_id_counts.values() if c > 1
+    )
 
     return {
         "open_count": open_count,

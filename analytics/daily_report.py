@@ -112,7 +112,7 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
             WHERE exit_reason IS NOT NULL
               AND exit_reason != ''
               AND exit_reason != 'OPEN'
-                            AND exit_reason NOT IN ('MANUAL_CLEANUP_DEPRECATED', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE')
+                            AND exit_reason NOT IN ('MANUAL_CLEANUP_DEPRECATED', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE', 'STALE_OPEN_TIMEOUT')
                             AND pnl_r IS NOT NULL
               AND exit_timestamp IS NOT NULL
               AND exit_timestamp > 0
@@ -340,13 +340,14 @@ def generate_daily_report(target_date: datetime = None) -> str:
 
     best_regime = max(regimes.items(), key=lambda x: x[1])[0] if regimes else 'N/A'
     best_feature = max(feature_counts.items(), key=lambda x: x[1])[0] if feature_counts else 'N/A'
-    # 生成质量排名：按组合累计利润排序
+    # 生成质量排名：赚钱榜只取 total_R>0，亏损榜只取 total_R<0（禁止正收益混入亏损榜）
     top_combos = []
     worst_combos = []
     try:
-        sorted_combos = sorted(group_sums.items(), key=lambda x: x[1], reverse=True)
-        top_combos = sorted_combos[:5]
-        worst_combos = sorted_combos[-5:]
+        profit_combos = [(k, v) for k, v in group_sums.items() if v > 0]
+        loss_combos = [(k, v) for k, v in group_sums.items() if v < 0]
+        top_combos = sorted(profit_combos, key=lambda x: x[1], reverse=True)[:5]
+        worst_combos = sorted(loss_combos, key=lambda x: x[1])[:5]  # 最亏在前
     except Exception:
         top_combos = []
         worst_combos = []
@@ -377,7 +378,7 @@ def generate_daily_report(target_date: datetime = None) -> str:
     report.append("")
     report.append("亏损最多组合：")
     if worst_combos:
-        for (sym, rg, feat), val in reversed(worst_combos):
+        for (sym, rg, feat), val in worst_combos:
             report.append(f"{sym} | {rg} | {feat} -> total_R={round(val,4)} count={group_counts.get((sym,rg,feat),0)}")
     else:
         report.append("N/A")
@@ -406,6 +407,12 @@ if __name__ == '__main__':
 
 
 def send_report_via_telegram(target_date: datetime = None):
+    # 出报前：对账超时仍为 OPEN 的快照，避免 OPEN/EXIT 缺口
+    try:
+        from v6_data_engine import reconcile_stale_open_snapshots
+        reconcile_stale_open_snapshots(max_age_sec=14400)
+    except Exception:
+        pass
     report = generate_daily_report(target_date)
     # 增加数据质量摘要
     try:
