@@ -2079,6 +2079,19 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             return False
 
 
+    # ===== 【2026-09-10】同品种同方向连续止损冻结 =====
+    try:
+        _dir0 = str(result.get("direction") or "")
+        _frozen, _fr = signal_deduper.is_direction_frozen(symbol, _dir0)
+        if _frozen:
+            slog.warning(f"[V6 分级路由 - 连败冻结] {symbol} {_dir0} {_fr}，拒绝开仓")
+            return False
+        if signal_deduper.is_sl_cooled(symbol):
+            slog.warning(f"[V6 分级路由 - SL冷却] {symbol} 止损冷却中，拒绝开仓")
+            return False
+    except Exception as _st_e:
+        slog.error(f"[V6 分级路由] 连败/SL冷却检查异常: {_st_e}")
+
     # ===== 【2026-09-09】BTC/ETH 同向互斥 + 同品种未平仓 OPEN 拦截 =====
     try:
         _dir = str(result.get("direction") or "")
@@ -3741,7 +3754,15 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
     global _last_stop_loss_time
     _last_stop_loss_time[symbol] = time.time()
     try:
-        signal_deduper.mark_sl_hit(symbol)
+        # 品种级短冷却；连败只由 mark_trade_outcome 按死区规则更新（避免双重累加）
+        try:
+            signal_deduper.mark_sl_hit(symbol, direction=None, is_loss=False)
+        except Exception:
+            pass
+        try:
+            signal_deduper.mark_trade_outcome(symbol, direction, float(pnl_r or 0))
+        except Exception as _mo_e:
+            slog.error(f"[{symbol}] mark_trade_outcome 失败: {_mo_e}")
     except Exception:
         pass
 # ============================================================
