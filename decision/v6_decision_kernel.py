@@ -36,6 +36,7 @@ class V6DecisionKernel:
         equity=None,
         recent_trades=None,
         bar_index=None,
+        open_positions=None,
     ):
         regime = self.regime_gate.evaluate(macro_ctx, exec_ctx)
         observer_items = self.observer.collect(curr, exec_ctx)
@@ -92,7 +93,15 @@ class V6DecisionKernel:
                 'risk_plan': None,
             }
 
-        exe = self.execution_guard.check(curr, primary['direction'], recent_trades or [], bar_index)
+        # 执行层双保险：传入 symbol + open_positions（兼容旧调用方不传 open_positions）
+        exe = self.execution_guard.check(
+            curr,
+            primary['direction'],
+            recent_trades or [],
+            bar_index,
+            symbol=symbol,
+            open_positions=open_positions,
+        )
         if not exe['allowed']:
             return {
                 'approved': False,
