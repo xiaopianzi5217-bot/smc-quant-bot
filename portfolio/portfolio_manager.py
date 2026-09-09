@@ -49,6 +49,9 @@ class Position:
 
 
 class PortfolioManager:
+    # 高相关主流币：同方向同时只允许持有其中一个
+    MAJOR_CORRELATED = {"BTC", "ETH"}
+
     def __init__(self, max_open_positions=3, max_same_direction_positions=2, state_path: str | None = "state/live_portfolio_state.json"):
         self.max_open_positions = int(max_open_positions)
         self.max_same_direction_positions = int(max_same_direction_positions)
@@ -60,6 +63,14 @@ class PortfolioManager:
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _base_asset(self, symbol: str) -> str:
+        s = str(symbol or "").upper().replace(":USDT", "").replace("/USDT", "").replace("-USDT", "")
+        for sep in ("/", ":", "-"):
+            if sep in s:
+                s = s.split(sep)[0]
+                break
+        return s
 
     def save_state(self):
         if not self.state_path:
@@ -104,14 +115,29 @@ class PortfolioManager:
         return self.positions.get(symbol)
 
     def can_open(self, symbol, direction):
+        # 1) 同币种已有仓
         if symbol in self.positions and self.positions[symbol].state == "OPEN" and float(self.positions[symbol].remaining_size or 0) > 0:
             return False, "该币种已有持仓"
+
         positions = self.open_positions()
+
+        # 2) 总持仓上限
         if len(positions) >= self.max_open_positions:
             return False, "达到最大同时持仓数量"
+
+        # 3) 同方向总仓位上限
         same_dir = [p for p in positions if p.direction == direction]
         if len(same_dir) >= self.max_same_direction_positions:
             return False, "同方向持仓过多"
+
+        # 4) 高相关主流币同向互斥（硬限制：BTC/ETH 同向只允许一个）
+        base = self._base_asset(symbol)
+        if base in self.MAJOR_CORRELATED:
+            for p in same_dir:
+                p_base = self._base_asset(p.symbol)
+                if p_base in self.MAJOR_CORRELATED and p_base != base:
+                    return False, f"高相关主流币同向互斥：已有 {p.symbol} {direction}，禁止再开 {symbol}"
+
         return True, "允许开仓"
 
     def add_position(self, symbol, direction, size, plan, order: Optional[Dict[str, Any]] = None, signal_id: str = ""):
