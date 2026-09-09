@@ -8,6 +8,7 @@ import atexit
 import traceback
 import copy
 import time
+from pathlib import Path
 from datetime import datetime
 from utils.structured_logger import slog
 
@@ -65,6 +66,19 @@ class PositionManager:
             # 原子替换
             os.replace(self._persist_path + ".tmp", self._persist_path)
             self._dirty = False
+            # 双写到 data/，便于与 v6_research 同目录备份/排查
+            try:
+                import json as _json
+                _alt = Path("data/positions_state.json")
+                if not _alt.is_absolute():
+                    _alt = Path(__file__).resolve().parents[1] / "data" / "positions_state.json"
+                _alt.parent.mkdir(parents=True, exist_ok=True)
+                _alt.write_text(
+                    _json.dumps({"timestamp": time.time(), "positions": self._positions}, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except Exception as _alt_e:
+                slog.error(f"[PositionManager] data/positions_state 双写失败: {_alt_e}")
         except Exception as exc:
             slog.error(f"[PositionManager] 持久化写入失败: {exc}")
             traceback.print_exc()

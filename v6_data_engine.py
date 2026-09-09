@@ -574,6 +574,11 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         
         if IS_HF_SPACE:
             request_push_database_to_hub()
+            # 开仓关键路径：尽量立即推一次，避免重启前节流窗口内云端无 OPEN
+            try:
+                push_database_to_hub()
+            except Exception as _imm_e:
+                slog.warning(f"[V6 DataEngine] 开仓立即推送失败(已入队): {_imm_e}")
     except Exception as e:
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 

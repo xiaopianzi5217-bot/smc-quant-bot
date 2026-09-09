@@ -67,6 +67,9 @@ from strategy.statistical_ev import StatisticalEV, get_statistical_ev
 
 # ---------- 状态与特征存储 ----------
 from state.position_manager import position_manager
+from execution.v6_execution_guard import V6ExecutionGuard
+_v6_exec_guard = V6ExecutionGuard()
+
 from feature_store import feature_store
 from state.signal_deduper import signal_deduper
 from state.position_reconciler import position_reconciler
@@ -2074,6 +2077,73 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                 f"[V6 分级路由 - EV熔断] {symbol} ev={_ev_check:.4f} < {_min_ev_live}，拒绝开单"
             )
             return False
+
+
+    # ===== 【2026-09-09】BTC/ETH 同向互斥 + 同品种未平仓 OPEN 拦截 =====
+    try:
+        _dir = str(result.get("direction") or "")
+        _open_map = position_manager.get() or {}
+        _open_list = []
+        for _s, _p in _open_map.items():
+            if not isinstance(_p, dict):
+                continue
+            _open_list.append({
+                "symbol": _s,
+                "direction": _p.get("direction"),
+                "size": _p.get("size", 0.025),
+                "state": "OPEN",
+            })
+        # 再并入 research.db 中仍为 OPEN 的快照（重启后内存可能空）
+        try:
+            import sqlite3
+            from pathlib import Path as _P
+            _dbp = next(
+                (p for p in (_P("data/v6_research.db"), _P("/app/data/v6_research.db")) if p.exists()),
+                None,
+            )
+            if _dbp is not None:
+                _c = sqlite3.connect(str(_dbp))
+                _c.row_factory = sqlite3.Row
+                _cur = _c.cursor()
+                _cur.execute(
+                    """
+                    SELECT symbol, direction, signal_id FROM trade_snapshots
+                    WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                    """
+                )
+                for _row in _cur.fetchall():
+                    _rs = str(_row["symbol"] or "")
+                    _rd = str(_row["direction"] or "")
+                    if not _rs:
+                        continue
+                    # 同品种已有 OPEN → 禁止再开（防重启重复加仓）
+                    if _rs == symbol:
+                        slog.warning(
+                            f"[V6 分级路由 - 同品种OPEN拦截] {symbol} research.db 仍有未平仓 "
+                            f"signal_id={_row['signal_id']} direction={_rd}，拒绝重复开仓"
+                        )
+                        _c.close()
+                        return False
+                    _open_list.append({"symbol": _rs, "direction": _rd, "size": 0.025, "state": "OPEN"})
+                _c.close()
+        except Exception as _db_g_e:
+            slog.error(f"[V6 分级路由] research.db OPEN 检查失败: {_db_g_e}")
+
+        _g = _v6_exec_guard.check(
+            curr=None,
+            direction=_dir,
+            recent_trades=None,
+            bar_index=None,
+            symbol=symbol,
+            open_positions=_open_list,
+        )
+        if not _g.get("allowed", True):
+            slog.warning(
+                f"[V6 分级路由 - 同向互斥] {symbol} {_dir} 被拦截: {_g.get('reason_cn')}"
+            )
+            return False
+    except Exception as _guard_e:
+        slog.error(f"[V6 分级路由] execution_guard 异常(放行继续): {_guard_e}")
 
         # ===== 【GATE-4 修复】HTF Regime 宏观方向拦截 - 仅当分数归零时才拦截 =====
     if bool(result.get("htf_blocked", False)) and float(result.get("score", 0.0) or 0.0) <= 0.0:
