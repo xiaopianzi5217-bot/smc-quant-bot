@@ -1914,9 +1914,21 @@ def _a_signal_trend_conflict(result: dict):
 def evaluate_signal_v6_routing(result: dict) -> dict:
     """
     【V6 质量门升级】取消硬拦截，实施 A/B/观察级 四层分级路由
+
+    【2026-09-10】路由标尺改用扣分后的 final_score：
+    - 旧逻辑优先 orig_score 并把 v6_final_score 覆写成原始分，导致 HTF/形态扣分后
+      仍以 64 分走 soft-gate 半仓（实为 13 分逆势单）。
+    - 现：A/B 分级与 counter-HTF soft-gate 一律用 final_score；orig 仅留审计。
     """
-    # 优先使用原始 V56.5 score（若存在），避免风控 / 特征惩罚后把好信号压进 RESEARCH_SILENT/ABSOLUTE_DROP
-    score = float(result.get("orig_score", result.get("v6_final_score", result.get("score", 0.0))) or 0.0)
+    _raw = float(
+        result.get("orig_score", result.get("v6_final_score", result.get("score", 0.0))) or 0.0
+    )
+    score = float(
+        result.get("final_score",
+                   result.get("v6_weighted_score",
+                              result.get("score", _raw))) or 0.0
+    )
+    result["v6_raw_score"] = _raw
     result["v6_final_score"] = score
     if score <= 0.0:
         result["v6_level"] = "REJECT_GRADE"
@@ -2004,11 +2016,13 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                 except (TypeError, ValueError):
                     _min_counter_score = 58.0
 
+                # score 此处已是 final_score（含 HTF/形态扣分）
                 if score >= _min_counter_score:
                     slog.info(
                         f"[V6 trend soft-gate] {result.get('symbol', '?')} "
-                        f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
-                        f"(counter-HTF but score>={_min_counter_score:.1f}), "
+                        f"B_GRADE(final={score:.1f} raw={_raw:.1f}) regime={_regime} "
+                        f"trend_direction={_tdir} "
+                        f"(counter-HTF but final>={_min_counter_score:.1f}), "
                         f"allow LIVE_HALF_TRADE"
                     )
                     result["v6_level"] = "B_GRADE"
@@ -2018,8 +2032,9 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                 else:
                     slog.warning(
                         f"[V6 trend hard-gate] {result.get('symbol', '?')} "
-                        f"B_GRADE({score:.1f}) regime={_regime} trend_direction={_tdir} "
-                        f"(counter-HTF, score<{_min_counter_score:.1f}), "
+                        f"B_GRADE(final={score:.1f} raw={_raw:.1f}) regime={_regime} "
+                        f"trend_direction={_tdir} "
+                        f"(counter-HTF, final<{_min_counter_score:.1f}), "
                         f"downgrade RESEARCH_SILENT"
                     )
                     result["v6_level"] = "OBSERVE_GRADE"
