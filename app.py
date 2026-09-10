@@ -70,6 +70,11 @@ from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
 try:
+    from utils.trading_dashboard import build_dashboard_tab, refresh_dashboard
+except Exception:
+    build_dashboard_tab = None
+    refresh_dashboard = None
+try:
     from utils.ai_advisor import analyze_symbol_quick, analyze_signal_result
 except Exception:
     analyze_symbol_quick = None
@@ -762,6 +767,13 @@ with gr.Blocks(title="SMC Quant System") as demo:
             
         reg_btn.click(mock_register_position, inputs=[track_sym, track_dir, track_entry, track_tp1, track_tp2, track_sl], outputs=[reg_out])
 
+
+        # 综合交易仪表盘
+    if build_dashboard_tab is not None:
+        try:
+            build_dashboard_tab()
+        except Exception as _dash_e:
+            print("dashboard tab error", _dash_e)
 
     with gr.Tab("AI 入场顾问"):
         gr.Markdown(
