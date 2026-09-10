@@ -1300,35 +1300,59 @@ async def scan_and_decide(symbol: str) -> dict | None:
     if _fl_final_score != score:
         slog.info(f"[{symbol}] FeatureLearning: score={score:.1f} -> adjusted={_fl_final_score:.1f} (weights={get_feature_learner().get_all_weights()})")
 
-    # ===== 【优化3 - 入场信号强制确认】LIQUIDITY_SWEEP 一票否决 =====
-    # 针对假清扫，利用布尔乘法做一票否决，不满足条件分数直接归零
+    # ===== 【优化3 - LIQUIDITY_SWEEP 确认】ChOCH 或 动量 任一即可 =====
+    # 【2026-09-10】修复死锁：
+    # 1) vol_ratio 近 0 多为未收盘量/缺列，不再单独一票否决
+    # 2) 有 ChOCH 结构反转时，允许无放量通过（扫荡左侧 + 微观反转）
+    # 3) 仅当既无 ChOCH 又无任何动量证据时，才硬否决或重扣分
     _setup_name = str(best.get("setup_type", "")).upper()
     _observer_events_list = _detect_observer_events(curr, exec_ctx, macro_ctx, _exec_lq, _exec_sq)
     _observer_event_types = [e["type"] for e in _observer_events_list]
-    is_sweep = (_setup_name == 'LIQUIDITY_SWEEP')
-    has_choch = ('CHOCH' in _observer_event_types)
-        # 动能确认：使用 sqzmom vol_ratio 作为动量指标（阈值从 config 获取，默认 0.3）
-    has_momentum = (sqz_data.get("vol_ratio", 0.0) > LIQUIDITY_SWEEP_MIN_VOL_RATIO)
-    # 核心判定：要么不是 Sweep 信号直接放行；若是，
-    # 若 require_choch=True 需 momentum 并有 CHOCH，否则仅需 momentum 足够即通过
-    if is_sweep and LIQUIDITY_SWEEP_REQUIRE_CHOCH:
-        # config 要求 CHOCH 时必须同时有 momentum 和 CHOCH
-        sweep_approved = has_momentum and has_choch
-        slog.info(f"[{symbol}] LIQUIDITY_SWEEP 判定(config要求CHOCH): has_choch={has_choch} has_momentum={has_momentum} -> sweep_approved={sweep_approved}")
-    else:
-        # config 不要求 CHOCH：只要 momentum 足够即可通过（满足用户“只有动量足够的假清扫也能过”需求）
-        sweep_approved = (not is_sweep) or has_momentum
-        # 布尔乘法干预：False 时扣分或归零（由 config 控制）
-    if is_sweep and not sweep_approved:
-        # 【2026-09-10】无动量/结构确认的假扫荡：一票否决归零，禁止再靠 soft-gate 半仓放行
-        _old_val = _fl_final_score
-        _fl_final_score = 0.0
-        slog.warning(
-            f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: setup={_setup_name} "
-            f"has_choch={has_choch} has_momentum={has_momentum}"
-            f"(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) "
-            f"score={_old_val:.1f} -> 0.0"
+    is_sweep = (_setup_name == "LIQUIDITY_SWEEP")
+    has_choch = ("CHOCH" in _observer_event_types) or ("BOS" in _observer_event_types)
+    _vr = float(sqz_data.get("vol_ratio", 1.0) or 1.0)
+    _released = bool(sqz_data.get("released", False))
+    _strength = float(sqz_data.get("strength", 0.0) or 0.0)
+    # 动量证据：量比 / 挤压释放 / 柱体强度 / 特征里的 momentum
+    has_momentum = (
+        (_vr >= float(LIQUIDITY_SWEEP_MIN_VOL_RATIO))
+        or _released
+        or (_strength >= 0.15)
+        or bool(_features.get("momentum", False))
+    )
+    if is_sweep:
+        if LIQUIDITY_SWEEP_REQUIRE_CHOCH:
+            # 严格模式：仍要求结构；动量作加分项
+            sweep_approved = has_choch or has_momentum
+        else:
+            # 默认：ChOCH 或动量 任一确认即过
+            sweep_approved = has_choch or has_momentum
+        slog.info(
+            f"[{symbol}] LIQUIDITY_SWEEP 判定: has_choch={has_choch} has_momentum={has_momentum} "
+            f"vol_ratio={_vr:.2f} released={_released} strength={_strength:.3f} "
+            f"-> approved={sweep_approved}"
         )
+        if not sweep_approved:
+            _old_val = _fl_final_score
+            # HARD_VETO 可配置；默认改为重扣分而非永久死锁
+            try:
+                from config import LIQUIDITY_SWEEP_HARD_VETO, LIQUIDITY_SWEEP_PENALTY
+                _hard = bool(LIQUIDITY_SWEEP_HARD_VETO)
+                _pen = float(LIQUIDITY_SWEEP_PENALTY)
+            except Exception:
+                _hard, _pen = False, 15.0
+            if _hard:
+                _fl_final_score = 0.0
+                slog.warning(
+                    f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: choch={has_choch} mom={has_momentum} "
+                    f"vol_ratio={_vr:.2f} score={_old_val:.1f} -> 0.0"
+                )
+            else:
+                _fl_final_score = max(0.0, _fl_final_score - _pen)
+                slog.warning(
+                    f"[{symbol}] ⚠️ LIQUIDITY_SWEEP 确认不足扣分: choch={has_choch} mom={has_momentum} "
+                    f"vol_ratio={_vr:.2f} score={_old_val:.1f} -> {_fl_final_score:.1f} (-{_pen})"
+                )
 
         # ===== 【GATE-4 修复】HTF Regime 拦截/扣分处理 =====
     if result_htf_blocked:

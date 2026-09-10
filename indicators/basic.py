@@ -78,7 +78,16 @@ def calculate_advanced_sqzmom(df: pd.DataFrame, length: int = 20, mult_bb: float
     close = df['close'].astype(float)
     high = df['high'].astype(float)
     low = df['low'].astype(float)
-    volume = df['volume'].astype(float) if 'volume' in df.columns else pd.Series([0.0] * len(df), index=df.index)
+    # 兼容多种成交量列名；缺失时不造全 0（否则 vol_ratio 恒为 0）
+    _vol_col = None
+    for _c in ("volume", "vol", "Volume", "quote_volume", "base_volume"):
+        if _c in df.columns:
+            _vol_col = _c
+            break
+    if _vol_col is not None:
+        volume = pd.to_numeric(df[_vol_col], errors="coerce").fillna(0.0).astype(float)
+    else:
+        volume = pd.Series([float("nan")] * len(df), index=df.index)
 
     ma = close.rolling(window=length, min_periods=length).mean()
     std = close.rolling(window=length, min_periods=length).std()
@@ -110,11 +119,32 @@ def calculate_advanced_sqzmom(df: pd.DataFrame, length: int = 20, mult_bb: float
     released = was_squeezing and not is_squeezing_now
     strength = abs(current_hist - prev_hist)
 
-    avg_vol = volume.rolling(window=20, min_periods=5).mean().iloc[-1] if len(volume) >= 20 else volume.mean()
-    avg_vol = float(avg_vol) if not pd.isna(avg_vol) and avg_vol > 0 else 1.0
-    current_vol = float(volume.iloc[-1]) if len(volume) >= 1 else 0.0
-    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
-    volume_confirmed = vol_ratio >= 1.3
+    # 优先用已收盘 K 线成交量：未完成 bar 常接近 0，会把 has_momentum 锁死
+    _vol_valid = volume.dropna()
+    if len(_vol_valid) == 0 or float(_vol_valid.replace(0, pd.NA).dropna().shape[0] if hasattr(_vol_valid, 'shape') else 0) == 0:
+        # 无有效成交量数据 → 中性 1.0，避免误杀
+        vol_ratio = 1.0
+        volume_confirmed = False
+    else:
+        avg_vol = volume.rolling(window=20, min_periods=5).mean()
+        # 若最新一根 volume 过小（可能未收盘），用前一根
+        cur_idx = -1
+        try:
+            _last = float(volume.iloc[-1])
+            _prev = float(volume.iloc[-2]) if len(volume) >= 2 else _last
+            _avg_last = float(avg_vol.iloc[-1]) if not pd.isna(avg_vol.iloc[-1]) else 0.0
+            if _last <= 0 or (_avg_last > 0 and _last < _avg_last * 0.05 and _prev > _last):
+                cur_idx = -2
+        except Exception:
+            cur_idx = -1
+        current_vol = float(volume.iloc[cur_idx]) if len(volume) >= abs(cur_idx) else 0.0
+        avg_v = float(avg_vol.iloc[cur_idx]) if not pd.isna(avg_vol.iloc[cur_idx]) else float(volume.mean() or 0)
+        if avg_v <= 0:
+            avg_v = float(volume.replace(0, pd.NA).dropna().mean() or 0) or 1.0
+        vol_ratio = (current_vol / avg_v) if avg_v > 0 else 1.0
+        if current_vol <= 0:
+            vol_ratio = 1.0  # 无量数据不否决
+        volume_confirmed = vol_ratio >= 1.3
 
     return {
         "released": bool(released),
