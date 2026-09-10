@@ -1396,6 +1396,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "direction": direction,
         # 【EVRealityGuard】归零逻辑：一票否决/风控归零后，EV 同步归零，防止下游误用
                 "expected_value": round(float(_fused_ev if _fused_ev is not None else _fb_result.get("ev", 0.0)), 4) if _fl_final_score > 0 else 0.0,
+        "fused_ev": round(float(_fused_ev if _fused_ev is not None else 0.0), 4),
         "score": round(_fl_final_score, 2),  # 风控否决/扣分后的最终分（HTF/Sweep 扣分已计入）
         "orig_score": round(score, 2),  # 原始进入 V56.5 / Calibration 评分，用于 V6 路由判断
         "final_score": round(_fl_final_score, 2),
@@ -2129,32 +2130,52 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.15"))
         except (TypeError, ValueError):
             _min_ev_live = 0.15
-        # 先取融合 EV，供 FB-fuse 覆盖判断
-        _fusion = result.get("_fusion_result") or {}
-        if not isinstance(_fusion, dict):
-            _fusion = {}
-        _fused_for_fb = None
-        for _k in (
-            _fusion.get("fused_ev"),
-            result.get("fused_ev"),
-            result.get("blended_ev"),
-            result.get("expected_value"),
-            result.get("model_ev"),
-        ):
-            if _k is None:
-                continue
-            try:
-                _fused_for_fb = float(_k)
-                break
-            except (TypeError, ValueError):
-                continue
-        if _fused_for_fb is None:
-            _fused_for_fb = 0.0
+
+        # 【2026-09-11】正确解析 DecisionFusion 融合 EV
+        # 实际写入字段是 result["_fusion"]["fused_ev"]（不是 _fusion_result）
+        # 旧代码优先读不到 key → 错误 fallback 到 blended_ev(0.12) 误杀 fused=0.22 的单
+        def _resolve_fused_ev(res: dict) -> float:
+            _fu = res.get("_fusion") if isinstance(res.get("_fusion"), dict) else {}
+            _fu2 = res.get("_fusion_result") if isinstance(res.get("_fusion_result"), dict) else {}
+            for _k in (
+                _fu.get("fused_ev"),
+                _fu.get("ev"),
+                _fu2.get("fused_ev"),
+                res.get("fused_ev"),
+                # expected_value 在 scan 返回里已写入 _fused_ev
+                res.get("expected_value"),
+            ):
+                if _k is None:
+                    continue
+                try:
+                    return float(_k)
+                except (TypeError, ValueError):
+                    continue
+            return 0.0
+
+        _fused_for_fb = _resolve_fused_ev(result)
+
+        # 冷启动：Feedback 样本不足时不让 FB 单独一票否决
+        _fb_samples = 0
+        try:
+            _fb_samples = int(
+                (_fb_res.get("samples") or _fb_res.get("sample_count")
+                 or _fb_res.get("total_samples") or 0)
+            )
+        except Exception:
+            _fb_samples = 0
+        try:
+            _fb_min_samples = int(os.getenv("V6_FB_MIN_SAMPLES_HARD", "20"))
+        except Exception:
+            _fb_min_samples = 20
 
         if bool(_fb_res.get("should_reject", False)):
-            # 【2026-09-11】冷启动 Feedback 样本极少时，不应单独否决强融合单
-            # 仅当 fused_ev 也弱于门槛时才硬拦
-            if _fused_for_fb >= _min_ev_live:
+            if _fb_samples > 0 and _fb_samples < _fb_min_samples:
+                slog.info(
+                    f"[FB-fuse] {symbol} 冷启动跳过 FB 硬拦: samples={_fb_samples}<{_fb_min_samples} "
+                    f"fb_ev={float(_fb_res.get('ev') or 0):.4f} fused_ev={_fused_for_fb:.4f}"
+                )
+            elif _fused_for_fb >= _min_ev_live:
                 slog.info(
                     f"[FB-fuse] {symbol} Feedback reject 被融合EV覆盖: "
                     f"fb_ev={float(_fb_res.get('ev') or 0):.4f} "
@@ -2167,34 +2188,13 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                     f"fused_ev={_fused_for_fb:.4f} < {_min_ev_live}"
                 )
                 return False
-        # 【2026-09-10】优先用 DecisionFusion 融合 EV，其次 blended/model，最后才用 feedback 单一 EV
-        # 旧逻辑只读 _feedback_ev，导致 fused_ev=0.26 仍被 feedback_ev=0.05 熔断
-        _fusion = result.get("_fusion_result") or {}
-        if not isinstance(_fusion, dict):
-            _fusion = {}
-        _ev_check = None
-        for _k in (
-            _fusion.get("fused_ev"),
-            result.get("fused_ev"),
-            result.get("blended_ev"),
-            result.get("model_ev"),
-            result.get("expected_value"),
-            result.get("_feedback_ev"),
-            (_fb_res.get("ev") if _fb_res else None),
-        ):
-            if _k is None:
-                continue
-            try:
-                _ev_check = float(_k)
-                break
-            except (TypeError, ValueError):
-                continue
-        if _ev_check is None:
-            _ev_check = 0.0
+
+        # 实盘最低 EV：同样只用真正的融合 EV，禁止 fallback 到 model/blended 误杀
+        _ev_check = _fused_for_fb
         if _ev_check < _min_ev_live:
             slog.warning(
-                f"[V6 分级路由 - EV熔断] {symbol} fused/ev={_ev_check:.4f} < {_min_ev_live} "
-                f"(fb={result.get('_feedback_ev')})，拒绝开单"
+                f"[V6 分级路由 - EV熔断] {symbol} fused_ev={_ev_check:.4f} < {_min_ev_live} "
+                f"(fb={result.get('_feedback_ev')}, blended={result.get('blended_ev')})，拒绝开单"
             )
             return False
 
