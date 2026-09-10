@@ -68,7 +68,7 @@ class CalibrationTable:
     def predict(self, score: float) -> dict:
         bin_key = int(score // 5) * 5
         b = self.bins.get(bin_key)
-        if b and b["total"] >= 30:
+        if b and b["total"] >= int(os.getenv("V6_CALIB_MIN_SAMPLES", "20")):
             wins, total = b["wins"], b["total"]
             prob = (wins + 8) / (total + 15)
             return {
@@ -184,7 +184,12 @@ class AdaptiveRejector:
     """Adaptive reject threshold per cluster"""
     def __init__(self, save_path: str = "data/adaptive_reject.json",
                  base_threshold: float = 0.25, window: int = 40,
-                 min_samples_for_reject: int = 20):
+                 min_samples_for_reject: int = None):
+        if min_samples_for_reject is None:
+            try:
+                min_samples_for_reject = int(os.getenv("V6_REJECT_MIN_SAMPLES", "15"))
+            except Exception:
+                min_samples_for_reject = 15
         self.save_path = Path(save_path)
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         self.base_threshold = base_threshold
@@ -311,6 +316,80 @@ class FeedbackLoop:
         )
         # 统一的概率引擎来源
         self.probability_engine = probability_engine
+        try:
+            n = self.bootstrap_from_research_db()
+            if n:
+                slog.info(f"[FeedbackLoop] 从 v6_research.db 冷启动回放 {n} 笔平仓")
+        except Exception as _bs_e:
+            slog.error(f"[FeedbackLoop] bootstrap 失败: {_bs_e}")
+
+    def bootstrap_from_research_db(self) -> int:
+        """用实盘已平仓记录回放校准表/特征统计（抗 HF 重启 + 加速可靠阈值）。"""
+        import sqlite3
+        candidates = [
+            self.data_dir / "v6_research.db",
+            Path("data/v6_research.db"),
+            Path("/app/data/v6_research.db"),
+            Path("v6_research.db"),
+        ]
+        dbp = next((p for p in candidates if p.exists()), None)
+        if dbp is None:
+            return 0
+        # 已有足够校准样本则跳过，避免重复膨胀
+        existing = sum(int(b.get("total", 0) or 0) for b in self.calibration.bins.values())
+        if existing >= int(os.getenv("V6_FB_BOOTSTRAP_SKIP_IF", "80")):
+            return 0
+        try:
+            conn = sqlite3.connect(str(dbp))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT regime, direction, pnl_r, confidence,
+                       COALESCE(p_win_calibrated, p_win_raw, 0.5) AS pwin,
+                       feature_hash, raw_features_json
+                FROM trade_snapshots
+                WHERE pnl_r IS NOT NULL
+                  AND exit_reason IS NOT NULL
+                  AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED', '')
+                ORDER BY COALESCE(exit_timestamp, timestamp) ASC
+                LIMIT 500
+                """
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            slog.error(f"[FeedbackLoop] bootstrap query failed: {e}")
+            return 0
+        n = 0
+        for r in rows:
+            try:
+                regime = str(r["regime"] or "UNKNOWN")
+                pnl = float(r["pnl_r"])
+                conf = float(r["confidence"] or r["pwin"] or 0.5)
+                score = max(0.0, min(100.0, conf * 100.0))
+                feats = []
+                raw = r["raw_features_json"]
+                if raw:
+                    try:
+                        import json as _json
+                        obj = _json.loads(raw) if isinstance(raw, str) else raw
+                        if isinstance(obj, dict):
+                            feats = [k for k, v in obj.items() if v]
+                        elif isinstance(obj, list):
+                            feats = [str(x) for x in obj]
+                    except Exception:
+                        pass
+                if not feats and r["feature_hash"]:
+                    feats = [str(r["feature_hash"])]
+                if not feats:
+                    feats = ["UNKNOWN"]
+                # 直接更新子表，避免递归
+                self.calibration.update(score=score, pnl_r=pnl)
+                self.feature_stats.update(regime=regime, features=feats, pnl_r=pnl)
+                self.rejector.update(regime=regime, features=feats, confidence=conf, pnl_r=pnl)
+                n += 1
+            except Exception:
+                continue
+        return n
 
     def on_trade_closed(self, regime: str, features: List[str],
                         score: float, confidence: float,

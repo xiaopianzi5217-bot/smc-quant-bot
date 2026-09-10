@@ -3772,10 +3772,17 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
 
     # ===== V59.5: 平仓后激活 DailyPanel + FeedbackLoop（历史从未调用，日报数据一直为空） =====
     # pos 中已保存 score/confidence/regime/features/ev（开仓时注入），此处直接读取
-    _close_score = float(pos.get("score", 0) or 0)
+    _close_score = float(pos.get("score", 0) or pos.get("orig_score", 0) or 0)
     _close_conf = float(pos.get("confidence", 0.5) or 0.5)
-    _close_regime = str(pos.get("regime", "UNKNOWN"))
+    _close_regime = str(pos.get("regime", "UNKNOWN") or "UNKNOWN")
     _close_features = pos.get("features", []) or []
+    if isinstance(_close_features, str):
+        _close_features = [x.strip() for x in _close_features.split(",") if x.strip()]
+    if not isinstance(_close_features, list):
+        _close_features = [str(_close_features)]
+    if not _close_features:
+        _setup = str(pos.get("setup_type") or pos.get("setup") or "UNKNOWN")
+        _close_features = [f"setup:{_setup}", f"dir:{direction}"]
     _close_ev = float(pos.get("ev", 0) or 0)
     try:
         _panel.on_trade_closed(
@@ -3784,7 +3791,7 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
             score=_close_score,
             confidence=_close_conf,
             pnl_r=float(pnl_r),
-            direction=dir(pos).get("direction", "") if direction is None else str(direction),
+            direction=str(direction or pos.get("direction") or ""),
         )
     except Exception as _panel_err:
         slog.error(f"[{symbol}] DailyPanel 平仓记录失败: {_panel_err}")
@@ -3796,7 +3803,11 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
             score=_close_score,
             confidence=_close_conf,
             pnl_r=float(pnl_r),
-            direction=str(direction),
+            direction=str(direction or pos.get("direction") or ""),
+        )
+        slog.info(
+            f"[{symbol}] FeedbackLoop 已学习平仓: regime={_close_regime} "
+            f"feats={_close_features[:4]} score={_close_score:.1f} pnl_r={float(pnl_r):+.2f}R"
         )
     except Exception as _fb_err:
         slog.error(f"[{symbol}] FeedbackLoop 平仓记录失败: {_fb_err}")

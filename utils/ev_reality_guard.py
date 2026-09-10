@@ -75,6 +75,82 @@ class EVRealityGuard:
             
             # 训练数据源 - 优先使用 ml/training_data (确保被推送到HF)
             # 备选路径: 本地 data/ 目录 (在.gitignore中但本地可用)
+            feature_cols = [
+                "score", "rsi", "trend_strength", "vol_z", "body_pct",
+                "hour", "dow", "regime", "estimated_rr", "win_prob",
+            ]
+
+            frames = []
+
+            # 【2026-09-10】优先加载实盘 trade_snapshots，与当前规则一致
+            def _load_live_snapshots():
+                import sqlite3
+                candidates = [
+                    "data/v6_research.db",
+                    "/app/data/v6_research.db",
+                    "v6_research.db",
+                ]
+                dbp = next((p for p in candidates if os.path.exists(p)), None)
+                if not dbp:
+                    return None
+                try:
+                    conn = sqlite3.connect(dbp)
+                    q = """
+                        SELECT
+                            COALESCE(p_win_calibrated, p_win_raw, 0.5) AS win_prob,
+                            COALESCE(estimated_rr, 1.5) AS estimated_rr,
+                            COALESCE(rsi_50, 50) AS rsi,
+                            COALESCE(adx_14, 20) AS adx,
+                            COALESCE(model_ev, blended_ev, 0) AS model_ev,
+                            COALESCE(confidence, 0.5) AS confidence,
+                            regime,
+                            direction,
+                            pnl_r,
+                            exit_reason,
+                            entry_price,
+                            initial_sl,
+                            timestamp,
+                            exit_timestamp
+                        FROM trade_snapshots
+                        WHERE pnl_r IS NOT NULL
+                          AND exit_reason IS NOT NULL
+                          AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED', '')
+                    """
+                    live = pd.read_sql_query(q, conn)
+                    conn.close()
+                    if live.empty:
+                        return None
+                    # 映射到训练特征
+                    live["score"] = (live["confidence"].astype(float) * 100.0).clip(0, 100)
+                    live["trend_strength"] = live["adx"].astype(float) / 50.0
+                    live["vol_z"] = 0.0
+                    live["body_pct"] = 0.0
+                    # hour/dow 从 timestamp 解析（unix 或字符串）
+                    def _hour_dow(ts):
+                        try:
+                            t = float(ts)
+                            if t > 1e12:
+                                t = t / 1000.0
+                            import datetime as _dt
+                            d = _dt.datetime.utcfromtimestamp(t)
+                            return d.hour, d.weekday()
+                        except Exception:
+                            return 12, 0
+                    hd = live["timestamp"].map(_hour_dow)
+                    live["hour"] = hd.map(lambda x: x[0])
+                    live["dow"] = hd.map(lambda x: x[1])
+                    live["regime"] = live["regime"].fillna("UNKNOWN").astype(str)
+                    live["source"] = "live_db"
+                    return live
+                except Exception as e:
+                    slog.error(f"[EVRealityGuard] 加载 v6_research.db 失败: {e}")
+                    return None
+
+            live_df = _load_live_snapshots()
+            if live_df is not None and len(live_df) > 0:
+                frames.append(live_df)
+                slog.info(f"  加载实盘 trade_snapshots: {len(live_df)} 条")
+
             data_files = []
             for cand in [
                 "ml/training_data/backtest_v56_5_stable.csv",
@@ -86,29 +162,33 @@ class EVRealityGuard:
             ]:
                 if os.path.exists(cand):
                     data_files.append(cand)
-            
-            feature_cols = [
-                "score", "rsi", "trend_strength", "vol_z", "body_pct",
-                "hour", "dow", "regime", "estimated_rr", "win_prob",
-            ]
-            
-            frames = []
+
             for fp in data_files:
-                if os.path.exists(fp):
-                    df = pd.read_csv(fp)
-                    if "pnl_r" in df.columns:
-                        for col in feature_cols:
-                            if col not in df.columns:
-                                df[col] = 0
-                        frames.append(df)
-                        slog.info(f"  加载 {fp}: {len(df)} 条")
-            
+                try:
+                    df_csv = pd.read_csv(fp)
+                    if "pnl_r" not in df_csv.columns:
+                        continue
+                    for col in feature_cols:
+                        if col not in df_csv.columns:
+                            df_csv[col] = 0
+                    df_csv["source"] = "backtest_csv"
+                    frames.append(df_csv)
+                    slog.info(f"  加载 {fp}: {len(df_csv)} 条")
+                except Exception as e:
+                    slog.error(f"  加载失败 {fp}: {e}")
+
             if not frames:
                 slog.error("[EVRealityGuard] 无可用训练数据")
                 return
-            
+
             df = pd.concat(frames, ignore_index=True)
             df = df.dropna(subset=["pnl_r"])
+            # 实盘样本加权：复制一份 live 行，提高对当前规则的拟合
+            if "source" in df.columns and (df["source"] == "live_db").any():
+                live_part = df[df["source"] == "live_db"]
+                if len(live_part) >= 5:
+                    df = pd.concat([df, live_part, live_part], ignore_index=True)
+                    slog.info(f"[EVRealityGuard] 实盘样本 x3 加权，总训练行={len(df)}")
             
             # 特征编码
             X = df[feature_cols].copy()

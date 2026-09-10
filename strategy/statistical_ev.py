@@ -36,7 +36,7 @@ class StatisticalEV:
     def __init__(
         self,
         db: Optional[OutcomeDatabase] = None,
-        min_trades: int = 30,
+        min_trades: int = int(__import__("os").getenv("V6_STAT_EV_MIN_TRADES", "15")),
         hist_weight: float = 0.6,
     ):
         """
