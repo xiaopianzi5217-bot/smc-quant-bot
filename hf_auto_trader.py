@@ -172,7 +172,7 @@ _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open�
 # 极差时段(4/6/7/23)仍可由 Quality Gate hard_block_hours=[4,6,7,23] 拦截。
 # 2026-09-06 放行：加入 ORDERBLOCK_REACTION / TREND_PULLBACK，并开启强 Tier2
 _V56_ENGINE = V56_5_Engine(V565Config(
-    min_score=45.0,
+    min_score=50.0,
     allowed_hours=(
         0, 1, 2, 3, 4, 5,           # 亚盘早段
         8, 9, 10, 11, 12, 13, 14, 15,  # 白天（原缺失，导致 12:00 的 64+ 分被静默丢弃）
@@ -1320,11 +1320,15 @@ async def scan_and_decide(symbol: str) -> dict | None:
         sweep_approved = (not is_sweep) or has_momentum
         # 布尔乘法干预：False 时扣分或归零（由 config 控制）
     if is_sweep and not sweep_approved:
-        # 默认推荐：只扣 15 分而非零分，让信号仍有机会通过（除非分数本来就低于门槛）
-        _pen_val = 15.0
+        # 【2026-09-10】无动量/结构确认的假扫荡：一票否决归零，禁止再靠 soft-gate 半仓放行
         _old_val = _fl_final_score
-        _fl_final_score = max(0.0, _fl_final_score - _pen_val)
-        slog.info(f"[{symbol}] ⚠️ LIQUIDITY_SWEEP 不满足条件: setup={_setup_name} has_choch={has_choch} has_momentum={has_momentum}(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) score={_old_val:.1f} -> {_fl_final_score:.1f} (-{_pen_val:.1f})")
+        _fl_final_score = 0.0
+        slog.warning(
+            f"[{symbol}] 🚫 LIQUIDITY_SWEEP 一票否决: setup={_setup_name} "
+            f"has_choch={has_choch} has_momentum={has_momentum}"
+            f"(vol_ratio={sqz_data.get('vol_ratio',0):.2f}) "
+            f"score={_old_val:.1f} -> 0.0"
+        )
 
         # ===== 【GATE-4 修复】HTF Regime 拦截/扣分处理 =====
     if result_htf_blocked:
@@ -1964,7 +1968,7 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                     )
         except Exception as _a_e:
             slog.error(f"[V6 A_GRADE红线异常] {_a_e}")
-    elif 55.0 <= score < 70.0:
+    elif 60.0 <= score < 70.0:
         result["v6_level"] = "B_GRADE"
         result["action_route"] = "LIVE_HALF_TRADE"
         # ===== trend direction hard gate: only downgrade for counter-HTF in BULL/BEAR regime =====
@@ -2012,7 +2016,7 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                 # 环境变量 V6_COUNTER_HTF_MIN_SCORE 控制门槛（默认 58.0）
                 # 设为 999 可恢复原硬拦截行为
                 try:
-                    _min_counter_score = float(os.getenv("V6_COUNTER_HTF_MIN_SCORE", "58.0"))
+                    _min_counter_score = float(os.getenv("V6_COUNTER_HTF_MIN_SCORE", "70.0"))
                 except (TypeError, ValueError):
                     _min_counter_score = 58.0
 
@@ -2042,7 +2046,7 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                     result["_trend_filter_downgrade"] = True
         except Exception as _td_e:
             slog.error(f"[V6 trend hard-gate error]: {_td_e}")
-    elif 45.0 <= score < 55.0:
+    elif 45.0 <= score < 60.0:
         result["v6_level"] = "OBSERVE_GRADE"
         result["action_route"] = "RESEARCH_SILENT"
     else:
@@ -2078,7 +2082,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             )
             return False
         try:
-            _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.0"))
+            _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.20"))
         except (TypeError, ValueError):
             _min_ev_live = 0.0
         _ev_check = float(

@@ -295,20 +295,31 @@ def check_partial_close_and_trail(
         }
 
     # ============================
-    # 3. TP1 部分ֹӯ（无条件，优先于保本）
-    # 【V59.7 修复】修复 TP1 到达ʱ被 BREAKEVEN_PROTECT 抢先导致 PARTIAL_CLOSE 永不触发
+    # 3. TP1 半仓锁利（50%）+ 保本
+    # 【2026-09-10 双轨出场】
+    # - 触发：触及结构 TP1 价 或 浮盈 >= 1.5R（谁先到谁触发）
+    # - 动作：平 50% + SL 移至保本（含小缓冲，覆盖手续费摩擦）
+    # - 禁止在 0.5~1.2R 过早纯保本，避免二次回踩把 3R 单洗成 0R
     # ============================
+    import os as _os
+    try:
+        _tp1_r_trigger = float(_os.getenv("V6_TP1_R", "1.5"))
+    except (TypeError, ValueError):
+        _tp1_r_trigger = 1.5
+    try:
+        _be_fee_buf_r = float(_os.getenv("V6_BE_FEE_BUFFER_R", "0.05"))
+    except (TypeError, ValueError):
+        _be_fee_buf_r = 0.05
+
     if stage < 2:
         if str(side or "").lower().startswith("long"):
-            hit_tp1 = (current_price >= tp1)
+            hit_tp1_px = (tp1 > 0 and current_price >= tp1)
         else:
-            hit_tp1 = (current_price <= tp1)
+            hit_tp1_px = (tp1 > 0 and current_price <= tp1)
+        hit_tp1_r = profit_r >= _tp1_r_trigger
 
-        if hit_tp1:
-            # TP1 半仓后必须推保本止损；缺 new_sl 会导致推送/写库出现 None
-            _be_sl = float(entry)
-            # 略加缓冲，避免刚保本就被扫（方向相关）
-            _buf = max(risk_for_r * 0.02, abs(entry) * 1e-5)
+        if hit_tp1_px or hit_tp1_r:
+            _buf = max(risk_for_r * _be_fee_buf_r, abs(entry) * 1e-5)
             if str(side or "").lower().startswith("long"):
                 _be_sl = float(entry) + _buf
             else:
@@ -322,12 +333,20 @@ def check_partial_close_and_trail(
                 "profit_r": round(profit_r, 3),
             }
 
-        # ============================
-    # 4. ӯ利 1.2R 保本（仅 stage < 1 ʱ）
-    # 原 0.8R 过早，15m 上容易在到 TP2 前被洗到保本出局
+    # 4. 纯保本仅作兜底：默认提高到 2.0R，且仅在尚未 TP1 时
+    # 环境变量 V6_BE_PROTECT_R（默认 2.0）；设为 999 可关闭纯保本
     # ============================
-    if profit_r >= 1.2 and stage < 1:
-        _be = float(entry)
+    try:
+        _be_protect_r = float(_os.getenv("V6_BE_PROTECT_R", "2.0"))
+    except (TypeError, ValueError):
+        _be_protect_r = 2.0
+
+    if profit_r >= _be_protect_r and stage < 1:
+        _buf = max(risk_for_r * _be_fee_buf_r, abs(entry) * 1e-5)
+        if str(side or "").lower().startswith("long"):
+            _be = float(entry) + _buf
+        else:
+            _be = float(entry) - _buf
         if _be <= 0:
             return {
                 "action": "HOLD",
@@ -343,37 +362,47 @@ def check_partial_close_and_trail(
             "profit_r": round(profit_r, 3),
         }
 
-    # ============================
-    # 5. TP1 后启动׷踪ֹ损（stage >= 2）
+    # 5. TP1 后尾仓追踪（Chandelier ATR + R 距离取更紧者）
+    # - stage=2: 宽松 2.0 ATR 或 1.0R，给趋势空间
+    # - stage>=3 或 浮盈>=2.5R: 收紧 1.2 ATR 或 0.7R（模拟动量衰竭贴紧）
     # ============================
     if stage >= 2:
-        # V59.4: 分阶段׷踪ֹ损
-        # - TP1 后 (stage=2): trail_distance = 1.0R（给趋势足够空间，避免С回调被ɨ）
-        # - TP2 后 (stage=3): trail_distance = 0.7R（已有两个Ŀ标利润，开ʼ收紧）
-        if stage == 2:
-            trail_distance = risk * 1.0
+        _is_long = str(side or "").lower().startswith("long")
+        # 浮盈越高越收紧
+        if stage >= 3 or profit_r >= 2.5:
+            trail_r = risk_for_r * 0.7
+            trail_atr = atr * 1.2
+            next_stage = 3
         else:
-            trail_distance = risk * 0.7
+            trail_r = risk_for_r * 1.0
+            trail_atr = atr * 2.0
+            next_stage = 2
+        trail_distance = min(trail_r, trail_atr) if trail_atr > 0 else trail_r
 
-        if str(side or "").lower().startswith("long"):
+        if _is_long:
             new_sl = current_price - trail_distance
+            # 止损只能上移，且不低于保本缓冲
+            _floor = float(entry) + max(risk_for_r * _be_fee_buf_r, abs(entry) * 1e-5)
+            new_sl = max(new_sl, _floor)
             if new_sl > sl:
                 return {
                     "action": "MOVE_SL",
                     "new_sl": new_sl,
                     "reason": "TRAILING_STOP",
-                    "stage": 3,
-                    "profit_r": round(profit_r, 3)
+                    "stage": next_stage,
+                    "profit_r": round(profit_r, 3),
                 }
         else:
             new_sl = current_price + trail_distance
+            _ceil = float(entry) - max(risk_for_r * _be_fee_buf_r, abs(entry) * 1e-5)
+            new_sl = min(new_sl, _ceil)
             if new_sl < sl:
                 return {
                     "action": "MOVE_SL",
                     "new_sl": new_sl,
                     "reason": "TRAILING_STOP",
-                    "stage": 3,
-                    "profit_r": round(profit_r, 3)
+                    "stage": next_stage,
+                    "profit_r": round(profit_r, 3),
                 }
 
     return {
