@@ -69,6 +69,11 @@ import utils.v6_event_hooks
 from config import STRATEGY_PARAMS, SYMBOL_STRATEGY
 from utils.symbols import load_symbol_strategy
 from utils.time_utils import series_ms_to_bj
+try:
+    from utils.ai_advisor import analyze_symbol_quick, analyze_signal_result
+except Exception:
+    analyze_symbol_quick = None
+    analyze_signal_result = None
 
 try:
     from notifier.telegram import send_telegram, test_telegram
@@ -756,6 +761,59 @@ with gr.Blocks(title="SMC Quant System") as demo:
             return f"成功接管: {sym}，后台线程已开始盯盘追踪止损。"
             
         reg_btn.click(mock_register_position, inputs=[track_sym, track_dir, track_entry, track_tp1, track_tp2, track_sl], outputs=[reg_out])
+
+
+    with gr.Tab("AI 入场顾问"):
+        gr.Markdown(
+            "使用 **DeepSeek** 根据系统快照辅助判断入场（**只给建议，不自动下单**）。\n"
+            "请在 HF Spaces Secrets 配置 `DEEPSEEK_API_KEY`，不要把密钥写进代码。"
+        )
+        with gr.Row():
+            ai_symbol = gr.Textbox(label="Symbol", value="BTC/USDT")
+            ai_dir = gr.Dropdown(label="方向", choices=["", "Long", "Short"], value="")
+            ai_setup = gr.Textbox(label="Setup", value="LIQUIDITY_SWEEP")
+        with gr.Row():
+            ai_score = gr.Number(label="系统分数", value=55)
+            ai_ev = gr.Number(label="EV / fused_ev", value=0.15)
+            ai_regime = gr.Textbox(label="Regime", value="BEAR")
+        with gr.Row():
+            ai_entry = gr.Number(label="入场参考价", value=0)
+            ai_sl = gr.Number(label="止损参考", value=0)
+            ai_tp1 = gr.Number(label="TP1 参考", value=0)
+        with gr.Row():
+            ai_rsi = gr.Number(label="RSI", value=50)
+            ai_adx = gr.Number(label="ADX", value=20)
+            ai_vol = gr.Number(label="成交量比 vol_ratio", value=1.0)
+        ai_note = gr.Textbox(label="你的补充说明", value="请结合 SMC + SQZMOM 给出是否手动入场")
+        ai_btn = gr.Button("调用 DeepSeek 分析", variant="primary")
+        ai_out = gr.Textbox(label="AI 建议", lines=20)
+
+        def _run_ai(symbol, direction, setup, score, ev, regime, entry, sl, tp1, rsi, adx, vol, note):
+            if analyze_symbol_quick is None:
+                return "未加载 utils.ai_advisor，请确认文件已部署到 /app/utils/ai_advisor.py"
+            return analyze_symbol_quick(
+                symbol=symbol or "BTC/USDT",
+                direction=direction or "",
+                score=float(score or 0),
+                ev=float(ev or 0),
+                regime=regime or "",
+                setup=setup or "",
+                entry=float(entry or 0),
+                sl=float(sl or 0),
+                tp1=float(tp1 or 0),
+                rsi=float(rsi or 0),
+                adx=float(adx or 0),
+                vol_ratio=float(vol or 0),
+                note=note or "",
+            )
+
+        ai_btn.click(
+            _run_ai,
+            inputs=[ai_symbol, ai_dir, ai_setup, ai_score, ai_ev, ai_regime,
+                    ai_entry, ai_sl, ai_tp1, ai_rsi, ai_adx, ai_vol, ai_note],
+            outputs=ai_out,
+        )
+
 
 def _start_hf_auto_trader():
     """在后台线程中延迟导入重型模块，不阻塞 Gradio 启动
