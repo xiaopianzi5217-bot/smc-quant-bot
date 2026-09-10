@@ -1356,11 +1356,24 @@ async def scan_and_decide(symbol: str) -> dict | None:
 
         # ===== 【GATE-4 修复】HTF Regime 拦截/扣分处理 =====
     if result_htf_blocked:
-        # 改为扣 20 分而非直接归零，让信号可通过但仍受显著惩罚
+        # 默认 -20；LIQUIDITY_SWEEP 在有结构/动量确认时减罚（左侧扫荡常见于转折）
         _htf_pen_val = 20.0
+        try:
+            _setup_u = str(best.get("setup_type", "")).upper()
+            if _setup_u == "LIQUIDITY_SWEEP" and (
+                ("CHOCH" in _observer_event_types)
+                or bool(sqz_data.get("released"))
+                or float(sqz_data.get("vol_ratio", 0) or 0) >= float(LIQUIDITY_SWEEP_MIN_VOL_RATIO)
+            ):
+                _htf_pen_val = float(os.getenv("V6_HTF_SWEEP_PENALTY", "10.0"))
+        except Exception:
+            pass
         _old_htf_val = _fl_final_score
         _fl_final_score = max(0.0, _fl_final_score - _htf_pen_val)
-        slog.info(f"[{symbol}] ⚠️ HTF Regime 不通过: 1H 方向不允许，score={_old_htf_val:.1f} -> {_fl_final_score:.1f} (-{_htf_pen_val:.1f})")
+        slog.info(
+            f"[{symbol}] ⚠️ HTF Regime 不通过: 1H 方向不允许，"
+            f"score={_old_htf_val:.1f} -> {_fl_final_score:.1f} (-{_htf_pen_val:.1f})"
+        )
 
         # 构建兼容返回格式
     return {
@@ -1368,7 +1381,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
         "symbol": symbol,
         "direction": direction,
         # 【EVRealityGuard】归零逻辑：一票否决/风控归零后，EV 同步归零，防止下游误用
-                "expected_value": round(float(_fb_result["ev"]), 4) if _fl_final_score > 0 else 0.0,
+                "expected_value": round(float(_fused_ev if _fused_ev is not None else _fb_result.get("ev", 0.0)), 4) if _fl_final_score > 0 else 0.0,
         "score": round(_fl_final_score, 2),  # 风控否决/扣分后的最终分（HTF/Sweep 扣分已计入）
         "orig_score": round(score, 2),  # 原始进入 V56.5 / Calibration 评分，用于 V6 路由判断
         "final_score": round(_fl_final_score, 2),
@@ -2106,18 +2119,37 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             )
             return False
         try:
-            _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.20"))
+            _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.15"))
         except (TypeError, ValueError):
-            _min_ev_live = 0.0
-        _ev_check = float(
-            result.get("_feedback_ev")
-            or (_fb_res.get("ev") if _fb_res else None)
-            or result.get("expected_value")
-            or 0.0
-        )
+            _min_ev_live = 0.15
+        # 【2026-09-10】优先用 DecisionFusion 融合 EV，其次 blended/model，最后才用 feedback 单一 EV
+        # 旧逻辑只读 _feedback_ev，导致 fused_ev=0.26 仍被 feedback_ev=0.05 熔断
+        _fusion = result.get("_fusion_result") or {}
+        if not isinstance(_fusion, dict):
+            _fusion = {}
+        _ev_check = None
+        for _k in (
+            _fusion.get("fused_ev"),
+            result.get("fused_ev"),
+            result.get("blended_ev"),
+            result.get("model_ev"),
+            result.get("expected_value"),
+            result.get("_feedback_ev"),
+            (_fb_res.get("ev") if _fb_res else None),
+        ):
+            if _k is None:
+                continue
+            try:
+                _ev_check = float(_k)
+                break
+            except (TypeError, ValueError):
+                continue
+        if _ev_check is None:
+            _ev_check = 0.0
         if _ev_check < _min_ev_live:
             slog.warning(
-                f"[V6 分级路由 - EV熔断] {symbol} ev={_ev_check:.4f} < {_min_ev_live}，拒绝开单"
+                f"[V6 分级路由 - EV熔断] {symbol} fused/ev={_ev_check:.4f} < {_min_ev_live} "
+                f"(fb={result.get('_feedback_ev')})，拒绝开单"
             )
             return False
 
