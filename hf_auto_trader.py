@@ -2125,17 +2125,48 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
     _hard_block = os.getenv("V6_FB_EV_HARD_BLOCK", "1") != "0"
     if _hard_block:
         _fb_res = result.get("_feedback_result") or {}
-        if bool(_fb_res.get("should_reject", False)):
-            slog.warning(
-                f"[FB-fuse] {symbol} reject "
-                f"ev={_fb_res.get('ev', 0):.4f} conf={_fb_res.get('confidence', 0):.3f} "
-                f"< threshold={_fb_res.get('reject_threshold', 0.25)}"
-            )
-            return False
         try:
             _min_ev_live = float(os.getenv("V6_MIN_EV_LIVE", "0.15"))
         except (TypeError, ValueError):
             _min_ev_live = 0.15
+        # 先取融合 EV，供 FB-fuse 覆盖判断
+        _fusion = result.get("_fusion_result") or {}
+        if not isinstance(_fusion, dict):
+            _fusion = {}
+        _fused_for_fb = None
+        for _k in (
+            _fusion.get("fused_ev"),
+            result.get("fused_ev"),
+            result.get("blended_ev"),
+            result.get("expected_value"),
+            result.get("model_ev"),
+        ):
+            if _k is None:
+                continue
+            try:
+                _fused_for_fb = float(_k)
+                break
+            except (TypeError, ValueError):
+                continue
+        if _fused_for_fb is None:
+            _fused_for_fb = 0.0
+
+        if bool(_fb_res.get("should_reject", False)):
+            # 【2026-09-11】冷启动 Feedback 样本极少时，不应单独否决强融合单
+            # 仅当 fused_ev 也弱于门槛时才硬拦
+            if _fused_for_fb >= _min_ev_live:
+                slog.info(
+                    f"[FB-fuse] {symbol} Feedback reject 被融合EV覆盖: "
+                    f"fb_ev={float(_fb_res.get('ev') or 0):.4f} "
+                    f"fused_ev={_fused_for_fb:.4f} >= {_min_ev_live}"
+                )
+            else:
+                slog.warning(
+                    f"[FB-fuse] {symbol} reject "
+                    f"fb_ev={_fb_res.get('ev', 0):.4f} conf={_fb_res.get('confidence', 0):.3f} "
+                    f"fused_ev={_fused_for_fb:.4f} < {_min_ev_live}"
+                )
+                return False
         # 【2026-09-10】优先用 DecisionFusion 融合 EV，其次 blended/model，最后才用 feedback 单一 EV
         # 旧逻辑只读 _feedback_ev，导致 fused_ev=0.26 仍被 feedback_ev=0.05 熔断
         _fusion = result.get("_fusion_result") or {}

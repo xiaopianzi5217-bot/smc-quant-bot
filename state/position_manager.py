@@ -135,6 +135,9 @@ class PositionManager:
         seen_sym = set()
         for row in rows:
             try:
+                sig0 = str(row["signal_id"] or "")
+                if sig0.startswith("RES_") or sig0.startswith("RESEARCH_"):
+                    continue  # 科研虚拟单永不进入实盘持仓
                 symbol = str(row["symbol"] or "")
                 if not symbol or symbol in seen_sym:
                     continue
