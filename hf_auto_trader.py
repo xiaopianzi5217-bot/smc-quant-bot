@@ -2238,22 +2238,47 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                 _c = sqlite3.connect(str(_dbp))
                 _c.row_factory = sqlite3.Row
                 _cur = _c.cursor()
+                # 先关闭残留科研虚拟 OPEN，避免永久占坑
+                try:
+                    _cur.execute(
+                        """
+                        UPDATE trade_snapshots
+                        SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                            pnl_r = COALESCE(pnl_r, 0.0)
+                        WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                          AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+                        """
+                    )
+                    if _cur.rowcount:
+                        _c.commit()
+                        slog.info(
+                            f"[V6 分级路由] 清理 research.db 科研幽灵 OPEN: {_cur.rowcount} 笔"
+                        )
+                except Exception as _cl_e:
+                    slog.warning(f"[V6 分级路由] RES_ 清理跳过: {_cl_e}")
+
                 _cur.execute(
                     """
                     SELECT symbol, direction, signal_id FROM trade_snapshots
                     WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                      AND signal_id IS NOT NULL
+                      AND signal_id NOT LIKE 'RES_%'
+                      AND signal_id NOT LIKE 'RESEARCH_%'
                     """
                 )
                 for _row in _cur.fetchall():
                     _rs = str(_row["symbol"] or "")
                     _rd = str(_row["direction"] or "")
+                    _sid = str(_row["signal_id"] or "")
                     if not _rs:
                         continue
-                    # 同品种已有 OPEN → 禁止再开（防重启重复加仓）
+                    if _sid.startswith("RES_") or _sid.startswith("RESEARCH_"):
+                        continue
+                    # 同品种已有真实 OPEN → 禁止再开（防重启重复加仓）
                     if _rs == symbol:
                         slog.warning(
                             f"[V6 分级路由 - 同品种OPEN拦截] {symbol} research.db 仍有未平仓 "
-                            f"signal_id={_row['signal_id']} direction={_rd}，拒绝重复开仓"
+                            f"signal_id={_sid} direction={_rd}，拒绝重复开仓"
                         )
                         _c.close()
                         return False

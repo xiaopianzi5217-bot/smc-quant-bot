@@ -122,10 +122,28 @@ class PositionManager:
                        model_ev, confidence, kelly_size, raw_features_json
                 FROM trade_snapshots
                 WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                  AND signal_id IS NOT NULL
+                  AND signal_id NOT LIKE 'RES_%'
+                  AND signal_id NOT LIKE 'RESEARCH_%'
                 ORDER BY timestamp DESC
                 """
             )
             rows = cur.fetchall()
+            try:
+                cur.execute(
+                    """
+                    UPDATE trade_snapshots
+                    SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                        pnl_r = COALESCE(pnl_r, 0.0)
+                    WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                      AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+                    """
+                )
+                if cur.rowcount:
+                    conn.commit()
+                    print(f"[PositionManager] 已关闭 {cur.rowcount} 笔 RES_/RESEARCH_ 幽灵 OPEN")
+            except Exception as _sh_e:
+                print(f"[PositionManager] shadow cleanup skip: {_sh_e}")
             conn.close()
         except Exception as e:
             print(f"[PositionManager] recover_open_from_research_db query failed: {e}")
