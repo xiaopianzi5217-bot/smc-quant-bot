@@ -706,6 +706,40 @@ def _build_ev_guard_ctx(best, exec_ctx, curr, df_macro=None) -> dict:
     return ctx
 
 
+
+def _write_ai_scan_snapshot(symbol: str, payload: dict) -> None:
+    """原子合并写入 data/last_scan_snapshot.json（观察/拒单/空窗均应调用，保证 AI 有字段）。"""
+    try:
+        import json as _json_ai
+        from pathlib import Path as _Path_ai
+        import time as _time_ai
+        _ai_dir = _Path_ai("data")
+        _ai_dir.mkdir(parents=True, exist_ok=True)
+        _ai_path = _ai_dir / "last_scan_snapshot.json"
+        _existing = {}
+        if _ai_path.exists():
+            try:
+                _existing = _json_ai.loads(_ai_path.read_text(encoding="utf-8"))
+            except Exception:
+                _existing = {}
+        if not isinstance(_existing, dict):
+            _existing = {}
+        body = dict(payload or {})
+        body.setdefault("ts", _time_ai.time())
+        body["symbol"] = symbol
+        _existing[str(symbol)] = body
+        _existing["_updated"] = body["ts"]
+        _ai_path.write_text(
+            _json_ai.dumps(_existing, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception as _e:
+        try:
+            slog.warning(f"[AI snapshot] write failed {symbol}: {_e}")
+        except Exception:
+            pass
+
+
 async def scan_and_decide(symbol: str) -> dict | None:
     from runner.v11_institutional_runner import make_sample_ohlcv
 
@@ -718,6 +752,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 # 仅做快速跳过，不写缓存——缓存统一由下方全量层 _last_bar_key 写入，
                 # 否则新K线首次检出时缓存已被探针提前改成新时间，全量层会误判跳过本轮重算。
                 slog.debug(f"[{symbol}] K线未更新（{_probe_key}），跳过本轮全量拉取与重算")
+                _write_ai_scan_snapshot(symbol, {
+                    "status": "BAR_UNCHANGED",
+                    "note": f"15m K线未更新 {_probe_key}，沿用上次结构判断",
+                    "direction": None,
+                    "score": None,
+                    "fused_ev": None,
+                    "setup_type": None,
+                })
                 return None
     except Exception as _probe_e:
         slog.warning(f"[{symbol}] K线预检失败，继续全量拉取: {_probe_e}")
@@ -747,6 +789,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _last_bar_key = str(df_exec["datetime"].iloc[-1]) if "datetime" in df_exec.columns else str(len(df_exec))
     if _last_bar_dt_by_symbol.get(symbol) == _last_bar_key:
         slog.debug(f"[{symbol}] K线未更新（{_last_bar_key}），跳过本轮全量重算")
+        _write_ai_scan_snapshot(symbol, {
+            "status": "BAR_UNCHANGED",
+            "note": f"15m K线未更新 {_last_bar_key}",
+            "direction": None,
+            "score": None,
+            "fused_ev": None,
+            "setup_type": None,
+        })
         return None
     _last_bar_dt_by_symbol[symbol] = _last_bar_key
 
@@ -784,6 +834,14 @@ async def scan_and_decide(symbol: str) -> dict | None:
             symbol, "NO_CANDIDATES",
             score=0.0, ev=0.0, regime="unknown",
         )
+        _write_ai_scan_snapshot(symbol, {
+            "status": "NO_CANDIDATES",
+            "note": "V56.5 引擎无候选",
+            "direction": None,
+            "score": None,
+            "fused_ev": None,
+            "setup_type": None,
+        })
         return None
 
     if "idx" in candidates.columns:
@@ -898,6 +956,23 @@ async def scan_and_decide(symbol: str) -> dict | None:
         regime_name = str(get_htf_regime_filter().analyze(df_macro).get("regime", "UNKNOWN")).upper().strip()
         long_score = float(exec_ctx.get("long_quality", 0))
         short_score = float(exec_ctx.get("short_quality", 0))
+        _write_ai_scan_snapshot(symbol, {
+            "status": "NO_TRADE_SELECTED",
+            "note": "V56.5 选择后无交易/质量门否决全部候选",
+            "direction": None,
+            "score": 0.0,
+            "fused_ev": None,
+            "setup_type": None,
+            "regime": regime_name,
+            "long_score": long_score,
+            "short_score": short_score,
+            "bullish_ob": exec_ctx.get("bullish_ob"),
+            "bearish_ob": exec_ctx.get("bearish_ob"),
+            "bullish_fvg": exec_ctx.get("bullish_fvg"),
+            "bearish_fvg": exec_ctx.get("bearish_fvg"),
+            "is_bsl_swept": bool(exec_ctx.get("is_bsl_swept", False)),
+            "is_ssl_swept": bool(exec_ctx.get("is_ssl_swept", False)),
+        })
         return {
             "symbol": symbol,
             "direction": None, "expected_value": 0.0, "score": 0.0,
@@ -1194,6 +1269,13 @@ async def scan_and_decide(symbol: str) -> dict | None:
         slog.warning(f"[{symbol}] EVRealityGuard error: {_ev_guard_err}")
 
     if _guard_blocked:
+        _write_ai_scan_snapshot(symbol, {
+            "status": "EV_GUARD_BLOCKED",
+            "note": "EVRealityGuard 拦截",
+            "direction": direction,
+            "score": float(score),
+            "setup_type": str(best.get("setup_type", "")),
+        })
         return None
 
     # ===== {V4.6} ProbabilityCalibrator Transform -> EV + Confidence =====

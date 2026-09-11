@@ -978,7 +978,7 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
                 age = float(__import__("time").time() - float(scan.get("ts") or 0))
             except Exception:
                 age = None
-            if scan.get("status") == "NO_RECENT_SIGNAL":
+            if scan.get("status") in ("NO_RECENT_SIGNAL", "BAR_UNCHANGED", "NO_CANDIDATES", "NO_TRADE_SELECTED", "EV_GUARD_BLOCKED", "DEDUPED_EMPTY"):
                 snap["system_signals"][sym] = {
                     "status": "NO_RECENT_SIGNAL",
                     "age_seconds": age,
@@ -988,7 +988,7 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
                     "direction": None,
                     "setup_type": None,
                 }
-                snap["data_notes"].append(f"{sym} 近窗无新形态（非数据缺失）")
+                snap["data_notes"].append(f"{sym} 状态={scan.get('status')}（{scan.get('note') or '非数据缺失'}）")
                 continue
             snap["system_signals"][sym] = {
                 "age_seconds": age,
