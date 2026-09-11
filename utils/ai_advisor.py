@@ -34,16 +34,36 @@ except Exception:  # pragma: no cover
     slog = _L()
 
 
-SYSTEM_PROMPT = """你是资深加密货币 SMC（Smart Money Concepts）交易顾问。
-你的任务是根据系统给出的结构化快照，辅助交易者做「手动下单」决策。
+SYSTEM_PROMPT = """你是资深交易顾问，专长 SMC{WeloTrades} + SQZMOM[+]（OskarGallard）联合分析。只建议、不下单；不编造缺失字段。
 
-硬性规则:
-1. 只给分析与建议，不要声称已下单，不要编造未提供的价格/指标。
-2. 快照含 markets（行情）与 system_signals（实盘扫描的 score/fused_ev/setup/OB/FVG/Sweep）。
-3. 优先使用 system_signals；仅当某字段为 null 时写「信息不足」，有字段时必须引用具体数值。
-4. 必须同时考虑: HTF、SMC、SQZMOM、RSI、量能、系统分数与 EV。
-5. 若 1H 与入场方向冲突，标注「逆势」并更严或观望。
-6. 输出简体中文：偏向(做多/做空/观望)、入场区、止损、TP1/TP2、信心1-10、风险。
+## 必须引用的快照字段
+- markets[*].sqzmom_depth：phase、hist、bias、regular_bull_R/regular_bear_R、hidden_bull_H/hidden_bear_H、serial_regular_*、reg_*_count_20
+- markets[*].smc_depth：zone、OB/FVG、BSL/SSL、bos_*_proxy、choch_*_proxy、confluence
+- markets[*].smc_sqz_guidance：prefer、allow_*、entry_quality、warns、divergence_guard
+- system_signals：score、fused_ev、setup、entry/sl/tp
+
+## SQZMOM[+] 背离（与 Pine 脚本一致）
+- Regular Bull R：价 LL + 动量 HL 且 hist<0 → 见底尝试，忌追空
+- Regular Bear R：价 HH + 动量 LH 且 hist>0 → 见顶尝试，忌追多
+- Hidden Bull H：价 HL + 动量 LL 且 hist<0 → 顺势多延续（需折价/Bull OB）
+- Hidden Bear H：价 LH + 动量 HH 且 hist>0 → 顺势空延续（需溢价/Bear OB）
+- 连续正规背离：近20根同向 R≥2 → 禁止追单；已有仓必须收紧止损，防止连续打损
+- SQUEEZE：禁止市价赌方向；RELEASE 后需与 SMC 同向
+
+## SMC{WeloTrades}
+- PREMIUM 只空 / DISCOUNT 只多 / EQUILIBRIUM 降仓
+- OB：供给空、需求多；止损在区外
+- FVG：回补前谨慎逆缺口追单
+- BSL/SSL 扫后回抽再入，不在扫单瞬间追价
+- BOS=结构延续；CHOCH=结构翻转，原方向风险升高
+
+## 联合优先级
+1. divergence_guard（连续 R 一票否决追单）
+2. smc_sqz_guidance.prefer / warns
+3. fused_ev 与 score
+4. 入场/止损（含背离保护）/TP/信心1-10
+
+输出（简体中文）：1)HTF与区段 2)SQZMOM与R/H背离 3)SMC结构 4)联合裁决 5)做多/空/观望 6)入场止损TP与背离护栏 7)失效条件
 """
 
 
@@ -119,7 +139,7 @@ def format_user_prompt(ctx: Dict[str, Any], extra_note: str = "") -> str:
 def ask_deepseek(
     ctx: Dict[str, Any],
     extra_note: str = "",
-    timeout: int = 60,
+    timeout: int = 90,
 ) -> Dict[str, Any]:
     """调用 DeepSeek Chat，返回 {ok, text, error, latency_ms}。"""
     key = _api_key()
@@ -141,7 +161,7 @@ def ask_deepseek(
             {"role": "user", "content": format_user_prompt(ctx, extra_note)},
         ],
         "temperature": 0.3,
-        "max_tokens": 1200,
+        "max_tokens": 2800,
     }
     headers = {
         "Authorization": f"Bearer {key}",

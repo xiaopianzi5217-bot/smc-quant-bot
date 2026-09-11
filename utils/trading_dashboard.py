@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 
 try:
     import plotly.graph_objects as go
@@ -484,7 +485,390 @@ def positions_md(positions: dict, prices: Dict[str, float]) -> str:
         lines.append("")
     return "\n".join(lines)
 
+def _sqzmom_series(df: pd.DataFrame, length: int = 20) -> pd.DataFrame:
+    """对齐 SQZMOM[+]：BB(2.0)/KC(ATR·1.5) 挤压 + 动量柱 hist=close-KC_basis。"""
+    d = df.copy()
+    close = d["close"].astype(float)
+    high = d["high"].astype(float)
+    low = d["low"].astype(float)
+    ma = close.rolling(length, min_periods=length).mean()
+    std = close.rolling(length, min_periods=length).std()
+    upper_bb, lower_bb = ma + 2.0 * std, ma - 2.0 * std
+    tr = pd.concat([(high - low).abs(), (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(length, min_periods=length).mean()
+    kc = close.ewm(span=length, adjust=False).mean()
+    upper_kc, lower_kc = kc + 1.5 * atr, kc - 1.5 * atr
+    sqz_on = (upper_bb < upper_kc) & (lower_bb > lower_kc)
+    hist = close - kc
+    d["sqz_on"] = sqz_on
+    d["sqz_hist"] = hist
+    d["sqz_released"] = sqz_on.shift(1).fillna(False).astype(bool) & (~sqz_on.astype(bool))
+    d["sqz_hist_rising"] = hist > hist.shift(1)
+    d["sqz_hist_falling"] = hist < hist.shift(1)
+    # 白柱：动量同号但减速（SQZMOM Plus 颜色逻辑简化）
+    d["white_bear"] = (hist >= 0) & (hist < hist.shift(1))
+    d["white_bull"] = (hist < 0) & (hist >= hist.shift(1))
+    return d
 
+
+def _pivot_flags(series: pd.Series, left: int = 3, right: int = 1) -> tuple:
+    """简化 pivot high/low（对齐脚本 lbL/lbR 思想，右窗=1 降低滞后）。"""
+    n = len(series)
+    ph = pd.Series(False, index=series.index)
+    pl = pd.Series(False, index=series.index)
+    vals = series.values
+    for i in range(left, n - right):
+        window = vals[i - left : i + right + 1]
+        if vals[i] == np.max(window) and vals[i] > vals[i - 1]:
+            ph.iloc[i] = True
+        if vals[i] == np.min(window) and vals[i] < vals[i - 1]:
+            pl.iloc[i] = True
+    return ph, pl
+
+
+def detect_sqz_divergences(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    对齐 SQZMOM[+] / Better Divergence 规则：
+    - Regular Bull (R): 价格 LL + 动量 HL，且 osc<0
+    - Regular Bear (R): 价格 HH + 动量 LH，且 osc>0
+    - Hidden Bull (H): 价格 HL + 动量 LL，且 osc<0
+    - Hidden Bear (H): 价格 LH + 动量 HH，且 osc>0
+    连续背离：近 20 根内同向 Regular ≥2 → 禁止追单并收紧止损。
+    """
+    import numpy as np
+    d = _sqzmom_series(df)
+    close = d["close"].astype(float)
+    hist = d["sqz_hist"].astype(float)
+    # 用价格与动量的滚动极值近似 pivot 比较（稳健、少 repaint）
+    look = 5
+    price_ll = close <= close.rolling(look, min_periods=3).min()
+    price_hh = close >= close.rolling(look, min_periods=3).max()
+    price_hl = (close > close.shift(look)) & (close <= close.rolling(look).max())
+    price_lh = (close < close.shift(look)) & (close >= close.rolling(look).min())
+    osc_hl = hist > hist.shift(look)
+    osc_ll = hist < hist.shift(look)
+    osc_lh = hist < hist.shift(look)
+    osc_hh = hist > hist.shift(look)
+
+    reg_bull = price_ll & osc_hl & (hist < 0)
+    reg_bear = price_hh & osc_lh & (hist > 0)
+    hid_bull = price_hl & osc_ll & (hist < 0)
+    hid_bear = price_lh & osc_hh & (hist > 0)
+
+    # 确认：shift(1) 降 repaint
+    reg_bull_c = reg_bull.shift(1).fillna(False).astype(bool)
+    reg_bear_c = reg_bear.shift(1).fillna(False).astype(bool)
+    hid_bull_c = hid_bull.shift(1).fillna(False).astype(bool)
+    hid_bear_c = hid_bear.shift(1).fillna(False).astype(bool)
+
+    win = 20
+    reg_bull_n = int(reg_bull_c.tail(win).sum())
+    reg_bear_n = int(reg_bear_c.tail(win).sum())
+    hid_bull_n = int(hid_bull_c.tail(win).sum())
+    hid_bear_n = int(hid_bear_c.tail(win).sum())
+
+    last = d.iloc[-1]
+    return {
+        "hist": float(last["sqz_hist"]),
+        "sqz_on": bool(last["sqz_on"]),
+        "released": bool(last["sqz_released"]),
+        "regular_bull_R": bool(reg_bull_c.iloc[-1]),
+        "regular_bear_R": bool(reg_bear_c.iloc[-1]),
+        "hidden_bull_H": bool(hid_bull_c.iloc[-1]),
+        "hidden_bear_H": bool(hid_bear_c.iloc[-1]),
+        "reg_bull_count_20": reg_bull_n,
+        "reg_bear_count_20": reg_bear_n,
+        "hid_bull_count_20": hid_bull_n,
+        "hid_bear_count_20": hid_bear_n,
+        "serial_regular_bull": reg_bull_n >= 2,
+        "serial_regular_bear": reg_bear_n >= 2,
+        "white_bull": bool(last.get("white_bull")),
+        "white_bear": bool(last.get("white_bear")),
+        "phase": "SQUEEZE" if bool(last["sqz_on"]) else ("RELEASE" if bool(last["sqz_released"]) else "OPEN"),
+        "bias": "DOWN" if float(last["sqz_hist"]) < 0 else ("UP" if float(last["sqz_hist"]) > 0 else "FLAT"),
+    }
+
+
+def analyze_sqzmom_depth(df: pd.DataFrame) -> Dict[str, Any]:
+    """SQZMOM[+] 深度：挤压状态机 + R/H 背离 + 连续正规背离风控。"""
+    if df is None or len(df) < 30:
+        return {"ok": False, "summary": "K线不足"}
+    base = df if "ema50" in df.columns else enrich(df)
+    div = detect_sqz_divergences(base)
+    # 挤压持续
+    d = _sqzmom_series(base)
+    dur = 0
+    for i in range(len(d) - 1, -1, -1):
+        if bool(d["sqz_on"].iloc[i]):
+            dur += 1
+        elif dur > 0:
+            break
+        else:
+            break
+    rules = []
+    if div["phase"] == "SQUEEZE" and dur >= 6:
+        rules.append("SQZ 长挤压：禁止市价赌方向，等 RELEASE 再顺势")
+    if div["released"]:
+        rules.append(f"SQZ 刚释放，动量 {div['bias']}：可作方向过滤，需 SMC 同向确认")
+    if div["regular_bear_R"]:
+        rules.append("正规顶背离 R：价创新高动量更弱 → 减多/等结构空，不追多")
+    if div["regular_bull_R"]:
+        rules.append("正规底背离 R：价创新低动量抬高 → 减空/等结构多，不追空")
+    if div["hidden_bear_H"]:
+        rules.append("隐藏顶背离 H：回调中动量仍强空 → 顺势空的延续信号（需结构）")
+    if div["hidden_bull_H"]:
+        rules.append("隐藏底背离 H：反弹中动量仍强多 → 顺势多的延续信号（需结构）")
+    if div["serial_regular_bear"]:
+        rules.append("⚠ 近20根≥2次正规顶背离R：禁止追空；空单上移止损/减仓防连续打损")
+    if div["serial_regular_bull"]:
+        rules.append("⚠ 近20根≥2次正规底背离R：禁止追多；多单下移止损/减仓防连续打损")
+    if div["white_bear"]:
+        rules.append("动量白柱空向：上涨减速，只作减多或等待")
+    if div["white_bull"]:
+        rules.append("动量白柱多向：下跌减速，只作减空或等待")
+
+    return {
+        "ok": True,
+        **div,
+        "squeeze_duration": dur,
+        "rules": rules,
+        "summary": (
+            f"{div['phase']} {div['bias']} hist={div['hist']:.4f} "
+            f"R↑{div['reg_bull_count_20']}/R↓{div['reg_bear_count_20']} "
+            f"H↑{div['hid_bull_count_20']}/H↓{div['hid_bear_count_20']}"
+            + (" |连续R顶" if div["serial_regular_bear"] else "")
+            + (" |连续R底" if div["serial_regular_bull"] else "")
+        ),
+    }
+
+
+def analyze_smc_depth(df: pd.DataFrame, scan: Optional[dict] = None) -> Dict[str, Any]:
+    """
+    对齐 SMC{WeloTrades} 可落地要素：
+    OB / FVG / BSL·SSL(流动性) / BOS·CHOCH 代理 / 溢价折价区。
+    """
+    scan = scan or {}
+    if df is None or len(df) < 20:
+        return {"ok": False, "summary": "K线不足"}
+    d = enrich(df) if "ema50" not in df.columns else df
+    proxy = smc_proxy_from_df(d)
+    last = d.iloc[-1]
+    px = float(last["close"])
+    e50 = float(last.get("ema50") or px)
+    e200 = float(last.get("ema200") or px)
+    premium = px > e50 and px > e200
+    discount = px < e50 and px < e200
+    zone = "PREMIUM" if premium else ("DISCOUNT" if discount else "EQUILIBRIUM")
+
+    # 简易 BOS/CHOCH 代理：收盘突破近 look 高低点
+    look = 10
+    hh = float(d["high"].iloc[-look:-1].max())
+    ll = float(d["low"].iloc[-look:-1].min())
+    bos_up = px > hh
+    bos_dn = px < ll
+    # CHOCH 代理：与 ema 堆叠冲突的突破
+    stack = proxy.get("ema_stack")
+    choch_up = bos_up and stack == "BEAR_STACK"
+    choch_dn = bos_dn and stack == "BULL_STACK"
+
+    confluence = []
+    if zone == "PREMIUM":
+        confluence.append("溢价区(Welo)：优先供给/空头 OB，不做多")
+    if zone == "DISCOUNT":
+        confluence.append("折价区(Welo)：优先需求/多头 OB，不做空")
+    if scan.get("bearish_ob"):
+        confluence.append(f"Bearish OB: {scan.get('bearish_ob')}")
+    if scan.get("bullish_ob"):
+        confluence.append(f"Bullish OB: {scan.get('bullish_ob')}")
+    if scan.get("bullish_fvg") is not None:
+        confluence.append(f"Bullish FVG: {scan.get('bullish_fvg')}（回补前慎追空）")
+    if scan.get("bearish_fvg") is not None:
+        confluence.append(f"Bearish FVG: {scan.get('bearish_fvg')}（回补前慎追多）")
+    if scan.get("is_bsl_swept"):
+        confluence.append("BSL 流动性已扫：等回抽再空，忌扫单瞬间追空")
+    if scan.get("is_ssl_swept"):
+        confluence.append("SSL 流动性已扫：等回抽再多，忌扫单瞬间追多")
+    if proxy.get("sweep_high_proxy"):
+        confluence.append("代理扫高收回 → 空头猎杀流动性")
+    if proxy.get("sweep_low_proxy"):
+        confluence.append("代理扫低收回 → 多头猎杀流动性")
+    if choch_up:
+        confluence.append("CHOCH↑代理：空头结构下出现向上突破，空单风险升高")
+    if choch_dn:
+        confluence.append("CHOCH↓代理：多头结构下出现向下突破，多单风险升高")
+    if bos_up and not choch_up:
+        confluence.append("BOS↑代理：顺势向上结构延续")
+    if bos_dn and not choch_dn:
+        confluence.append("BOS↓代理：顺势向下结构延续")
+
+    return {
+        "ok": True,
+        "zone": zone,
+        "ema_stack": stack,
+        "swing_high": proxy.get("swing_high"),
+        "swing_low": proxy.get("swing_low"),
+        "near_swing_high": proxy.get("near_swing_high"),
+        "near_swing_low": proxy.get("near_swing_low"),
+        "sweep_high_proxy": proxy.get("sweep_high_proxy"),
+        "sweep_low_proxy": proxy.get("sweep_low_proxy"),
+        "bos_up_proxy": bos_up,
+        "bos_dn_proxy": bos_dn,
+        "choch_up_proxy": choch_up,
+        "choch_dn_proxy": choch_dn,
+        "bearish_ob": scan.get("bearish_ob"),
+        "bullish_ob": scan.get("bullish_ob"),
+        "bullish_fvg": scan.get("bullish_fvg"),
+        "bearish_fvg": scan.get("bearish_fvg"),
+        "is_bsl_swept": scan.get("is_bsl_swept"),
+        "is_ssl_swept": scan.get("is_ssl_swept"),
+        "confluence": confluence,
+        "summary": f"{zone} {stack} BOS↑{bos_up}/↓{bos_dn} CHOCH↑{choch_up}/↓{choch_dn}",
+    }
+
+
+def combine_smc_sqz_guidance(smc: dict, sqz: dict, direction_hint: Optional[str] = None) -> Dict[str, Any]:
+    """
+    SMC{Welo} × SQZMOM[+] 联合裁决。
+    连续正规背离 R → 禁止追单并要求收紧止损（防连续打损）。
+    """
+    warns = []
+    allow_short, allow_long = True, True
+    prefer = "WAIT"
+    if not smc.get("ok") or not sqz.get("ok"):
+        return {"prefer": "WAIT", "allow_long": False, "allow_short": False,
+                "warns": ["数据不足"], "entry_quality": "LOW", "playbook": "观望"}
+
+    # 连续正规背离 = 硬约束
+    if sqz.get("serial_regular_bear"):
+        allow_short = False
+        warns.append("连续正规顶背离R：禁止追空；已有空单上移止损/减仓")
+    if sqz.get("serial_regular_bull"):
+        allow_long = False
+        warns.append("连续正规底背离R：禁止追多；已有多单下移止损/减仓")
+
+    # 单次 R 背离：降低追单质量
+    if sqz.get("regular_bear_R"):
+        warns.append("当前正规顶背离R：不宜追多，空需等溢价/OB")
+    if sqz.get("regular_bull_R"):
+        warns.append("当前正规底背离R：不宜追空，多需等折价/OB")
+
+    # 隐藏背离：顺势延续，仍要结构
+    if sqz.get("hidden_bear_H"):
+        warns.append("隐藏顶背离H：偏顺势空延续，需在 PREMIUM/Bear OB 入场")
+    if sqz.get("hidden_bull_H"):
+        warns.append("隐藏底背离H：偏顺势多延续，需在 DISCOUNT/Bull OB 入场")
+
+    if smc.get("zone") == "PREMIUM":
+        allow_long = False
+        warns.append("溢价区不做多")
+    if smc.get("zone") == "DISCOUNT":
+        allow_short = False
+        warns.append("折价区不做空")
+
+    if smc.get("choch_up_proxy"):
+        warns.append("CHOCH↑：空头叙事削弱")
+        allow_short = allow_short and False if sqz.get("bias") == "DOWN" else allow_short
+    if smc.get("choch_dn_proxy"):
+        warns.append("CHOCH↓：多头叙事削弱")
+
+    if sqz.get("phase") == "SQUEEZE":
+        prefer = "WAIT_RELEASE"
+        warns.append("SQZ 挤压中：只挂单等释放，不市价追")
+    elif sqz.get("bias") == "DOWN" and allow_short:
+        if smc.get("zone") in ("PREMIUM", "EQUILIBRIUM") or smc.get("sweep_high_proxy") or smc.get("is_bsl_swept") or smc.get("bearish_ob"):
+            prefer = "SHORT_SETUP"
+        else:
+            prefer = "SHORT_WEAK"
+            warns.append("动量向下但缺溢价/流动性/OB：质量偏低")
+    elif sqz.get("bias") == "UP" and allow_long:
+        if smc.get("zone") in ("DISCOUNT", "EQUILIBRIUM") or smc.get("sweep_low_proxy") or smc.get("is_ssl_swept") or smc.get("bullish_ob"):
+            prefer = "LONG_SETUP"
+        else:
+            prefer = "LONG_WEAK"
+            warns.append("动量向上但缺折价/流动性/OB：质量偏低")
+
+    if direction_hint:
+        d = str(direction_hint).lower()
+        if d.startswith("short") and not allow_short:
+            prefer = "REJECT_SHORT"
+            warns.append("系统想做空但联合规则禁止（连续R背离/折价/CHOCH）")
+        if d.startswith("long") and not allow_long:
+            prefer = "REJECT_LONG"
+            warns.append("系统想做多但联合规则禁止（连续R背离/溢价/CHOCH）")
+
+    quality = "HIGH" if prefer in ("SHORT_SETUP", "LONG_SETUP") else (
+        "MED" if prefer in ("SHORT_WEAK", "LONG_WEAK", "WAIT_RELEASE") else "LOW"
+    )
+    playbooks = {
+        "SHORT_SETUP": "溢价/BearOB/扫BSL + SQZ向下 → 回抽入场，止损在流动性高点上；若出现连续R顶背离则立刻上移止损",
+        "LONG_SETUP": "折价/BullOB/扫SSL + SQZ向上 → 回抽入场，止损在流动性低点下；若出现连续R底背离则立刻下移止损",
+        "WAIT_RELEASE": "等 SQZ RELEASE 且与 SMC 区同向",
+        "REJECT_SHORT": "连续R顶或折价区 → 空单规避，防连续打损",
+        "REJECT_LONG": "连续R底或溢价区 → 多单规避，防连续打损",
+        "SHORT_WEAK": "仅有动量向下，缺结构：观望或极轻仓",
+        "LONG_WEAK": "仅有动量向上，缺结构：观望或极轻仓",
+    }
+    return {
+        "prefer": prefer,
+        "allow_long": allow_long,
+        "allow_short": allow_short,
+        "entry_quality": quality,
+        "warns": warns,
+        "playbook": playbooks.get(prefer, "观望"),
+        "divergence_guard": {
+            "block_chase_short": bool(sqz.get("serial_regular_bear")),
+            "block_chase_long": bool(sqz.get("serial_regular_bull")),
+            "tighten_sl_on_serial_div": True,
+        },
+    }
+
+
+def tech_analysis_markdown(symbol: str, df: pd.DataFrame, scan: Optional[dict] = None) -> str:
+    """仪表盘 SMC×SQZMOM[+] 技术分析。"""
+    sqz = analyze_sqzmom_depth(df)
+    smc = analyze_smc_depth(df, scan)
+    guide = combine_smc_sqz_guidance(smc, sqz, (scan or {}).get("direction"))
+    lines = [f"### {symbol} · SMC{{Welo}} × SQZMOM[+] 技术分析", ""]
+    if sqz.get("ok"):
+        lines.append(f"**SQZMOM**: `{sqz['summary']}`")
+        lines.append(f"- 阶段 **{sqz['phase']}** · 动量 **{sqz['bias']}** · 挤压 **{sqz.get('squeeze_duration', 0)}** 根")
+        lines.append(
+            f"- 背离 R(正规) 底/顶: **{sqz.get('reg_bull_count_20')}** / **{sqz.get('reg_bear_count_20')}** · "
+            f"H(隐藏) 底/顶: **{sqz.get('hid_bull_count_20')}** / **{sqz.get('hid_bear_count_20')}**"
+        )
+        if sqz.get("regular_bull_R") or sqz.get("regular_bear_R") or sqz.get("hidden_bull_H") or sqz.get("hidden_bear_H"):
+            flags = []
+            if sqz.get("regular_bull_R"):
+                flags.append("R底")
+            if sqz.get("regular_bear_R"):
+                flags.append("R顶")
+            if sqz.get("hidden_bull_H"):
+                flags.append("H底")
+            if sqz.get("hidden_bear_H"):
+                flags.append("H顶")
+            lines.append(f"- 当前触发: **{', '.join(flags)}**")
+        for r in sqz.get("rules") or []:
+            lines.append(f"- {r}")
+    lines.append("")
+    if smc.get("ok"):
+        lines.append(f"**SMC**: `{smc['summary']}`")
+        lines.append(f"- 区段 **{smc['zone']}** · 堆叠 **{smc['ema_stack']}**")
+        lines.append(f"- Swing H/L `{_fmt(smc.get('swing_high'))}` / `{_fmt(smc.get('swing_low'))}`")
+        lines.append(f"- OB 空/多 `{smc.get('bearish_ob')}` / `{smc.get('bullish_ob')}`")
+        lines.append(f"- FVG 多/空 `{smc.get('bullish_fvg')}` / `{smc.get('bearish_fvg')}`")
+        lines.append(f"- BSL/SSL `{smc.get('is_bsl_swept')}` / `{smc.get('is_ssl_swept')}`")
+        for c in smc.get("confluence") or []:
+            lines.append(f"- {c}")
+    lines.append("")
+    lines.append(f"**联合裁决**: **{guide['prefer']}** · 质量 **{guide['entry_quality']}**")
+    lines.append(f"- 允许多 `{guide['allow_long']}` · 允许空 `{guide['allow_short']}`")
+    dg = guide.get("divergence_guard") or {}
+    lines.append(f"- 背离护栏: 禁追空=`{dg.get('block_chase_short')}` 禁追多=`{dg.get('block_chase_long')}` 连续背离收紧止损=`{dg.get('tighten_sl_on_serial_div')}`")
+    lines.append(f"- 手册: {guide.get('playbook')}")
+    for w in guide.get("warns") or []:
+        lines.append(f"- ⚠ {w}")
+    lines.append("")
+    return "\n".join(lines)
 def load_last_scan_snapshots() -> Dict[str, Any]:
     """读取 hf_auto_trader 写出的最近扫描快照。"""
     for p in (Path("data/last_scan_snapshot.json"), Path("/app/data/last_scan_snapshot.json")):
@@ -567,6 +951,9 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
             continue
         last = df.iloc[-1]
         proxy = smc_proxy_from_df(df)
+        sqz_d = analyze_sqzmom_depth(df)
+        smc_d = analyze_smc_depth(df, scan if isinstance(scan, dict) else {})
+        guide = combine_smc_sqz_guidance(smc_d, sqz_d, (scan or {}).get("direction") if isinstance(scan, dict) else None)
         mkt = {
             "price": prices.get(sym),
             "funding_pct": fundings.get(sym),
@@ -579,6 +966,9 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
             "ema50": float(last.get("ema50") or 0),
             "ema200": float(last.get("ema200") or 0),
             "smc_proxy": proxy,
+            "sqzmom_depth": sqz_d,
+            "smc_depth": smc_d,
+            "smc_sqz_guidance": guide,
         }
         snap["markets"][sym] = mkt
         # 系统扫描字段（若存在）
@@ -588,6 +978,18 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
                 age = float(__import__("time").time() - float(scan.get("ts") or 0))
             except Exception:
                 age = None
+            if scan.get("status") == "NO_RECENT_SIGNAL":
+                snap["system_signals"][sym] = {
+                    "status": "NO_RECENT_SIGNAL",
+                    "age_seconds": age,
+                    "note": scan.get("note"),
+                    "score": None,
+                    "fused_ev": None,
+                    "direction": None,
+                    "setup_type": None,
+                }
+                snap["data_notes"].append(f"{sym} 近窗无新形态（非数据缺失）")
+                continue
             snap["system_signals"][sym] = {
                 "age_seconds": age,
                 "direction": scan.get("direction"),
@@ -700,12 +1102,22 @@ def refresh_dashboard(timeframe: str = "15m") -> Tuple:
         now = datetime.now(BJ).strftime("%Y-%m-%d %H:%M:%S")
         scans = load_last_scan_snapshots()
         scan_n = sum(1 for s in SYMBOLS if isinstance(scans.get(s), dict))
+        tech_md = ""
+        for _sym in SYMBOLS:
+            _df = frames.get(_sym)
+            _sc = scans.get(_sym) if isinstance(scans.get(_sym), dict) else {}
+            if _df is not None and hasattr(_df, "empty") and not _df.empty:
+                try:
+                    tech_md += tech_analysis_markdown(_sym, _df, _sc) + "\n---\n"
+                except Exception as _te:
+                    tech_md += f"### {_sym} 技术分析失败: {_te}\n"
         status = (
             f"### 系统快览\n- 刷新: **{now} CST** · 周期 **{timeframe}**\n"
             f"- 持仓 **{len(positions)}** · 近窗 **{stats['n']}** 笔 · "
             f"胜率 **{stats['winrate']:.1f}%** · PF **{stats['pf']}** · 累计 **{stats['sum_r']:+.2f}R**\n"
             f"- 系统扫描快照: **{scan_n}/{len(SYMBOLS)}** 品种（供 AI 使用 score/EV/SMC）\n"
-            f"- 自动刷新约 60s\n"
+            f"- 自动刷新约 60s\n\n"
+            f"{tech_md}"
         )
 
         _LAST_SNAP = {
@@ -756,7 +1168,7 @@ def build_dashboard_tab():
         raise RuntimeError("gradio 未安装")
 
     with gr.Tab("交易仪表盘"):
-        gr.Markdown("# SMC 交易仪表盘\n自动刷新 · 多周期 · 盘口深度 · 清算代理热力 · DeepSeek 一键分析")
+        gr.Markdown("# SMC 交易仪表盘\n自动刷新 · **SMC×SQZMOM 深度分析/连续背离风控** · 多周期 · 盘口 · DeepSeek")
         with gr.Row():
             tf = gr.Dropdown(choices=["5m", "15m", "30m", "1h", "4h"], value="15m", label="主图周期", scale=1)
             btn = gr.Button("刷新仪表盘", variant="primary", scale=1)
@@ -795,7 +1207,7 @@ def build_dashboard_tab():
         with gr.Row():
             ai_note = gr.Textbox(label="补充说明", value="结合 SMC + SQZMOM + 费率，给出是否手动入场", scale=3)
             ai_btn = gr.Button("一键 AI 分析当前快照", variant="secondary", scale=1)
-        ai_out = gr.Textbox(label="AI 建议", lines=16)
+        ai_out = gr.Markdown(label="AI 建议", value="点击上方按钮生成分析（长文完整显示）")
 
         outs = [status, cards, plot_btc, plot_eth, mtf15, mtf1h, mtf4h, heat,
                 depth_btc, depth_eth, liq_btc, liq_eth, pos, closed, ts]
