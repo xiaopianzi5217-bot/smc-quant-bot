@@ -927,6 +927,17 @@ async def scan_and_decide(symbol: str) -> dict | None:
                 symbol, "DEDUPED_EMPTY",
                 score=0.0, ev=0.0, regime="unknown",
             )
+            _write_ai_scan_snapshot(symbol, {
+                "status": "DEDUPED_EMPTY",
+                "note": "排重后无有效候选",
+                "direction": None,
+                "score": None,
+                "fused_ev": None,
+                "setup_type": None,
+                "approved": False,
+                "rejected": True,
+                "reject_stage": "DEDUP",
+            })
             return None
 
     slog.info(f"[{symbol}] V56.5 候选信号数: {len(candidates)}, score范围: {candidates['score'].min():.1f}~{candidates['score'].max():.1f}")
@@ -956,13 +967,68 @@ async def scan_and_decide(symbol: str) -> dict | None:
         regime_name = str(get_htf_regime_filter().analyze(df_macro).get("regime", "UNKNOWN")).upper().strip()
         long_score = float(exec_ctx.get("long_quality", 0))
         short_score = float(exec_ctx.get("short_quality", 0))
+        # 门控前候选摘要：供 AI 说明「有分但被拒」而非信息不足
+        _pre = {
+            "n_candidates": int(len(candidates)) if candidates is not None else 0,
+            "best_raw_score": None,
+            "best_setup": None,
+            "best_direction": None,
+            "best_model_ev": None,
+            "score_min": None,
+            "score_max": None,
+            "setups": [],
+            "reject_hint": "quality_gate_or_eligible_empty",
+        }
+        try:
+            if candidates is not None and not candidates.empty:
+                _sc = candidates["score"].astype(float)
+                _pre["score_min"] = round(float(_sc.min()), 2)
+                _pre["score_max"] = round(float(_sc.max()), 2)
+                _bi = int(_sc.idxmax()) if hasattr(_sc, "idxmax") else int(_sc.values.argmax())
+                # idxmax 可能是 index label
+                try:
+                    _row = candidates.loc[_sc.idxmax()]
+                except Exception:
+                    _row = candidates.iloc[int(_sc.values.argmax())]
+                _pre["best_raw_score"] = round(float(_row.get("score", 0) or 0), 2)
+                _pre["best_setup"] = str(_row.get("setup_type") or _row.get("setup") or "")
+                _pre["best_direction"] = str(_row.get("direction") or "")
+                for _evk in ("model_ev", "bucket_ev", "expected_value", "ev"):
+                    if _evk in getattr(_row, "index", []) or (isinstance(_row, dict) and _evk in _row):
+                        try:
+                            _pre["best_model_ev"] = round(float(_row.get(_evk)), 4)
+                            break
+                        except Exception:
+                            pass
+                if "setup_type" in candidates.columns:
+                    _pre["setups"] = (
+                        candidates["setup_type"].astype(str).value_counts().head(6).to_dict()
+                    )
+                # 若候选上已有 gate 原因列则带上
+                for _gk in ("gate_reason", "reject_reason", "block_reason", "quality_reason"):
+                    if _gk in candidates.columns:
+                        _pre["gate_reasons"] = (
+                            candidates[_gk].astype(str).value_counts().head(8).to_dict()
+                        )
+                        break
+        except Exception as _pre_e:
+            _pre["parse_error"] = str(_pre_e)
+
         _write_ai_scan_snapshot(symbol, {
             "status": "NO_TRADE_SELECTED",
-            "note": "V56.5 选择后无交易/质量门否决全部候选",
-            "direction": None,
-            "score": 0.0,
-            "fused_ev": None,
-            "setup_type": None,
+            "note": (
+                f"有候选但未入选交易: best_raw={_pre.get('best_raw_score')} "
+                f"setup={_pre.get('best_setup')} dir={_pre.get('best_direction')} "
+                f"(质量门/主形态/eligible 过滤)"
+            ),
+            # 供 AI 直接引用（非可成交 fused_ev）
+            "direction": _pre.get("best_direction") or None,
+            "setup_type": _pre.get("best_setup") or None,
+            "score": _pre.get("best_raw_score"),  # 门控前最高分
+            "orig_score": _pre.get("best_raw_score"),
+            "fused_ev": None,  # 未进入融合路由，无最终 EV
+            "pre_gate_model_ev": _pre.get("best_model_ev"),
+            "pre_gate": _pre,
             "regime": regime_name,
             "long_score": long_score,
             "short_score": short_score,
@@ -972,6 +1038,9 @@ async def scan_and_decide(symbol: str) -> dict | None:
             "bearish_fvg": exec_ctx.get("bearish_fvg"),
             "is_bsl_swept": bool(exec_ctx.get("is_bsl_swept", False)),
             "is_ssl_swept": bool(exec_ctx.get("is_ssl_swept", False)),
+            "approved": False,
+            "rejected": True,
+            "reject_stage": "SELECT_TRADES_EMPTY",
         })
         return {
             "symbol": symbol,

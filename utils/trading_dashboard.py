@@ -980,15 +980,31 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
                 age = None
             if scan.get("status") in ("NO_RECENT_SIGNAL", "BAR_UNCHANGED", "NO_CANDIDATES", "NO_TRADE_SELECTED", "EV_GUARD_BLOCKED", "DEDUPED_EMPTY"):
                 snap["system_signals"][sym] = {
-                    "status": "NO_RECENT_SIGNAL",
+                    "status": scan.get("status"),
                     "age_seconds": age,
                     "note": scan.get("note"),
-                    "score": None,
-                    "fused_ev": None,
-                    "direction": None,
-                    "setup_type": None,
+                    "direction": scan.get("direction"),
+                    "setup_type": scan.get("setup_type"),
+                    "score": scan.get("score"),
+                    "orig_score": scan.get("orig_score") or scan.get("score"),
+                    "fused_ev": scan.get("fused_ev"),
+                    "pre_gate_model_ev": scan.get("pre_gate_model_ev"),
+                    "pre_gate": scan.get("pre_gate"),
+                    "reject_stage": scan.get("reject_stage"),
+                    "approved": scan.get("approved", False),
+                    "rejected": scan.get("rejected", True),
+                    "regime": scan.get("regime"),
+                    "bullish_ob": scan.get("bullish_ob"),
+                    "bearish_ob": scan.get("bearish_ob"),
+                    "bullish_fvg": scan.get("bullish_fvg"),
+                    "bearish_fvg": scan.get("bearish_fvg"),
+                    "is_bsl_swept": scan.get("is_bsl_swept"),
+                    "is_ssl_swept": scan.get("is_ssl_swept"),
                 }
-                snap["data_notes"].append(f"{sym} 状态={scan.get('status')}（{scan.get('note') or '非数据缺失'}）")
+                snap["data_notes"].append(
+                    f"{sym} 状态={scan.get('status')} score={scan.get('score')} "
+                    f"setup={scan.get('setup_type')}（{scan.get('note') or ''}）"
+                )
                 continue
             snap["system_signals"][sym] = {
                 "age_seconds": age,

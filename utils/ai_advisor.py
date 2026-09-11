@@ -41,6 +41,7 @@ SYSTEM_PROMPT = """你是资深交易顾问，专长 SMC{WeloTrades} + SQZMOM[+]
 - markets[*].smc_depth：zone、OB/FVG、BSL/SSL、bos_*_proxy、choch_*_proxy、confluence
 - markets[*].smc_sqz_guidance：prefer、allow_*、entry_quality、warns、divergence_guard
 - system_signals：score、fused_ev、setup、entry/sl/tp
+- 若 status=NO_TRADE_SELECTED：score 为**门控前最高分**，fused_ev 为 null（未进入融合）；必须说明「有候选但被质量门/形态白名单拒绝」，引用 pre_gate / reject_stage，**不要**说完全没有扫描数据
 
 ## SQZMOM[+] 背离（与 Pine 脚本一致）
 - Regular Bull R：价 LL + 动量 HL 且 hist<0 → 见底尝试，忌追空
