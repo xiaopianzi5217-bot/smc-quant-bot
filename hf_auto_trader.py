@@ -169,15 +169,11 @@ _FORCE_CLOSE_LOG_PATH = Path("logs/force_close_log.txt")  # 未追踪到的Open�
 
 # ---------- V56.5 Engine（预加载回测 bucket_ev） ----------
 # 扩宽 allowed_hours: 覆盖亚盘早段 + 白天黄金交易时段 + 欧盘衔接 + 美盘前半；
-# 极差时段(4/6/7/23)仍可由 Quality Gate hard_block_hours=[4,6,7,23] 拦截。
+# 全天 allowed_hours；若 Quality Gate 仍配置 hard_block_hours 会另行拦截。
 # 2026-09-06 放行：加入 ORDERBLOCK_REACTION / TREND_PULLBACK，并开启强 Tier2
 _V56_ENGINE = V56_5_Engine(V565Config(
     min_score=48.0,
-    allowed_hours=(
-        0, 1, 2, 3, 4, 5,           # 亚盘早段
-        8, 9, 10, 11, 12, 13, 14, 15,  # 白天（原缺失，导致 12:00 的 64+ 分被静默丢弃）
-        16, 17, 18, 19, 20, 21, 22, 23  # 欧美股 + 晚间
-    ),
+    allowed_hours=tuple(range(24)),  # 全天；6/7 点不再静默丢弃高分形态
     primary_setups=(
         "LIQUIDITY_SWEEP",
         "ORDERBLOCK_REACTION",
@@ -1390,6 +1386,76 @@ async def scan_and_decide(symbol: str) -> dict | None:
         )
 
         # 构建兼容返回格式
+    # 【AI仪表盘】写出最近扫描快照，供 trading_dashboard 一键 AI 使用
+    try:
+        import json as _json_ai
+        from pathlib import Path as _Path_ai
+        _ai_payload = {
+            "ts": __import__("time").time(),
+            "symbol": symbol,
+            "direction": direction,
+            "setup_type": str(best.get("setup_type", "") if best is not None else ""),
+            "score": round(float(_fl_final_score), 2),
+            "orig_score": round(float(score), 2),
+            "fused_ev": round(float(_fused_ev if _fused_ev is not None else 0.0), 4),
+            "expected_value": round(float(_fused_ev if _fused_ev is not None else 0.0), 4),
+            "feedback_ev": float(_fb_result.get("ev", 0) or 0),
+            "confidence": float(_calibrated_prob) if _calibrated_prob is not None else None,
+            "entry": float(entry_price) if entry_price is not None else None,
+            "sl": float(sl) if sl is not None else None,
+            "tp1": float(tp1) if tp1 is not None else None,
+            "tp2": float(tp2) if tp2 is not None else None,
+            "tp3": float(tp3) if tp3 is not None else None,
+            "rr": round(float(rr), 2) if rr is not None else None,
+            "regime": _regime_name,
+            "htf_blocked": bool(result_htf_blocked),
+            "features": _features if isinstance(_features, dict) else {},
+            "sqz_data": {
+                "released": bool((sqz_data or {}).get("released")) if isinstance(sqz_data, dict) else False,
+                "vol_ratio": float((sqz_data or {}).get("vol_ratio") or 0) if isinstance(sqz_data, dict) else 0.0,
+                "strength": float((sqz_data or {}).get("strength") or 0) if isinstance(sqz_data, dict) else 0.0,
+                "duration": (sqz_data or {}).get("duration") if isinstance(sqz_data, dict) else None,
+            },
+            "bullish_ob": exec_ctx.get("bullish_ob"),
+            "bearish_ob": exec_ctx.get("bearish_ob"),
+            "bullish_fvg": exec_ctx.get("bullish_fvg"),
+            "bearish_fvg": exec_ctx.get("bearish_fvg"),
+            "is_bsl_swept": bool(exec_ctx.get("is_bsl_swept", False)),
+            "is_ssl_swept": bool(exec_ctx.get("is_ssl_swept", False)),
+            "bsl_level": exec_ctx.get("bsl_level"),
+            "ssl_level": exec_ctx.get("ssl_level"),
+            "funding_rate": exec_ctx.get("funding_rate"),
+            "atr": float(exec_ctx.get("atr") or 0) if exec_ctx else None,
+            "rsi": float(curr.get("rsi") or curr.get("RSI") or 0) if isinstance(curr, dict) else (
+                float(getattr(curr, "get", lambda k, d=None: d)("rsi", 0)) if curr is not None else None
+            ),
+        }
+        # curr may be Series
+        try:
+            if _ai_payload.get("rsi") in (None, 0) and curr is not None:
+                _ai_payload["rsi"] = float(curr["rsi"]) if hasattr(curr, "__getitem__") and "rsi" in getattr(curr, "index", []) else _ai_payload.get("rsi")
+        except Exception:
+            pass
+        _ai_dir = _Path_ai("data")
+        _ai_dir.mkdir(parents=True, exist_ok=True)
+        _ai_path = _ai_dir / "last_scan_snapshot.json"
+        _existing = {}
+        if _ai_path.exists():
+            try:
+                _existing = _json_ai.loads(_ai_path.read_text(encoding="utf-8"))
+            except Exception:
+                _existing = {}
+        if not isinstance(_existing, dict):
+            _existing = {}
+        _existing[str(symbol)] = _ai_payload
+        _existing["_updated"] = _ai_payload["ts"]
+        _ai_path.write_text(_json_ai.dumps(_existing, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception as _ai_dump_e:
+        try:
+            slog.warning(f"[AI snapshot] dump failed: {_ai_dump_e}")
+        except Exception:
+            pass
+
     return {
         "_mud_cut": _mud_cut_override,  # mud regime 降仓系数
         "symbol": symbol,
@@ -2020,7 +2086,7 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                     )
         except Exception as _a_e:
             slog.error(f"[V6 A_GRADE红线异常] {_a_e}")
-    elif 55.0 <= score < 70.0:
+    elif 50.0 <= score < 70.0:
         result["v6_level"] = "B_GRADE"
         result["action_route"] = "LIVE_HALF_TRADE"
         # ===== trend direction hard gate: only downgrade for counter-HTF in BULL/BEAR regime =====
@@ -2098,7 +2164,7 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
                     result["_trend_filter_downgrade"] = True
         except Exception as _td_e:
             slog.error(f"[V6 trend hard-gate error]: {_td_e}")
-    elif 40.0 <= score < 55.0:
+    elif 40.0 <= score < 50.0:
         result["v6_level"] = "OBSERVE_GRADE"
         result["action_route"] = "RESEARCH_SILENT"
     else:

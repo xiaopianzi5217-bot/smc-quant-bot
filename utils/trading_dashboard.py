@@ -83,18 +83,29 @@ def fetch_ohlcv(symbol: str, timeframe: str = "15m", limit: int = 120) -> pd.Dat
 
 def fetch_funding(symbol: str) -> Optional[float]:
     import requests
-    try:
-        r = requests.get(
-            "https://api.bitget.com/api/v2/mix/market/current-fund-rate",
-            params={"symbol": _bitget_sym(symbol)},
-            timeout=8,
-        )
-        data = r.json()
-        if str(data.get("code")) == "00000":
-            fr = (data.get("data") or {}).get("fundingRate")
-            return float(fr) * 100.0 if fr is not None else None
-    except Exception:
-        return None
+    sym = _bitget_sym(symbol)
+    endpoints = [
+        ("https://api.bitget.com/api/v2/mix/market/current-fund-rate", {"symbol": sym, "productType": "USDT-FUTURES"}),
+        ("https://api.bitget.com/api/v2/mix/market/current-fund-rate", {"symbol": sym, "productType": "umcbl"}),
+        ("https://api.bitget.com/api/v2/mix/market/current-fund-rate", {"symbol": sym}),
+    ]
+    for url, params in endpoints:
+        try:
+            r = requests.get(url, params=params, timeout=8)
+            data = r.json()
+            if str(data.get("code")) != "00000":
+                continue
+            d = data.get("data")
+            if isinstance(d, list):
+                d = d[0] if d else {}
+            if not isinstance(d, dict):
+                continue
+            fr = d.get("fundingRate") or d.get("fundingRateStr")
+            if fr is None:
+                continue
+            return float(fr) * 100.0
+        except Exception:
+            continue
     return None
 
 
@@ -474,15 +485,89 @@ def positions_md(positions: dict, prices: Dict[str, float]) -> str:
     return "\n".join(lines)
 
 
+def load_last_scan_snapshots() -> Dict[str, Any]:
+    """读取 hf_auto_trader 写出的最近扫描快照。"""
+    for p in (Path("data/last_scan_snapshot.json"), Path("/app/data/last_scan_snapshot.json")):
+        if not p.exists():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
+def smc_proxy_from_df(df: pd.DataFrame) -> Dict[str, Any]:
+    """在无完整 SMC 引擎时，从 K 线推导轻量结构代理，避免 AI 完全无 SMC 字段。"""
+    out = {
+        "swing_high": None,
+        "swing_low": None,
+        "near_swing_high": False,
+        "near_swing_low": False,
+        "bullish_engulf_proxy": False,
+        "bearish_engulf_proxy": False,
+        "sweep_high_proxy": False,
+        "sweep_low_proxy": False,
+        "ema_stack": "UNKNOWN",
+    }
+    if df is None or len(df) < 10:
+        return out
+    d = df.tail(30)
+    last = d.iloc[-1]
+    prev = d.iloc[-2]
+    sh = float(d["high"].iloc[-6:-1].max())
+    sl = float(d["low"].iloc[-6:-1].min())
+    out["swing_high"] = sh
+    out["swing_low"] = sl
+    c = float(last["close"])
+    out["near_swing_high"] = abs(c - sh) / max(sh, 1e-9) < 0.002
+    out["near_swing_low"] = abs(c - sl) / max(sl, 1e-9) < 0.002
+    out["sweep_high_proxy"] = float(last["high"]) > sh and c < sh
+    out["sweep_low_proxy"] = float(last["low"]) < sl and c > sl
+    out["bullish_engulf_proxy"] = (
+        float(last["close"]) > float(last["open"])
+        and float(prev["close"]) < float(prev["open"])
+        and float(last["close"]) >= float(prev["open"])
+        and float(last["open"]) <= float(prev["close"])
+    )
+    out["bearish_engulf_proxy"] = (
+        float(last["close"]) < float(last["open"])
+        and float(prev["close"]) > float(prev["open"])
+        and float(last["close"]) <= float(prev["open"])
+        and float(last["open"]) >= float(prev["close"])
+    )
+    e50 = float(last.get("ema50") or 0)
+    e200 = float(last.get("ema200") or 0)
+    if e50 and e200:
+        if c > e50 > e200:
+            out["ema_stack"] = "BULL_STACK"
+        elif c < e50 < e200:
+            out["ema_stack"] = "BEAR_STACK"
+        else:
+            out["ema_stack"] = "MIXED"
+    return out
+
+
 def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict) -> dict:
-    """打包当前仪表盘快照给 DeepSeek。"""
-    snap = {"asof": datetime.now(BJ).isoformat(), "markets": {}, "positions": positions}
+    """打包完整快照：行情 + 最近系统扫描(score/EV/SMC) + 持仓。"""
+    scans = load_last_scan_snapshots()
+    snap = {
+        "asof": datetime.now(BJ).isoformat(),
+        "data_notes": [],
+        "markets": {},
+        "system_signals": {},
+        "positions": positions,
+    }
     for sym in SYMBOLS:
         df = frames.get(sym)
-        if df is None or df.empty:
+        scan = scans.get(sym) if isinstance(scans.get(sym), dict) else {}
+        if df is None or (hasattr(df, "empty") and df.empty):
+            snap["markets"][sym] = {"error": "no_ohlcv"}
             continue
         last = df.iloc[-1]
-        snap["markets"][sym] = {
+        proxy = smc_proxy_from_df(df)
+        mkt = {
             "price": prices.get(sym),
             "funding_pct": fundings.get(sym),
             "rsi": float(last.get("rsi") or 0),
@@ -490,9 +575,55 @@ def build_ai_context(frames: dict, positions: dict, prices: dict, fundings: dict
             "atr": float(last.get("atr") or 0),
             "regime": regime_from_df(df),
             "sqz": sqz_state(df),
+            "ema20": float(last.get("ema20") or 0),
             "ema50": float(last.get("ema50") or 0),
             "ema200": float(last.get("ema200") or 0),
+            "smc_proxy": proxy,
         }
+        snap["markets"][sym] = mkt
+        # 系统扫描字段（若存在）
+        if scan:
+            age = None
+            try:
+                age = float(__import__("time").time() - float(scan.get("ts") or 0))
+            except Exception:
+                age = None
+            snap["system_signals"][sym] = {
+                "age_seconds": age,
+                "direction": scan.get("direction"),
+                "setup_type": scan.get("setup_type"),
+                "score": scan.get("score"),
+                "orig_score": scan.get("orig_score"),
+                "fused_ev": scan.get("fused_ev") or scan.get("expected_value"),
+                "feedback_ev": scan.get("feedback_ev"),
+                "confidence": scan.get("confidence"),
+                "entry": scan.get("entry"),
+                "sl": scan.get("sl"),
+                "tp1": scan.get("tp1"),
+                "tp2": scan.get("tp2"),
+                "tp3": scan.get("tp3"),
+                "rr": scan.get("rr"),
+                "regime": scan.get("regime"),
+                "htf_blocked": scan.get("htf_blocked"),
+                "features": scan.get("features") or {},
+                "sqz_data": scan.get("sqz_data") or {},
+                "bullish_ob": scan.get("bullish_ob"),
+                "bearish_ob": scan.get("bearish_ob"),
+                "bullish_fvg": scan.get("bullish_fvg"),
+                "bearish_fvg": scan.get("bearish_fvg"),
+                "is_bsl_swept": scan.get("is_bsl_swept"),
+                "is_ssl_swept": scan.get("is_ssl_swept"),
+                "bsl_level": scan.get("bsl_level"),
+                "ssl_level": scan.get("ssl_level"),
+                "funding_rate_from_scan": scan.get("funding_rate"),
+            }
+            if age is not None and age > 3600:
+                snap["data_notes"].append(f"{sym} 系统扫描快照已超过1小时，仅供参考")
+        else:
+            snap["system_signals"][sym] = None
+            snap["data_notes"].append(f"{sym} 尚无系统扫描快照（需主循环跑过至少一轮）")
+        if fundings.get(sym) is None:
+            snap["data_notes"].append(f"{sym} funding 拉取失败/为空")
     return snap
 
 
@@ -500,15 +631,16 @@ def run_ai_advice(frames: dict, positions: dict, prices: dict, fundings: dict, n
     if ask_deepseek is None and analyze_signal_result is None:
         return "❌ 未加载 ai_advisor。请部署 utils/ai_advisor.py 并配置 DEEPSEEK_API_KEY。"
     ctx = build_ai_context(frames, positions, prices, fundings)
-    # 优先用 ask_deepseek 直接吃仪表盘上下文
+    extra = (note or "") + "\n请优先使用 system_signals 中的 score/fused_ev/setup/OB/FVG/Sweep；若为 null 再说明信息不足。"
     if ask_deepseek is not None:
-        out = ask_deepseek(ctx, extra_note=note or "请基于当前仪表盘快照给出手动交易建议（观望/做多/做空+关键位）")
+        out = ask_deepseek(ctx, extra_note=extra)
         if out.get("ok"):
-            return f"✅ DeepSeek ({out.get('latency_ms')}ms)\n\n{out.get('text')}"
+            notes = ctx.get("data_notes") or []
+            head = ("数据备注: " + "; ".join(notes) + "\n\n") if notes else ""
+            return f"✅ DeepSeek ({out.get('latency_ms')}ms)\n\n{head}{out.get('text')}"
         return f"❌ AI 失败: {out.get('error')}"
-    # fallback: 用第一个有仓或 BTC 构造 result
     result = {"symbol": "BTC/USDT", "features": ctx}
-    out = analyze_signal_result(result, extra_note=note)
+    out = analyze_signal_result(result, extra_note=extra)
     if out.get("ok"):
         return out.get("text") or ""
     return f"❌ {out.get('error')}"
@@ -524,7 +656,6 @@ def refresh_dashboard(timeframe: str = "15m") -> Tuple:
     try:
         frames, prices, fundings = {}, {}, {}
         cards = []
-        # 主周期
         for sym in SYMBOLS:
             try:
                 df = enrich(fetch_ohlcv(sym, timeframe=timeframe, limit=120))
@@ -539,7 +670,6 @@ def refresh_dashboard(timeframe: str = "15m") -> Tuple:
             prices[sym] = tk.get("last") or float(df["close"].iloc[-1])
             cards.append(market_card(sym, df, tk, fr))
 
-        # 多周期 15m / 1h / 4h（BTC 为主展示条）
         mtf_figs = []
         for tf in MTF:
             try:
@@ -568,14 +698,23 @@ def refresh_dashboard(timeframe: str = "15m") -> Tuple:
         html_cards = "<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;'>" + "".join(cards) + "</div>"
         pos_md = positions_md(positions, prices)
         now = datetime.now(BJ).strftime("%Y-%m-%d %H:%M:%S")
+        scans = load_last_scan_snapshots()
+        scan_n = sum(1 for s in SYMBOLS if isinstance(scans.get(s), dict))
         status = (
             f"### 系统快览\n- 刷新: **{now} CST** · 周期 **{timeframe}**\n"
             f"- 持仓 **{len(positions)}** · 近窗 **{stats['n']}** 笔 · "
             f"胜率 **{stats['winrate']:.1f}%** · PF **{stats['pf']}** · 累计 **{stats['sum_r']:+.2f}R**\n"
-            f"- 自动刷新开启后约每 60s 更新（受 HF 负载影响）\n"
+            f"- 系统扫描快照: **{scan_n}/{len(SYMBOLS)}** 品种（供 AI 使用 score/EV/SMC）\n"
+            f"- 自动刷新约 60s\n"
         )
 
-        _LAST_SNAP = {"frames": frames, "positions": positions, "prices": prices, "fundings": fundings}
+        _LAST_SNAP = {
+            "frames": frames,
+            "positions": positions,
+            "prices": prices,
+            "fundings": fundings,
+            "scans": scans,
+        }
 
         return (
             status,
