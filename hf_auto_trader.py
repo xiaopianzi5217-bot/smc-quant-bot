@@ -817,6 +817,39 @@ async def scan_and_decide(symbol: str) -> dict | None:
                     "last_idx": last_idx,
                 },
             )
+            # AI 仪表盘：仍写出「无近窗信号」快照，避免 BTC 长期 null
+            try:
+                import json as _json_ai
+                from pathlib import Path as _Path_ai
+                import time as _time_ai
+                _ai_dir = _Path_ai("data")
+                _ai_dir.mkdir(parents=True, exist_ok=True)
+                _ai_path = _ai_dir / "last_scan_snapshot.json"
+                _existing = {}
+                if _ai_path.exists():
+                    try:
+                        _existing = _json_ai.loads(_ai_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        _existing = {}
+                if not isinstance(_existing, dict):
+                    _existing = {}
+                _existing[str(symbol)] = {
+                    "ts": _time_ai.time(),
+                    "symbol": symbol,
+                    "status": "NO_RECENT_SIGNAL",
+                    "direction": None,
+                    "setup_type": None,
+                    "score": None,
+                    "fused_ev": None,
+                    "note": f"最近{LOOKBACK_CANDLES}根无新候选，全量历史={_full_count}",
+                }
+                _existing["_updated"] = _existing[str(symbol)]["ts"]
+                _ai_path.write_text(
+                    _json_ai.dumps(_existing, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             return None
         # 🔒 信号排重（只读查询，不在这里标记）
         seen_signal_ids = set()
@@ -4060,11 +4093,17 @@ async def main_loop():
                         current_price = await _fetch_ticker_price(symbol)
                         if current_price is not None:
                             check_trailing(symbol, pos, current_price)
-                        # ===== 【关键修复】持仓互斥：已有未平仓持仓时直接跳过开仓扫描 =====
-                        # 根因：原逻辑在 pos 非空时只检查了 check_trailing，但没有阻止后续的
-                        #       _breaker.can_open() → scan_and_decide() → check_and_open_v6_with_routing()
-                        #       导致已有持仓时仍持续扫描信号、重复开新单/叠加RESEARCH快照
-                        slog.info(f"[main_loop] {symbol} 已有未平仓持仓({pos.get('direction','?')})，跳过开仓扫描")
+                        # ===== 【持仓互斥 + 观察扫描】有仓仍更新系统快照，但不进入开仓路由 =====
+                        # 保留互斥：禁止重复开仓 / 叠加 RESEARCH 进交易链路
+                        # 同时保证 AI 顾问 / 仪表盘能拿到最新 system_signals
+                        slog.info(
+                            f"[main_loop] {symbol} 已有未平仓持仓({pos.get('direction', '?')})，"
+                            f"仅做观察扫描（不路由开仓）"
+                        )
+                        try:
+                            await scan_and_decide(symbol)  # 内部写 data/last_scan_snapshot.json
+                        except Exception as _obs_e:
+                            slog.error(f"[main_loop] {symbol} 观察扫描失败: {_obs_e}")
                         continue
                     if _breaker.can_open():
                         result = await scan_and_decide(symbol)
