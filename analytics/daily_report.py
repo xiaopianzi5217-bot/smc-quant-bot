@@ -277,16 +277,27 @@ def generate_daily_report(target_date: datetime = None) -> str:
             max_loss = pr
         mfe = ev.get('mfe')
         mae = ev.get('mae')
+        # 统计展示钳制：防止脏 MAE/MFE（如 -159 / +27）污染日报均值。
+        # 语义：MFE（最大有利偏移）应 >= 0，MAE（最大不利偏移）应 <= 0。
+        #       符号正常时按上限截断（如 +27 -> +5 / -159 -> -5）；
+        #       符号异常（MFE<0 或 MAE>0）属脏数据，直接丢弃、不计入均值。
+        _MFE_CAP, _MAE_CAP = 5.0, 5.0
         if mfe is not None:
             try:
-                sum_mfe += float(mfe)
-                mfe_count += 1
+                _m = float(mfe)
+                if _m >= 0.0:
+                    sum_mfe += _m if _m <= _MFE_CAP else _MFE_CAP
+                    mfe_count += 1
+                # 负向 MFE 属符号异常，丢弃不计入均值
             except Exception:
                 pass
         if mae is not None:
             try:
-                sum_mae += float(mae)
-                mae_count += 1
+                _a = float(mae)
+                if _a <= 0.0:
+                    sum_mae += _a if _a >= -_MAE_CAP else -_MAE_CAP
+                    mae_count += 1
+                # 正向 MAE 属符号异常，丢弃不计入均值
             except Exception:
                 pass
         regime = ev.get('regime') or 'UNKNOWN'
@@ -411,6 +422,11 @@ def send_report_via_telegram(target_date: datetime = None):
     try:
         from v6_data_engine import reconcile_stale_open_snapshots
         reconcile_stale_open_snapshots(max_age_sec=14400)
+        try:
+            from v6_data_engine import close_research_open_snapshots
+            close_research_open_snapshots()
+        except Exception:
+            pass
     except Exception:
         pass
     report = generate_daily_report(target_date)

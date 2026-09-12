@@ -213,17 +213,17 @@ def cleanup_dirty_trade_snapshots() -> dict:
             """
             UPDATE trade_snapshots
             SET max_adverse_r = CASE
-                    WHEN max_adverse_r < -10.0 THEN -1.0
-                    WHEN max_adverse_r > 10.0 THEN -1.0
+                    WHEN max_adverse_r < -5.0 THEN -1.0
+                    WHEN max_adverse_r > 5.0 THEN -1.0
                     ELSE max_adverse_r
                 END,
                 max_forward_r = CASE
-                    WHEN max_forward_r > 15.0 THEN 15.0
-                    WHEN max_forward_r < -5.0 THEN 0.0
+                    WHEN max_forward_r > 5.0 THEN 5.0
+                    WHEN max_forward_r < 0.0 THEN 0.0
                     ELSE max_forward_r
                 END
-            WHERE max_adverse_r < -10.0 OR max_adverse_r > 10.0
-               OR max_forward_r > 15.0 OR max_forward_r < -5.0
+            WHERE max_adverse_r < -5.0 OR max_adverse_r > 5.0
+               OR max_forward_r > 5.0 OR max_forward_r < 0.0
             """
         )
         stats["clamped"] = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
@@ -235,11 +235,32 @@ def cleanup_dirty_trade_snapshots() -> dict:
               AND (max_adverse_r IS NULL OR max_adverse_r < -5.0 OR max_adverse_r > 5.0)
             """
         )
+        # 关闭科研 OPEN
+        try:
+            _now = int(time.time())
+            cursor.execute(
+                """
+                UPDATE trade_snapshots
+                SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                    exit_timestamp = COALESCE(exit_timestamp, ?),
+                    exit_price = COALESCE(exit_price, entry_price, 0),
+                    pnl_r = COALESCE(pnl_r, 0.0)
+                WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                  AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+                """,
+                (_now,),
+            )
+            _rc = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            if _rc:
+                stats["research_closed"] = _rc
+                slog.info(f"[V6 DataEngine] 清理中关闭科研 OPEN: {_rc} 笔")
+        except Exception as _rc_e:
+            slog.warning(f"[V6 DataEngine] 科研 OPEN 清理失败: {_rc_e}")
         conn.commit()
         conn.close()
-        if stats["deleted"] or stats["clamped"]:
+        if stats["deleted"] or stats["clamped"] or stats.get("research_closed"):
             slog.info(
-                f"[V6 DataEngine] 脏数据清理完成 deleted={stats['deleted']} clamped={stats['clamped']}"
+                f"[V6 DataEngine] 脏数据清理完成 deleted={stats['deleted']} clamped={stats['clamped']} research_closed={stats.get('research_closed', 0)}"
             )
     except Exception as e:
         slog.error(f"[V6 DataEngine] cleanup_dirty_trade_snapshots 失败: {e}")
@@ -307,6 +328,44 @@ def reconcile_stale_open_snapshots(max_age_sec: int = 14400, default_pnl_r: floa
     except Exception as e:
         slog.error(f"[V6 DataEngine] reconcile_stale_open_snapshots 失败: {e}")
     return closed
+
+
+def close_research_open_snapshots() -> int:
+    """关闭所有仍为 OPEN 的 RES_/RESEARCH_ 科研虚拟单，避免占坑与日报 OPEN 虚高。"""
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return 0
+    closed = 0
+    try:
+        now = int(time.time())
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE trade_snapshots
+            SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                exit_timestamp = COALESCE(exit_timestamp, ?),
+                exit_price = COALESCE(exit_price, entry_price, 0),
+                pnl_r = COALESCE(pnl_r, 0.0)
+            WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+              AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+            """,
+            (now,),
+        )
+        closed = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        conn.commit()
+        conn.close()
+        if closed:
+            slog.info(f"[V6 DataEngine] 关闭科研 OPEN 幽灵: {closed} 笔 -> RESEARCH_SHADOW_CLOSED")
+            if IS_HF_SPACE:
+                try:
+                    request_push_database_to_hub()
+                except Exception:
+                    pass
+    except Exception as e:
+        slog.error(f"[V6 DataEngine] close_research_open_snapshots 失败: {e}")
+    return closed
+
 
 
 def pull_database_from_hub():
