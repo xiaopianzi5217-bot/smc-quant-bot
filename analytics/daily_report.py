@@ -269,10 +269,14 @@ def generate_daily_report(target_date: datetime = None) -> str:
                 ev_monitor.update(ev_val, pr)
         except Exception:
             pass
-        if pr > 0:
+        # 胜/负：严格按盈亏；pnl_r≈0 记为平局，不算败
+        if pr > 1e-9:
             wins += 1
-        else:
+        elif pr < -1e-9:
             losses += 1
+        else:
+            # scratch / 保本
+            pass
         if pr < max_loss:
             max_loss = pr
         mfe = ev.get('mfe')
@@ -335,7 +339,7 @@ def generate_daily_report(target_date: datetime = None) -> str:
         group_sums[combo] = group_sums.get(combo, 0.0) + pr
         group_counts[combo] = group_counts.get(combo, 0) + 1
 
-    win_rate = (wins / total * 100.0) if total > 0 else 0.0
+    win_rate = (wins / (wins + losses) * 100.0) if (wins + losses) > 0 else 0.0
     # 当日 PF：当日毛利 / 当日毛亏（不再用全局 OutcomeDatabase 污染）
     try:
         if total <= 0:
@@ -343,7 +347,8 @@ def generate_daily_report(target_date: datetime = None) -> str:
         elif gross_loss > 1e-12:
             pf = round(gross_win / gross_loss, 2)
         elif gross_win > 0:
-            pf = "inf"
+            # 当日无亏损单：避免显示 inf，改为可读文案
+            pf = "N/A(无亏损)"
         else:
             pf = "N/A"
     except Exception:
@@ -367,9 +372,12 @@ def generate_daily_report(target_date: datetime = None) -> str:
     report.append("======== DAILY REPORT ========")
     report.append(f"Date: {date_str}")
     report.append("")
+    scratches = max(0, total - wins - losses)
     report.append(f"交易: {total}")
     report.append(f"胜: {wins}")
     report.append(f"败: {losses}")
+    if scratches:
+        report.append(f"平: {scratches}")
     report.append(f"WinRate: {round(win_rate,1)}%")
     report.append(f"PF: {pf}")
     report.append("")
@@ -441,9 +449,10 @@ def send_report_via_telegram(target_date: datetime = None):
         features_empty_count = dq.get('features_empty') or 0
         summary = (
             f"\n\n数据质量:\n"
-            f"OPEN数量: {open_count}\n"
-            f"EXIT数量: {exit_count}\n"
-            f"缺失: {missing_count}\n"
+            f"当日开仓: {open_count}\n"
+            f"当日平仓: {exit_count}\n"
+            f"当前仍OPEN: {dq.get('still_open_count') or 0}\n"
+            f"缺失配对: {missing_count}\n"
             f"trade_id重复: {duplicate_count}\n"
             f"features为空: {features_empty_count}\n"
         )

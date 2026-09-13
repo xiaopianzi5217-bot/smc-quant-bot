@@ -102,29 +102,63 @@ def run_data_quality_check(target_date: datetime = None) -> dict:
     db_path = next((p for p in db_candidates if p.exists()), None)
     db_open = 0
     db_exit = 0
+    db_still_open = 0
     if db_path is not None:
         try:
             conn = sqlite3.connect(str(db_path))
             cur = conn.cursor()
+            # 当日「开仓」：按 timestamp 落在当天，排除科研虚拟单
             cur.execute(
                 """
                 SELECT COUNT(*) FROM trade_snapshots
                 WHERE timestamp >= ? AND timestamp < ?
+                  AND (signal_id IS NULL OR (
+                        signal_id NOT LIKE 'RES_%'
+                    AND signal_id NOT LIKE 'RESEARCH_%'
+                  ))
+                  AND COALESCE(exit_reason, '') NOT IN (
+                        'RESEARCH_SHADOW_CLOSED', 'MANUAL_CLEANUP_DEPRECATED'
+                  )
                 """,
                 (start_ts, end_ts),
             )
             db_open = int(cur.fetchone()[0] or 0)
+            # 当日「平仓」：真实出场（排除科研关闭/超时占位）
             cur.execute(
                 """
                 SELECT COUNT(*) FROM trade_snapshots
-                WHERE exit_reason IS NOT NULL AND exit_reason != '' AND exit_reason != 'OPEN'
+                WHERE exit_reason IS NOT NULL AND exit_reason != ''
+                  AND exit_reason NOT IN (
+                        'OPEN',
+                        'RESEARCH_SHADOW_CLOSED',
+                        'MANUAL_CLEANUP_DEPRECATED',
+                        'STALE_OPEN_TIMEOUT',
+                        'FORCE_CLOSE_UNKNOWN',
+                        'OPEN_STALE'
+                  )
                   AND pnl_r IS NOT NULL
                   AND exit_timestamp IS NOT NULL AND exit_timestamp > 0
                   AND exit_timestamp >= ? AND exit_timestamp < ?
+                  AND (signal_id IS NULL OR (
+                        signal_id NOT LIKE 'RES_%'
+                    AND signal_id NOT LIKE 'RESEARCH_%'
+                  ))
                 """,
                 (start_ts, end_ts),
             )
             db_exit = int(cur.fetchone()[0] or 0)
+            # 当前仍挂 OPEN 的真实单（全库，非仅当日）
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM trade_snapshots
+                WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                  AND (signal_id IS NULL OR (
+                        signal_id NOT LIKE 'RES_%'
+                    AND signal_id NOT LIKE 'RESEARCH_%'
+                  ))
+                """
+            )
+            db_still_open = int(cur.fetchone()[0] or 0)
             conn.close()
         except Exception:
             pass
@@ -142,6 +176,7 @@ def run_data_quality_check(target_date: datetime = None) -> dict:
     return {
         "open_count": open_count,
         "exit_count": exit_count,
+        "still_open_count": db_still_open,
         "missing_open_without_exit": len(missing_open),
         "duplicate_trade_ids": duplicate_trade_ids,
         "features_empty": features_empty,
