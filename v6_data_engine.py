@@ -226,6 +226,17 @@ def cleanup_dirty_trade_snapshots() -> dict:
                OR max_forward_r > 5.0 OR max_forward_r < 0.0
             """
         )
+        cursor.execute(
+            """
+            UPDATE trade_snapshots
+            SET pnl_r = CASE
+                    WHEN pnl_r > 10.0 THEN 10.0
+                    WHEN pnl_r < -10.0 THEN -10.0
+                    ELSE pnl_r
+                END
+            WHERE pnl_r IS NOT NULL AND (pnl_r > 10.0 OR pnl_r < -10.0)
+            """
+        )
         stats["clamped"] = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
         cursor.execute(
             """
@@ -642,6 +653,15 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: int = None, exit_price: float = None):
+    # 入库前钳制异常 R（保本后分母错误等）
+    try:
+        pnl_r = float(pnl_r)
+        if abs(pnl_r) > 10.0:
+            slog.warning(f"[V6 DataEngine] pnl_r 异常钳制 {pnl_r:.2f} -> ±10 signal_id={signal_id}")
+            pnl_r = max(-10.0, min(10.0, pnl_r))
+    except Exception:
+        pnl_r = 0.0
+
     """横向拼接真实结局标签（冻结 MAE/MFE，禁止后续再改）"""
     if not signal_id:
         return

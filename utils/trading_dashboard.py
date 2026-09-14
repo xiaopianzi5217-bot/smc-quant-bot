@@ -260,9 +260,12 @@ def load_positions() -> Dict[str, dict]:
     return {}
 
 
-def load_closed_trades(limit: int = 20) -> pd.DataFrame:
+def load_closed_trades(limit: int = 30) -> pd.DataFrame:
+    """加载已平仓样本；多取一些再在 trade_stats 里过滤脏 R / 科研单。"""
     cols = ["signal_id", "symbol", "direction", "regime", "entry_price", "exit_price",
             "pnl_r", "exit_reason", "model_ev", "confidence", "exit_timestamp"]
+    # 多取 3 倍，过滤后仍能凑近 limit
+    fetch_n = max(int(limit) * 3, 60)
     for db in (Path("data/v6_research.db"), Path("/app/data/v6_research.db"), Path("v6_research.db")):
         if not db.exists():
             continue
@@ -273,28 +276,66 @@ def load_closed_trades(limit: int = 20) -> pd.DataFrame:
                            pnl_r, exit_reason, model_ev, confidence, exit_timestamp
                     FROM trade_snapshots
                     WHERE pnl_r IS NOT NULL AND exit_reason IS NOT NULL
-                      AND exit_reason NOT IN ('OPEN','')
-                    ORDER BY COALESCE(exit_timestamp, timestamp) DESC LIMIT {int(limit)}""",
+                      AND exit_reason NOT IN (
+                            'OPEN', '',
+                            'RESEARCH_SHADOW_CLOSED',
+                            'MANUAL_CLEANUP_DEPRECATED',
+                            'STALE_OPEN_TIMEOUT',
+                            'FORCE_CLOSE_UNKNOWN',
+                            'OPEN_STALE'
+                      )
+                      AND signal_id NOT LIKE 'RES_%'
+                      AND signal_id NOT LIKE 'RESEARCH_%'
+                    ORDER BY COALESCE(exit_timestamp, timestamp) DESC
+                    LIMIT {fetch_n}""",
                 conn,
             )
             conn.close()
-            return df
+            if df is not None and not df.empty:
+                # 丢掉 |pnl_r|>10 的脏样本（保本后 1R 分母错误等）
+                pr = pd.to_numeric(df["pnl_r"], errors="coerce")
+                df = df.loc[pr.notna() & (pr.abs() <= 10.0)].head(int(limit)).reset_index(drop=True)
+            return df if df is not None else pd.DataFrame(columns=cols)
         except Exception:
             continue
     return pd.DataFrame(columns=cols)
 
 
 def trade_stats(df: pd.DataFrame) -> Dict[str, Any]:
+    """近窗绩效；排除科研单与 |R|>10，平局不计入胜率分母。"""
+    empty = {"n": 0, "winrate": 0.0, "pf": "—", "avg_r": 0.0, "sum_r": 0.0, "dropped": 0}
     if df is None or df.empty or "pnl_r" not in df.columns:
-        return {"n": 0, "winrate": 0, "pf": 0, "avg_r": 0, "sum_r": 0}
-    s = pd.to_numeric(df["pnl_r"], errors="coerce").dropna()
+        return empty
+    work = df.copy()
+    if "signal_id" in work.columns:
+        sid = work["signal_id"].astype(str)
+        work = work.loc[~sid.str.startswith(("RES_", "RESEARCH_"))]
+    s = pd.to_numeric(work["pnl_r"], errors="coerce")
+    dropped = int(((s.abs() > 10.0) | s.isna()).sum()) if len(s) else 0
+    s = s.dropna()
+    s = s[s.abs() <= 10.0]
     if s.empty:
-        return {"n": 0, "winrate": 0, "pf": 0, "avg_r": 0, "sum_r": 0}
-    wins, losses = s[s > 0], s[s <= 0]
-    gp, gl = float(wins.sum()) if len(wins) else 0.0, float((-losses).sum()) if len(losses) else 0.0
-    pf = (gp / gl) if gl > 1e-9 else (99.0 if gp > 0 else 0.0)
-    return {"n": int(len(s)), "winrate": float((s > 0).mean() * 100), "pf": round(pf, 2),
-            "avg_r": round(float(s.mean()), 3), "sum_r": round(float(s.sum()), 3)}
+        return {**empty, "dropped": dropped}
+    wins = s[s > 1e-9]
+    losses = s[s < -1e-9]
+    gp = float(wins.sum()) if len(wins) else 0.0
+    gl = float((-losses).sum()) if len(losses) else 0.0
+    decided = len(wins) + len(losses)
+    if gl > 1e-9:
+        pf: Any = round(gp / gl, 2)
+    elif gp > 0:
+        pf = "N/A(无亏损)"
+    else:
+        pf = "—"
+    winrate = float(len(wins) / decided * 100) if decided else 0.0
+    return {
+        "n": int(len(s)),
+        "winrate": round(winrate, 1),
+        "pf": pf,
+        "avg_r": round(float(s.mean()), 3),
+        "sum_r": round(float(s.sum()), 3),
+        "dropped": dropped,
+    }
 
 
 def _fmt(v, nd=2, suffix=""):
@@ -1130,7 +1171,7 @@ def refresh_dashboard(timeframe: str = "15m") -> Tuple:
         status = (
             f"### 系统快览\n- 刷新: **{now} CST** · 周期 **{timeframe}**\n"
             f"- 持仓 **{len(positions)}** · 近窗 **{stats['n']}** 笔 · "
-            f"胜率 **{stats['winrate']:.1f}%** · PF **{stats['pf']}** · 累计 **{stats['sum_r']:+.2f}R**\n"
+            f"胜率 **{stats['winrate']:.1f}%** · PF **{stats['pf']}** · 累计 **{stats['sum_r']:+.2f}R**（已排除|R|>10与科研单）\n"
             f"- 系统扫描快照: **{scan_n}/{len(SYMBOLS)}** 品种（供 AI 使用 score/EV/SMC）\n"
             f"- 自动刷新约 60s\n\n"
             f"{tech_md}"

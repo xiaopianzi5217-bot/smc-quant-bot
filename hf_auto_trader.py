@@ -3705,12 +3705,36 @@ def check_and_open(result: dict | None) -> bool:
 # ============================================================
 # 追踪止损与仓位管理
 # ============================================================
+
+def _position_risk_r(pos: dict, entry: float = None, sl: float = None) -> float:
+    """计算 1R 分母：必须优先 initial_risk，禁止用移动后的 current_sl（保本后会趋近 0 → 爆炸 R）。"""
+    try:
+        entry = float(entry if entry is not None else pos.get("entry") or pos.get("entry_price") or 0.0)
+    except Exception:
+        entry = 0.0
+    try:
+        init = float(pos.get("initial_risk") or 0.0)
+    except Exception:
+        init = 0.0
+    try:
+        cur_sl = float(sl if sl is not None else (pos.get("current_sl") or pos.get("sl") or pos.get("initial_sl") or 0.0))
+    except Exception:
+        cur_sl = 0.0
+    dist = abs(entry - cur_sl) if entry and cur_sl else 0.0
+    risk = init if init > 1e-12 else dist
+    # 硬地板：至少为入场价的 0.05%，防止分母过小
+    floor = abs(entry) * 0.0005 if entry else 0.0
+    if risk < floor:
+        risk = max(init, dist, floor, 1e-8)
+    return float(risk)
+
 def check_trailing(symbol: str, pos: dict, current_price: float):
     direction = pos["direction"]
     entry = pos["entry"]
     sl = pos["current_sl"]
-    
-    risk = abs(entry - sl)
+
+    # 【修复】1R 必须用 initial_risk，移动止损到保本后 abs(entry-sl)≈0 会把 profit_r 炸到几十 R
+    risk = _position_risk_r(pos, entry, sl)
     profit_r = 0.0
     if risk > 0:
         if direction == "Long":
@@ -3731,7 +3755,7 @@ def check_trailing(symbol: str, pos: dict, current_price: float):
             # 已平仓禁止继续更新（防止 MAE 溢出）
             if pos.get("sl_hit") or pos.get("closed") or pos.get("exit_reason") not in (None, "", "OPEN"):
                 return
-            _risk_m = float(pos.get("initial_risk") or abs(entry - float(pos.get("current_sl") or pos.get("sl") or 0)) or 0.0)
+            _risk_m = _position_risk_r(pos, entry, pos.get("current_sl") or pos.get("sl"))
             if str(pos.get("direction", "")).lower().startswith("long"):
                 _fav = current_price - entry
                 _adv = entry - current_price
@@ -3973,14 +3997,23 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         slog.error(f"[{symbol}] 释放信号去重标记失败: {_um_e}")
 
     pnl_r = 0.0
-    risk = abs(entry - sl) if sl and entry else 0.0
-    if risk <= 0:
-        risk = float(pos.get("initial_risk") or 0.0)
+    # 【修复】平仓 R 一律用 initial_risk（禁止 current_sl 保本后分母趋零）
+    risk = _position_risk_r(pos, entry, sl)
     if risk > 0:
         if direction == "Long":
             pnl_r = (current_price - entry) / risk
         else:
             pnl_r = (entry - current_price) / risk
+    # 硬钳制：单笔 |pnl_r| > 10 视为数据异常（通常 1R 分母错误）
+    if abs(pnl_r) > 10.0:
+        try:
+            slog.error(
+                f"[{symbol}] 异常 pnl_r={pnl_r:.2f} 已钳制 risk={risk:.6f} "
+                f"entry={entry} sl={sl} initial_risk={pos.get('initial_risk')} price={current_price}"
+            )
+        except Exception:
+            pass
+        pnl_r = max(-10.0, min(10.0, pnl_r))
 
     max_fwd = float(pos.get("audit_forward") or 0.0)
     max_adv = float(pos.get("audit_adverse") or 0.0)

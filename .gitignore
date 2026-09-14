@@ -33,7 +33,12 @@ models/*.joblib
 models/ev_calibration.json
 models/feature_importance.json
 
-# Temp debug scripts (not for production)
+"# Runtime sentinels & temp debug scripts (not for production)
+data/.db_initialized
+script/
+reports/*.txt
+
+# Temp debug scripts (not for production)"
 check_hf_db.py
 check_hf_db_full.py
 check_res_db.py
