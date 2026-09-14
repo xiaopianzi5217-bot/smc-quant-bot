@@ -135,6 +135,10 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
     events = []
     for row in rows:
         try:
+            _sid = str(row["signal_id"] or "")
+            if _sid.startswith(("RES_", "RESEARCH_")):
+                continue
+
             feats = {}
             _fh = str(row["feature_hash"] or "")
             if _fh:
@@ -149,7 +153,7 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
                 "timestamp": int(row["exit_timestamp"]),
                 "trade_id": row["signal_id"],
                 "symbol": row["symbol"],
-                "profit_r": float(row["pnl_r"] or 0.0),
+                "profit_r": float(row["pnl_r"] or 0.0),  # 主聚合仍会过滤 |R|>10
                 "mfe": row["max_forward_r"],
                 "mae": row["max_adverse_r"],
                 "regime": row["regime"] or "UNKNOWN",
@@ -256,11 +260,22 @@ def generate_daily_report(target_date: datetime = None) -> str:
     ev_monitor = EVMonitor()
 
     for ev in all_events:
-        total += 1
+        tid = str(ev.get('trade_id') or ev.get('signal_id') or '')
+        if tid.startswith(('RES_', 'RESEARCH_')):
+            continue
         pr = float(ev.get('profit_r') if ev.get('profit_r') is not None else (ev.get('pnl_r') or 0.0))
-        if pr > 0:
+        # 脏 R 过滤：|R|>10 不计入主指标（仍可在 note 中暴露）
+        if abs(pr) > 10.0:
+            try:
+                from utils.structured_logger import slog
+                slog.warning(f"[DailyReport] 丢弃异常 profit_r={pr:.2f} tid={tid}")
+            except Exception:
+                pass
+            continue
+        total += 1
+        if pr > 1e-9:
             gross_win += pr
-        elif pr < 0:
+        elif pr < -1e-9:
             gross_loss += abs(pr)
         # feed EV monitor
         try:
@@ -269,14 +284,10 @@ def generate_daily_report(target_date: datetime = None) -> str:
                 ev_monitor.update(ev_val, pr)
         except Exception:
             pass
-        # 胜/负：严格按盈亏；pnl_r≈0 记为平局，不算败
         if pr > 1e-9:
             wins += 1
         elif pr < -1e-9:
             losses += 1
-        else:
-            # scratch / 保本
-            pass
         if pr < max_loss:
             max_loss = pr
         mfe = ev.get('mfe')
@@ -316,25 +327,22 @@ def generate_daily_report(target_date: datetime = None) -> str:
         # 选取一个代表性特征：优先取 `feature_hash`/`cloud_hash` 键的实际值（哈希），
         # 其次找布尔/标志类 key 名（值 True/非空字符串），最后取第一个 key。
         # 修复: 之前取的是固定 key 名 (如 cloud_hash) 导致所有云端记录归为一类。
+        # 只用 feature_hash 做组合归因，避免同一笔既按 hash 又按 OB 各计一次
         top_feat = 'NONE'
         if isinstance(features, dict) and features:
-            found = None
-            # 1) 优先从 feature_hash / cloud_hash 键中提取实际哈希值
             for hash_key in ("feature_hash", "cloud_hash"):
                 hv = features.get(hash_key)
                 if hv and isinstance(hv, str) and hv:
-                    found = hv
+                    top_feat = hv[-10:] if len(str(hv)) > 10 else str(hv)
                     break
-            # 2) 再尝试找到值为 True 的布尔标志 key
-            if not found:
+            if top_feat == 'NONE':
+                # 无 hash 时用稳定的单一标签，不把每个 True 旗标拆成多行
                 for kk, vv in features.items():
-                    if vv is True or (isinstance(vv, str) and vv and kk not in ("feature_hash", "cloud_hash")):
-                        found = kk
+                    if vv is True:
+                        top_feat = str(kk)
                         break
-            # 3) 最后选择第一个 key
-            if not found:
-                found = next(iter(features.keys()))
-            top_feat = found
+                if top_feat == 'NONE' and features:
+                    top_feat = str(next(iter(features.keys())))
         combo = (sym, rg, top_feat)
         group_sums[combo] = group_sums.get(combo, 0.0) + pr
         group_counts[combo] = group_counts.get(combo, 0) + 1
@@ -347,7 +355,6 @@ def generate_daily_report(target_date: datetime = None) -> str:
         elif gross_loss > 1e-12:
             pf = round(gross_win / gross_loss, 2)
         elif gross_win > 0:
-            # 当日无亏损单：避免显示 inf，改为可读文案
             pf = "N/A(无亏损)"
         else:
             pf = "N/A"
@@ -372,20 +379,17 @@ def generate_daily_report(target_date: datetime = None) -> str:
     report.append("======== DAILY REPORT ========")
     report.append(f"Date: {date_str}")
     report.append("")
-    scratches = max(0, total - wins - losses)
     report.append(f"交易: {total}")
     report.append(f"胜: {wins}")
     report.append(f"败: {losses}")
-    if scratches:
-        report.append(f"平: {scratches}")
     report.append(f"WinRate: {round(win_rate,1)}%")
     report.append(f"PF: {pf}")
     report.append("")
     report.append(f"最佳 Regime: {best_regime}")
     report.append(f"最佳 Feature: {best_feature}")
     report.append(f"最大亏损: {round(max_loss,4)}R")
-    report.append(f"平均MFE: {round(sum_mfe / mfe_count,4) if mfe_count else 'N/A'}R")
-    report.append(f"平均MAE: {round(sum_mae / mae_count,4) if mae_count else 'N/A'}R")
+    report.append(f"平均MFE: {round(sum_mfe / mfe_count,4)}R" if mfe_count else "平均MFE: N/A")
+    report.append(f"平均MAE: {round(sum_mae / mae_count,4)}R" if mae_count else "平均MAE: N/A")
     report.append("==============================")
     report.append("")
     report.append("Top 赚钱组合（symbol, regime, feature）:")
@@ -405,11 +409,14 @@ def generate_daily_report(target_date: datetime = None) -> str:
     report.append("EV -> 性能摘要:")
     try:
         ev_stats = ev_monitor.report()
-        for evb in sorted(ev_stats.keys(), reverse=True):
-            s = ev_stats[evb]
-            report.append(
-                f"EV={evb}: samples={s['samples']} winrate={s['win_rate']}% avg_R={s['avg_R']} avg_EV={s['avg_EV']} EV_error={s['EV_error']}"
-            )
+        if not ev_stats:
+            report.append("N/A")
+        else:
+            for evb in sorted(ev_stats.keys(), reverse=True):
+                s = ev_stats[evb]
+                report.append(
+                    f"EV={evb}: samples={s['samples']} winrate={s['win_rate']}% avg_R={s['avg_R']} avg_EV={s['avg_EV']} EV_error={s['EV_error']}"
+                )
     except Exception:
         report.append("EV stats unavailable")
 
@@ -449,10 +456,9 @@ def send_report_via_telegram(target_date: datetime = None):
         features_empty_count = dq.get('features_empty') or 0
         summary = (
             f"\n\n数据质量:\n"
-            f"当日开仓: {open_count}\n"
-            f"当日平仓: {exit_count}\n"
-            f"当前仍OPEN: {dq.get('still_open_count') or 0}\n"
-            f"缺失配对: {missing_count}\n"
+            f"OPEN数量: {open_count}\n"
+            f"EXIT数量: {exit_count}\n"
+            f"缺失: {missing_count}\n"
             f"trade_id重复: {duplicate_count}\n"
             f"features为空: {features_empty_count}\n"
         )
