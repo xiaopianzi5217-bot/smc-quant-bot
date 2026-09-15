@@ -728,11 +728,18 @@ class DynamicFeatureOptimizer:
             return self.feature_weights
         try:
             conn = sqlite3.connect(str(_get_db_path()))
+            # 训练安全过滤：排除影子 0R、超时占位、爆炸 R
             query = """
                 SELECT raw_features_json, pnl_r FROM trade_snapshots
                 WHERE pnl_r IS NOT NULL
                   AND exit_reason IS NOT NULL
-                  AND exit_reason NOT IN ('OPEN', 'MANUAL_CLEANUP_DEPRECATED', 'STALE_OPEN_TIMEOUT', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE')
+                  AND exit_reason NOT IN (
+                        'OPEN', 'MANUAL_CLEANUP_DEPRECATED',
+                        'STALE_OPEN_TIMEOUT', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE',
+                        'RESEARCH_SHADOW_CLOSED', ''
+                  )
+                  AND abs(pnl_r) <= 10.0
+                  AND abs(pnl_r) > 1e-9
                 ORDER BY timestamp DESC LIMIT ?
             """
             df = pd.read_sql_query(query, conn, params=(self.window_size,))
