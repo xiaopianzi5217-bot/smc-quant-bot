@@ -53,12 +53,21 @@ def resolve_model_dir(preferred: Optional[str] = None) -> str:
     return str(get_model_dir(True))
 
 
+def _clean_secret(val):
+    """去掉 Secret 尾部换行/空白，避免 Illegal header value Bearer ...\\n"""
+    if val is None:
+        return None
+    s = str(val).strip().strip('"').strip("'").strip()
+    s = "".join(ch for ch in s if ch not in "\r\n\t")
+    return s or None
+
+
 def _hf_config():
     repo_id = os.environ.get("HF_DATASET_REPO") or os.environ.get(
         "V6_SNAPSHOT_DATASET", "Aisvbo/svb-bot-v6-snapshots"
     )
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    return repo_id, token
+    return _clean_secret(repo_id), _clean_secret(token)
 
 
 def pull_models_from_hf_dataset(
