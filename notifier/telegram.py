@@ -107,10 +107,11 @@ def send_telegram(message: str) -> str:
                 data={"token": wechat_token, "title": "SMC量化通知", "content": str(content), "template": "html"},
                 timeout=(5, 10),
             )
-            _last_wechat_time = time.time()
             if resp.status_code != 200:
                 slog.warning(f"[DEBUG] 微信推送失败: HTTP {resp.status_code}｜{resp.text[:300]}")
             else:
+                # 仅成功后更新冷却时间戳；失败不更新，避免被限流卡死
+                _last_wechat_time = time.time()
                 slog.info("[DEBUG] 微信推送成功")
             print("[DEBUG] 微信推送:", resp.text)
         except Exception as e:
@@ -122,13 +123,38 @@ def send_telegram(message: str) -> str:
     if wechat_token:
         global _wechat_pending
         # 冷却中：排队，不丢弃（尤其是开仓/平仓）
-        if _wechat_lock or (now - _last_wechat_time) < _WECHAT_MIN_INTERVAL_SECONDS:
+        # 安全解析 last_ts：脏值/从未成功推送过 => 不限流
+        try:
+            last_ts = float(_last_wechat_time or 0.0)
+        except (TypeError, ValueError):
+            last_ts = 0.0
+
+        cooling = False
+        if _wechat_lock:
+            cooling = True
+        elif last_ts > 0:
+            gap = now - last_ts
+            if gap < 0:
+                # 脏时间戳（时钟回拨/异常），重置，视为不限流
+                _last_wechat_time = 0.0
+                last_ts = 0.0
+                cooling = False
+            elif gap < _WECHAT_MIN_INTERVAL_SECONDS:
+                cooling = True
+
+        if cooling:
             if len(_wechat_pending) < _WECHAT_QUEUE_MAX:
                 _wechat_pending.append(str(message))
-                slog.info(
-                    f"[微信] 距上次仅 {(now - _last_wechat_time):.1f}s，消息已入队 "
-                    f"(queue={len(_wechat_pending)})，稍后补发"
-                )
+                if last_ts > 0:
+                    slog.info(
+                        f"[微信] 距上次仅 {(now - last_ts):.1f}s，消息已入队 "
+                        f"(queue={len(_wechat_pending)})，稍后补发"
+                    )
+                else:
+                    slog.info(
+                        f"[微信] 发送锁占用，消息已入队 "
+                        f"(queue={len(_wechat_pending)})，稍后补发"
+                    )
             else:
                 slog.warning("[微信] 队列已满，丢弃最旧一条后入队")
                 _wechat_pending = _wechat_pending[1:] + [str(message)]
