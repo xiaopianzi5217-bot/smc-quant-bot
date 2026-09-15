@@ -409,6 +409,13 @@ def pull_database_from_hub():
             shutil.copy(downloaded, str(db_path))
             slog.info("[V6 DataEngine] 历史交易快照库同步恢复成功！")
         _DB_INIT_SENTINEL.write_text("pulled_ok", encoding="utf-8")
+        try:
+            from utils.ml_model_store import pull_models_from_hf_dataset
+            n_m = pull_models_from_hf_dataset()
+            if n_m:
+                slog.info(f"[V6 DataEngine] 启动时同步 ML 模型 {n_m} 个文件")
+        except Exception as _me:
+            slog.debug(f"[V6 DataEngine] ML 模型拉取跳过: {_me}")
     except Exception as e:
         err_str = str(e)
         if "404" in err_str or "Entry Not Found" in err_str:
@@ -438,6 +445,13 @@ def push_database_to_hub():
             commit_message=f"🔄 Aisvbo 数据流实时增量备份 - {int(time.time())}"
         )
         slog.info("[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
+        try:
+            from utils.ml_model_store import push_models_to_hf_dataset
+            n_m = push_models_to_hf_dataset()
+            if n_m:
+                slog.info(f"[V6 DataEngine] 同步备份 ML 模型 {n_m} 个文件")
+        except Exception as _me:
+            slog.debug(f"[V6 DataEngine] ML 模型随库备份跳过: {_me}")
     except Exception as e:
         slog.error(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 

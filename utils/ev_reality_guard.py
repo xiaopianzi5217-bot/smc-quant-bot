@@ -31,9 +31,13 @@ class EVRealityGuard:
     def __init__(self, model_dir: str = "models"):
         """
         Args:
-            model_dir: 模型目录
+            model_dir: 模型目录；默认 "models" 会解析到 /app/data/ml_models 或 data/ml_models
         """
-        self.model_dir = model_dir
+        try:
+            from utils.ml_model_store import resolve_model_dir
+            self.model_dir = resolve_model_dir(model_dir)
+        except Exception:
+            self.model_dir = model_dir or "models"
         self.profit_model = None
         self.ev_model = None
         self.feature_cols = None
@@ -46,12 +50,22 @@ class EVRealityGuard:
         self.signal_gate = True           # 是否启用信号门控
     
     def _load_models(self):
-        """加载训练好的模型，如果模型文件不存在则自动训练"""
+        """加载训练好的模型；本地缺失时先从 HF Dataset 拉取，再尝试自动训练。"""
         model_dir = self.model_dir
         profit_path = os.path.join(model_dir, "ev_profit_model.pkl")
         ev_path = os.path.join(model_dir, "ev_value_model.pkl")
         meta_path = os.path.join(model_dir, "ev_model_metadata.json")
-        
+
+        # 本地缺失时尝试从云端 Dataset 恢复
+        if not (os.path.exists(profit_path) and os.path.exists(ev_path) and os.path.exists(meta_path)):
+            try:
+                from utils.ml_model_store import pull_models_from_hf_dataset
+                n = pull_models_from_hf_dataset(model_dir=model_dir)
+                if n:
+                    slog.info(f"[EVRealityGuard] 已从云端恢复 {n} 个模型文件 -> {model_dir}")
+            except Exception as _pull_e:
+                slog.debug(f"[EVRealityGuard] 云端拉模型跳过: {_pull_e}")
+
         # 模型文件都存在 - 直接加载
         if os.path.exists(profit_path) and os.path.exists(ev_path) and os.path.exists(meta_path):
             try:
@@ -246,14 +260,21 @@ class EVRealityGuard:
                 "model_type": "lightgbm_auto_trained",
             }
             
-            # 保存模型文件（供下次直接加载）
+            # 保存模型文件到持久目录，并同步 HF Dataset
             os.makedirs(model_dir, exist_ok=True)
             joblib.dump(self.profit_model, profit_path)
             joblib.dump(self.ev_model, ev_path)
             with open(meta_path, "w") as f:
                 json.dump(self.metadata, f, indent=2)
-            
-            slog.info(f"[EVRealityGuard] 模型自动训练完成: {len(df)} 样本")
+            slog.info(f"[EVRealityGuard] 模型自动训练完成: {len(df)} 样本 -> {model_dir}")
+            try:
+                from utils.ml_model_store import push_models_to_hf_dataset
+                push_models_to_hf_dataset(
+                    names=["ev_profit_model.pkl", "ev_value_model.pkl", "ev_model_metadata.json"],
+                    model_dir=model_dir,
+                )
+            except Exception as _push_e:
+                slog.warning(f"[EVRealityGuard] 模型云端备份失败: {_push_e}")
             
         except Exception as e:
             slog.error(f"[EVRealityGuard] 自动训练失败: {e}")

@@ -183,7 +183,7 @@ _V56_ENGINE = V56_5_Engine(V565Config(
     strong_tier2_score=50.0,       # Tier2 分数 >= 50 即可放行
 ))
 # ---------- EVRealityGuard / ML EV Guard ----------
-_EV_REALITY_GUARD = EVRealityGuard(model_dir="models")
+_EV_REALITY_GUARD = EVRealityGuard(model_dir=os.environ.get("V6_ML_MODEL_DIR", "models"))
 
 # ---------- V60.5 Decision Fusion Layer 单例 ----------
 _DECISION_FUSION = get_decision_fusion()
