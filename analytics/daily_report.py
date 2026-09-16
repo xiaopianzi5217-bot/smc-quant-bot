@@ -252,7 +252,9 @@ def generate_daily_report(target_date: datetime = None) -> str:
     mfe_count = 0
     mae_count = 0
     regimes = {}
-    feature_counts = {}
+    feature_counts = {}  # 出现次数（仅诊断，不作为「最佳」依据）
+    feature_pnl_sums = {}  # 当日按代表性 feature 累计 pnl_r
+    regime_pnl_sums = {}   # 当日按 regime 累计 pnl_r
     group_sums = {}
     group_counts = {}
     gross_win = 0.0
@@ -346,6 +348,9 @@ def generate_daily_report(target_date: datetime = None) -> str:
         combo = (sym, rg, top_feat)
         group_sums[combo] = group_sums.get(combo, 0.0) + pr
         group_counts[combo] = group_counts.get(combo, 0) + 1
+        # 与组合榜同一批样本：按当日累计 pnl_r 评选最佳 Feature / Regime
+        feature_pnl_sums[top_feat] = feature_pnl_sums.get(top_feat, 0.0) + pr
+        regime_pnl_sums[regime] = regime_pnl_sums.get(regime, 0.0) + pr
 
     win_rate = (wins / (wins + losses) * 100.0) if (wins + losses) > 0 else 0.0
     # 当日 PF：当日毛利 / 当日毛亏（不再用全局 OutcomeDatabase 污染）
@@ -361,8 +366,16 @@ def generate_daily_report(target_date: datetime = None) -> str:
     except Exception:
         pf = "N/A"
 
-    best_regime = max(regimes.items(), key=lambda x: x[1])[0] if regimes else 'N/A'
-    best_feature = max(feature_counts.items(), key=lambda x: x[1])[0] if feature_counts else 'N/A'
+    # 【修复】最佳 Regime/Feature 按「当日累计 pnl_r」评选，与赚钱/亏损组合同一批样本；
+    # 不再用出现次数（feature_counts），避免「出现最多但亏损」的 hash 被标成最佳。
+    def _argmax_pnl(d):
+        if not d:
+            return 'N/A', 0.0
+        k, v = max(d.items(), key=lambda x: x[1])
+        return k, float(v)
+
+    best_regime, best_regime_r = _argmax_pnl(regime_pnl_sums)
+    best_feature, best_feature_r = _argmax_pnl(feature_pnl_sums)
     # 生成质量排名：赚钱榜只取 total_R>0，亏损榜只取 total_R<0（禁止正收益混入亏损榜）
     top_combos = []
     worst_combos = []
@@ -385,8 +398,14 @@ def generate_daily_report(target_date: datetime = None) -> str:
     report.append(f"WinRate: {round(win_rate,1)}%")
     report.append(f"PF: {pf}")
     report.append("")
-    report.append(f"最佳 Regime: {best_regime}")
-    report.append(f"最佳 Feature: {best_feature}")
+    if best_regime != 'N/A':
+        report.append(f"最佳 Regime: {best_regime} (total_R={round(best_regime_r, 4)})")
+    else:
+        report.append(f"最佳 Regime: N/A")
+    if best_feature != 'N/A':
+        report.append(f"最佳 Feature: feature_hash={best_feature} (total_R={round(best_feature_r, 4)})")
+    else:
+        report.append(f"最佳 Feature: N/A")
     report.append(f"最大亏损: {round(max_loss,4)}R")
     report.append(f"平均MFE: {round(sum_mfe / mfe_count,4)}R" if mfe_count else "平均MFE: N/A")
     report.append(f"平均MAE: {round(sum_mae / mae_count,4)}R" if mae_count else "平均MAE: N/A")
