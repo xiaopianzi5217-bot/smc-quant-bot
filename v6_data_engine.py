@@ -26,7 +26,9 @@ _DB_INIT_SENTINEL = _ROOT / "data" / ".db_initialized"
 
 # ── 🟢 节流推送（避免每次开平仓直接 push） ──
 _last_push_ts = 0.0
+_last_model_push_ts = 0.0
 _PUSH_MIN_INTERVAL = 120.0   # 最少 2 分钟推一次
+_MODEL_PUSH_MIN_INTERVAL = 600.0  # 模型最少 10 分钟推一次
 _pending_push = False
 _push_lock = threading.Lock()
 
@@ -452,11 +454,21 @@ def push_database_to_hub():
             commit_message=f"🔄 Aisvbo 数据流实时增量备份 - {int(time.time())}"
         )
         slog.info("[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
+        # 模型文件单独长间隔推送，避免每次 db 备份都 empty commit 刷屏
         try:
-            from utils.ml_model_store import push_models_to_hf_dataset
-            n_m = push_models_to_hf_dataset()
-            if n_m:
-                slog.info(f"[V6 DataEngine] 同步备份 ML 模型 {n_m} 个文件")
+            global _last_model_push_ts
+        except Exception:
+            pass
+        try:
+            if "_last_model_push_ts" not in globals():
+                globals()["_last_model_push_ts"] = 0.0
+            _MODEL_PUSH_MIN = 600.0  # 10 分钟
+            if time.time() - float(globals().get("_last_model_push_ts") or 0) >= _MODEL_PUSH_MIN:
+                from utils.ml_model_store import push_models_to_hf_dataset
+                n_m = push_models_to_hf_dataset()
+                globals()["_last_model_push_ts"] = time.time()
+                if n_m:
+                    slog.info(f"[V6 DataEngine] 同步备份 ML 模型 {n_m} 个文件")
         except Exception as _me:
             slog.debug(f"[V6 DataEngine] ML 模型随库备份跳过: {_me}")
     except Exception as e:
@@ -817,12 +829,8 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         slog.info(f"[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
         
         if IS_HF_SPACE:
+            # 【2026-09-17】禁止开仓/科研快照同步全量 push，统一走 120s 节流线程，避免 HF 429
             request_push_database_to_hub()
-            # 开仓关键路径：尽量立即推一次，避免重启前节流窗口内云端无 OPEN
-            try:
-                push_database_to_hub()
-            except Exception as _imm_e:
-                slog.warning(f"[V6 DataEngine] 开仓立即推送失败(已入队): {_imm_e}")
     except Exception as e:
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 

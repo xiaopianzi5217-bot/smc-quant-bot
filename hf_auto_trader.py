@@ -2439,24 +2439,22 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             _fb_min_samples = 20
 
         if bool(_fb_res.get("should_reject", False)):
+            # 【2026-09-17】最优方案：样本足够时 Feedback 一票否决 LIVE；
+            # 冷启动样本不足仍放行后续（可进科研）；融合 EV 不得覆盖硬拒绝开实盘。
             if _fb_samples > 0 and _fb_samples < _fb_min_samples:
                 slog.info(
                     f"[FB-fuse] {symbol} 冷启动跳过 FB 硬拦: samples={_fb_samples}<{_fb_min_samples} "
                     f"fb_ev={float(_fb_res.get('ev') or 0):.4f} fused_ev={_fused_for_fb:.4f}"
                 )
-            elif _fused_for_fb >= _min_ev_live:
-                slog.info(
-                    f"[FB-fuse] {symbol} Feedback reject 被融合EV覆盖: "
-                    f"fb_ev={float(_fb_res.get('ev') or 0):.4f} "
-                    f"fused_ev={_fused_for_fb:.4f} >= {_min_ev_live}"
-                )
+                result["fb_hard_reject"] = False
             else:
+                result["fb_hard_reject"] = True
                 slog.warning(
-                    f"[FB-fuse] {symbol} reject "
-                    f"fb_ev={_fb_res.get('ev', 0):.4f} conf={_fb_res.get('confidence', 0):.3f} "
-                    f"fused_ev={_fused_for_fb:.4f} < {_min_ev_live}"
+                    f"[FB-fuse] {symbol} Feedback 一票否决(禁止LIVE) "
+                    f"fb_ev={float(_fb_res.get('ev') or 0):.4f} conf={float(_fb_res.get('confidence') or 0):.3f} "
+                    f"fused_ev={_fused_for_fb:.4f} samples={_fb_samples}"
                 )
-                return False
+                # 仍允许降级科研采样；不在此处 return，由分级路由强制 RESEARCH
 
         # 实盘最低 EV：同样只用真正的融合 EV，禁止 fallback 到 model/blended 误杀
         _ev_check = _fused_for_fb
@@ -2664,6 +2662,42 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         result["opened_live"] = False
         result["mode"] = result.get("mode") or "SHADOW"
         return False
+    # ===== 【2026-09-17】Feedback 硬拒绝：禁止 LIVE，可降级科研 =====
+    if bool(result.get("fb_hard_reject")) and route in ("LIVE_FULL_TRADE", "LIVE_HALF_TRADE"):
+        slog.warning(
+            f"[V6 分级路由 - FB] {symbol} Feedback 否决 → LIVE 降级 RESEARCH_SILENT"
+        )
+        route = "RESEARCH_SILENT"
+        result["action_route"] = "RESEARCH_SILENT"
+        result["v6_level"] = "OBSERVE_GRADE"
+        research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
+        result["signal_id"] = research_id
+        result["exit_reason"] = "RESEARCH_OBSERVE"
+        result["mode"] = "SHADOW"
+        result["route_outcome"] = "RESEARCH_FB"
+        result["opened_live"] = False
+        try:
+            async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+        except Exception as _fb_rs_e:
+            slog.error(f"[V6 FB→RESEARCH] 快照失败: {_fb_rs_e}")
+        try:
+            from utils.research_tracker import get_research_tracker
+            get_research_tracker().register(
+                signal_id=research_id,
+                symbol=symbol,
+                direction=str(result.get("direction") or ""),
+                entry_price=float(result.get("entry", 0.0) or 0.0),
+                sl_price=float(result.get("sl", 0.0) or 0.0),
+                tp1_price=float(result.get("tp1", 0.0) or 0.0),
+            )
+        except Exception as _rt_e:
+            slog.error(f"[V6 FB→RESEARCH] tracker: {_rt_e}")
+        try:
+            signal_deduper.mark_symbol_fired(symbol, str(result.get("direction") or ""), "RESEARCH_SILENT")
+        except Exception:
+            pass
+        return False
+
     # ===== 【2026-09-17】SQZ 释放门槛：仅约束 LIVE，不杀 RESEARCH =====
     # V6_REQUIRE_SQZ_RELEASE=0 可全局关闭；默认开启
     import os as _os_sqz_live
@@ -2685,8 +2719,37 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             result["signal_id"] = research_id
             result["exit_reason"] = "RESEARCH_OBSERVE"
             result["mode"] = "SHADOW"
+            # 未释放 SQZ 的科研快照：同品种同向短时去重，减少垃圾行
+            _skip_snap = False
             try:
-                async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+                import sqlite3 as _sq_dedup
+                from v6_data_engine import _get_db_path as _gdp
+                _c = _sq_dedup.connect(str(_gdp()), timeout=10)
+                _row = _c.execute(
+                    """
+                    SELECT signal_id FROM trade_snapshots
+                    WHERE symbol=? AND direction=? AND signal_id LIKE 'RES_%'
+                      AND (exit_reason='OPEN' OR exit_reason IS NULL OR exit_reason='')
+                      AND timestamp > ?
+                    LIMIT 1
+                    """,
+                    (
+                        symbol,
+                        str(result.get("direction") or ""),
+                        int(time.time()) - 3600,
+                    ),
+                ).fetchone()
+                _c.close()
+                if _row:
+                    _skip_snap = True
+                    slog.info(
+                        f"[V6 SQZ→RESEARCH] {symbol} 1h 内已有未平科研单 {_row[0]}，跳过重复快照"
+                    )
+            except Exception:
+                _skip_snap = False
+            try:
+                if not _skip_snap:
+                    async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
             except Exception as _sqz_rs_e:
                 slog.error(f"[V6 SQZ→RESEARCH] 快照失败: {_sqz_rs_e}")
             try:
