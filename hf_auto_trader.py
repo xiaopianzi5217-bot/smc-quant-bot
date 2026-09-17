@@ -2660,6 +2660,9 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             signal_deduper.mark_symbol_fired(symbol, _rs_direction, "RESEARCH_SILENT")
         except Exception:
             pass
+        result["route_outcome"] = "RESEARCH_OBSERVE"
+        result["opened_live"] = False
+        result["mode"] = result.get("mode") or "SHADOW"
         return False
     # ===== 【2026-09-17】SQZ 释放门槛：仅约束 LIVE，不杀 RESEARCH =====
     # V6_REQUIRE_SQZ_RELEASE=0 可全局关闭；默认开启
@@ -2669,9 +2672,10 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         _feat_r = result.get("features") or {}
         _rel = bool(_feat_r.get("sqz_released"))
         _dur = int(_feat_r.get("sqz_duration") or 0)
-        if (not _rel) or (_dur < 1):
+        # 仅看 released；duration 在部分行情下恒为 0（算法回看空窗），不再与 released 绑死
+        if not _rel:
             slog.warning(
-                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur}) → 降级 RESEARCH_SILENT"
+                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur} strength={_feat_r.get('sqz_strength')}) → 降级 RESEARCH_SILENT"
             )
             route = "RESEARCH_SILENT"
             result["action_route"] = "RESEARCH_SILENT"
@@ -2701,7 +2705,9 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                 signal_deduper.mark_symbol_fired(symbol, str(result.get("direction") or ""), "RESEARCH_SILENT")
             except Exception:
                 pass
-            return False
+            result["route_outcome"] = "RESEARCH_SQZ"
+            result["opened_live"] = False
+            return False  # 未实盘；主循环按 route_outcome 区分日志
 
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
@@ -4365,7 +4371,24 @@ async def main_loop():
                                 # 旧函数没有 HTF/FeedbackLoop 熔断检查，导致拦截后仍强行开单
                                 opened = check_and_open_v6_with_routing(result)
                                 if not opened:
-                                    slog.warning(f"[main_loop] {symbol} V6 路由拒绝开单（HTF/FeedbackLoop熔断），不调用旧链路")
+                                    _ro = str(result.get("route_outcome") or "")
+                                    _sid = str(result.get("signal_id") or "")
+                                    _route = str(result.get("action_route") or result.get("v6_route") or "")
+                                    if (
+                                        _ro.startswith("RESEARCH")
+                                        or _route == "RESEARCH_SILENT"
+                                        or _sid.startswith(("RES_", "RESEARCH_"))
+                                        or str(result.get("mode") or "").upper() == "SHADOW"
+                                    ):
+                                        slog.info(
+                                            f"[main_loop] {symbol} 科研/影子路径已处理"
+                                            f"（outcome={_ro or _route or 'RESEARCH'} sid={_sid}），不开实盘"
+                                        )
+                                    else:
+                                        slog.warning(
+                                            f"[main_loop] {symbol} V6 路由未开实盘"
+                                            f"（route={_route or result.get('v6_level')} outcome={_ro or 'reject'}），不调用旧链路"
+                                        )
                 except Exception as sym_e:
                     slog.error(f"[main_loop] {symbol} 处理异常: {sym_e}")
                     continue
