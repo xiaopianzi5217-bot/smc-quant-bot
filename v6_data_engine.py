@@ -25,10 +25,8 @@ DB_PATH = _ROOT / "data" / "v6_research.db"
 _DB_INIT_SENTINEL = _ROOT / "data" / ".db_initialized"
 
 # ── 🟢 节流推送（避免每次开平仓直接 push） ──
-_last_push_ts = 0.0
-_last_model_push_ts = 0.0
+_last_push_ts = time.time()  # 启动后先等满间隔，避免首笔快照立刻推 HF
 _PUSH_MIN_INTERVAL = 120.0   # 最少 2 分钟推一次
-_MODEL_PUSH_MIN_INTERVAL = 600.0  # 模型最少 10 分钟推一次
 _pending_push = False
 _push_lock = threading.Lock()
 
@@ -454,23 +452,7 @@ def push_database_to_hub():
             commit_message=f"🔄 Aisvbo 数据流实时增量备份 - {int(time.time())}"
         )
         slog.info("[V6 DataEngine] 云端备份完成！数据已安全锁入私有 Dataset.")
-        # 模型文件单独长间隔推送，避免每次 db 备份都 empty commit 刷屏
-        try:
-            global _last_model_push_ts
-        except Exception:
-            pass
-        try:
-            if "_last_model_push_ts" not in globals():
-                globals()["_last_model_push_ts"] = 0.0
-            _MODEL_PUSH_MIN = 600.0  # 10 分钟
-            if time.time() - float(globals().get("_last_model_push_ts") or 0) >= _MODEL_PUSH_MIN:
-                from utils.ml_model_store import push_models_to_hf_dataset
-                n_m = push_models_to_hf_dataset()
-                globals()["_last_model_push_ts"] = time.time()
-                if n_m:
-                    slog.info(f"[V6 DataEngine] 同步备份 ML 模型 {n_m} 个文件")
-        except Exception as _me:
-            slog.debug(f"[V6 DataEngine] ML 模型随库备份跳过: {_me}")
+        # 【2026-09-17】模型不再随库备份推送（避免 empty commit / 429）；仅训练成功路径推模型
     except Exception as e:
         slog.error(f"[V6 DataEngine] 实时同步至 Hugging Face Hub 失败: {e}")
 

@@ -2441,7 +2441,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         if bool(_fb_res.get("should_reject", False)):
             # 【2026-09-17】最优方案：样本足够时 Feedback 一票否决 LIVE；
             # 冷启动样本不足仍放行后续（可进科研）；融合 EV 不得覆盖硬拒绝开实盘。
-            if _fb_samples > 0 and _fb_samples < _fb_min_samples:
+            if int(_fb_samples or 0) < int(_fb_min_samples or 20):
                 slog.info(
                     f"[FB-fuse] {symbol} 冷启动跳过 FB 硬拦: samples={_fb_samples}<{_fb_min_samples} "
                     f"fb_ev={float(_fb_res.get('ev') or 0):.4f} fused_ev={_fused_for_fb:.4f}"
@@ -2612,6 +2612,17 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         if signal_deduper.is_symbol_cooled(symbol, _rs_direction, "RESEARCH_SILENT"):
             slog.warning(f"[V6 分级路由 - 科研观察冷却] {symbol} {_rs_direction} 仍在冷却中，跳过快照记录")
             return False
+        # 未释放 SQZ：观察档也不落库（只日志），减少低质量 RES 行
+        _obs_feat = result.get("features") or {}
+        if not bool(_obs_feat.get("sqz_released")):
+            slog.info(
+                f"[V6 分级路由 - 科研观察] {symbol} {level} ({score}分) SQZ未释放 → 跳过快照落库"
+            )
+            result["route_outcome"] = "SKIP_SQZ_NOT_RELEASED"
+            result["opened_live"] = False
+            result["mode"] = "SHADOW"
+            result["action_route"] = "RESEARCH_SILENT"
+            return False
         research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
@@ -2708,69 +2719,17 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         _dur = int(_feat_r.get("sqz_duration") or 0)
         # 仅看 released；duration 在部分行情下恒为 0（算法回看空窗），不再与 released 绑死
         if not _rel:
+            # 【2026-09-17】未释放：禁止 LIVE，且不写 RES 快照/不注册 tracker，避免垃圾行与 HF 抖动
             slog.warning(
-                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur} strength={_feat_r.get('sqz_strength')}) → 降级 RESEARCH_SILENT"
+                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur} "
+                f"strength={_feat_r.get('sqz_strength')}) → 跳过实盘与科研落库"
             )
-            route = "RESEARCH_SILENT"
             result["action_route"] = "RESEARCH_SILENT"
             result["v6_level"] = result.get("v6_level") or "OBSERVE_GRADE"
-            # 走科研分支：补快照，不实盘
-            research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
-            result["signal_id"] = research_id
-            result["exit_reason"] = "RESEARCH_OBSERVE"
-            result["mode"] = "SHADOW"
-            # 未释放 SQZ 的科研快照：同品种同向短时去重，减少垃圾行
-            _skip_snap = False
-            try:
-                import sqlite3 as _sq_dedup
-                from v6_data_engine import _get_db_path as _gdp
-                _c = _sq_dedup.connect(str(_gdp()), timeout=10)
-                _row = _c.execute(
-                    """
-                    SELECT signal_id FROM trade_snapshots
-                    WHERE symbol=? AND direction=? AND signal_id LIKE 'RES_%'
-                      AND (exit_reason='OPEN' OR exit_reason IS NULL OR exit_reason='')
-                      AND timestamp > ?
-                    LIMIT 1
-                    """,
-                    (
-                        symbol,
-                        str(result.get("direction") or ""),
-                        int(time.time()) - 3600,
-                    ),
-                ).fetchone()
-                _c.close()
-                if _row:
-                    _skip_snap = True
-                    slog.info(
-                        f"[V6 SQZ→RESEARCH] {symbol} 1h 内已有未平科研单 {_row[0]}，跳过重复快照"
-                    )
-            except Exception:
-                _skip_snap = False
-            try:
-                if not _skip_snap:
-                    async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
-            except Exception as _sqz_rs_e:
-                slog.error(f"[V6 SQZ→RESEARCH] 快照失败: {_sqz_rs_e}")
-            try:
-                from utils.research_tracker import get_research_tracker
-                get_research_tracker().register(
-                    signal_id=research_id,
-                    symbol=symbol,
-                    direction=str(result.get("direction") or ""),
-                    entry_price=float(result.get("entry", 0.0) or 0.0),
-                    sl_price=float(result.get("sl", 0.0) or 0.0),
-                    tp1_price=float(result.get("tp1", 0.0) or 0.0),
-                )
-            except Exception as _rt_e:
-                slog.error(f"[V6 SQZ→RESEARCH] tracker: {_rt_e}")
-            try:
-                signal_deduper.mark_symbol_fired(symbol, str(result.get("direction") or ""), "RESEARCH_SILENT")
-            except Exception:
-                pass
-            result["route_outcome"] = "RESEARCH_SQZ"
+            result["route_outcome"] = "SKIP_SQZ_NOT_RELEASED"
             result["opened_live"] = False
-            return False  # 未实盘；主循环按 route_outcome 区分日志
+            result["mode"] = "SHADOW"
+            return False
 
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
@@ -4439,13 +4398,14 @@ async def main_loop():
                                     _route = str(result.get("action_route") or result.get("v6_route") or "")
                                     if (
                                         _ro.startswith("RESEARCH")
+                                        or _ro.startswith("SKIP_")
                                         or _route == "RESEARCH_SILENT"
                                         or _sid.startswith(("RES_", "RESEARCH_"))
                                         or str(result.get("mode") or "").upper() == "SHADOW"
                                     ):
                                         slog.info(
-                                            f"[main_loop] {symbol} 科研/影子路径已处理"
-                                            f"（outcome={_ro or _route or 'RESEARCH'} sid={_sid}），不开实盘"
+                                            f"[main_loop] {symbol} 未开实盘"
+                                            f"（outcome={_ro or _route or 'skip'} sid={_sid or '-'}）"
                                         )
                                     else:
                                         slog.warning(
