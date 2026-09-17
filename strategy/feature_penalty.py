@@ -43,7 +43,8 @@ VOLATILITY_FEATURES = [
 
 MOMENTUM_FEATURES = [
     "rsi_momentum",
-    "macd_cross",
+    "macd_cross",  # 现映射 SQZ hist_cross
+    "sqz_hist_cross",
     "price_acceleration",
     "volume_surge",
 ]

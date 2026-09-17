@@ -146,12 +146,26 @@ def calculate_advanced_sqzmom(df: pd.DataFrame, length: int = 20, mult_bb: float
             vol_ratio = 1.0  # 无量数据不否决
         volume_confirmed = vol_ratio >= 1.3
 
+    # 动量柱翻色 / 零轴穿越（替代恒真的 macd_cross）
+    hist_cross = (current_hist * prev_hist) < 0 and abs(current_hist) > 1e-12
+    if current_hist > 1e-12:
+        hist_sign = 1
+    elif current_hist < -1e-12:
+        hist_sign = -1
+    else:
+        hist_sign = 0
+
     return {
         "released": bool(released),
         "duration": int(duration),
         "strength": round(float(strength), 4),
         "vol_ratio": round(float(vol_ratio), 2),
         "volume_confirmed": bool(volume_confirmed),
+        "hist": round(float(current_hist), 6),
+        "prev_hist": round(float(prev_hist), 6),
+        "hist_cross": bool(hist_cross),
+        "hist_sign": int(hist_sign),
+        "is_squeezing": bool(is_squeezing_now),
     }
 
 

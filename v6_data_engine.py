@@ -534,6 +534,134 @@ def get_historical_smc_success_rate(symbol, timeframe, structure_type, current_r
     return actual_probability
 
 
+
+def record_smc_structure(
+    symbol: str,
+    timeframe: str,
+    structure_type: str,
+    direction: str,
+    price_level: float,
+    regime: str = None,
+    dedupe_sec: int = 900,
+) -> int:
+    """写入一条 SMC 结构事件（BOS/CHOCH/SWEEP/OB/FVG）。
+
+    返回新行 id；若同品种+类型+方向+近似价位在 dedupe_sec 内已有记录则跳过返回 0。
+    """
+    try:
+        expand_v6_table_for_smc()
+        sym = str(symbol or "").strip()
+        tf = str(timeframe or "15m").strip()
+        stype = str(structure_type or "").strip().upper()
+        direction = str(direction or "").strip().upper()
+        if direction in ("LONG", "BUY", "BULL", "UP"):
+            direction = "BULL"
+        elif direction in ("SHORT", "SELL", "BEAR", "DOWN"):
+            direction = "BEAR"
+        try:
+            level = float(price_level)
+        except Exception:
+            return 0
+        if not sym or not stype or level <= 0:
+            return 0
+        now = int(time.time())
+        conn = sqlite3.connect(str(_get_db_path()))
+        cursor = conn.cursor()
+        # 去重：同结构短时重复不写
+        tol = max(level * 1e-4, 1e-8)
+        cursor.execute(
+            """
+            SELECT id FROM smc_structure_tracker
+            WHERE symbol = ? AND timeframe = ? AND structure_type = ? AND direction = ?
+              AND ABS(price_level - ?) <= ?
+              AND timestamp >= ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (sym, tf, stype, direction, level, tol, now - int(dedupe_sec)),
+        )
+        if cursor.fetchone():
+            conn.close()
+            return 0
+        cursor.execute(
+            """
+            INSERT INTO smc_structure_tracker
+                (timestamp, symbol, timeframe, structure_type, direction, price_level, is_mitigated, outcome, regime)
+            VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
+            """,
+            (now, sym, tf, stype, direction, level, regime),
+        )
+        row_id = int(cursor.lastrowid or 0)
+        conn.commit()
+        conn.close()
+        try:
+            slog.info(
+                f"[SMC Tracker] +{stype} {direction} {sym} {tf} @ {level:.4f} id={row_id}"
+            )
+        except Exception:
+            pass
+        return row_id
+    except Exception as e:
+        try:
+            slog.warning(f"[SMC Tracker] record 失败: {e}")
+        except Exception:
+            pass
+        return 0
+
+
+def mitigate_smc_structures(symbol: str, timeframe: str, current_price: float, lookback_sec: int = 86400 * 7) -> int:
+    """价格穿越未缓解结构位时标记 is_mitigated=1。返回更新行数。"""
+    try:
+        sym = str(symbol or "").strip()
+        tf = str(timeframe or "15m").strip()
+        px = float(current_price)
+        if not sym or px <= 0:
+            return 0
+        now = int(time.time())
+        conn = sqlite3.connect(str(_get_db_path()))
+        cursor = conn.cursor()
+        # 多头结构：价格上破后视为缓解；空头结构：价格下破
+        cursor.execute(
+            """
+            UPDATE smc_structure_tracker
+            SET is_mitigated = 1
+            WHERE symbol = ? AND timeframe = ? AND is_mitigated = 0
+              AND timestamp >= ?
+              AND (
+                    (direction = 'BULL' AND ? >= price_level)
+                 OR (direction = 'BEAR' AND ? <= price_level)
+              )
+            """,
+            (sym, tf, now - int(lookback_sec), px, px),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return int(n or 0)
+    except Exception as e:
+        try:
+            slog.debug(f"[SMC Tracker] mitigate 跳过: {e}")
+        except Exception:
+            pass
+        return 0
+
+
+def mark_smc_structure_outcome(structure_id: int, outcome: int) -> bool:
+    """平仓后回写结构 outcome：1=有利, 0=不利。"""
+    try:
+        conn = sqlite3.connect(str(_get_db_path()))
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE smc_structure_tracker SET outcome = ? WHERE id = ? AND outcome IS NULL",
+            (int(outcome), int(structure_id)),
+        )
+        ok = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return ok
+    except Exception:
+        return False
+
+
 def init_v6_database():
     """初始化数据库流程"""
     db_path = _get_db_path()
@@ -607,7 +735,32 @@ def init_v6_database():
 def record_open_snapshot(result: dict, kelly_size: float = 0.0):
     """拍摄高维环境特征快照"""
     try:
-        conn = sqlite3.connect(str(_get_db_path()))
+        # 确保 schema 含 mode / sqz 列，避免旧库 INSERT 炸
+        try:
+            expand_v6_table_for_smc()
+        except Exception:
+            pass
+        try:
+            conn0 = sqlite3.connect(str(_get_db_path()), timeout=30)
+            c0 = conn0.cursor()
+            for col, defn in (
+                ("mode", "TEXT DEFAULT 'NORMAL'"),
+                ("sqz_released", "INTEGER DEFAULT 0"),
+                ("sqz_duration", "INTEGER DEFAULT 0"),
+                ("sqz_strength", "REAL DEFAULT 0.0"),
+                ("sqz_vol_ratio", "REAL DEFAULT 1.0"),
+                ("sqz_volume_confirmed", "INTEGER DEFAULT 0"),
+                ("raw_features_json", "TEXT"),
+            ):
+                try:
+                    _ensure_column(c0, "trade_snapshots", col, defn)
+                except Exception:
+                    pass
+            conn0.commit()
+            conn0.close()
+        except Exception:
+            pass
+        conn = sqlite3.connect(str(_get_db_path()), timeout=30)
         cursor = conn.cursor()
         
         signal_id = result.get("signal_id") or f"{result['symbol']}_{int(time.time())}"
@@ -632,7 +785,7 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         sqz_data = result.get("sqz_data", {}) or {}
                 # mode 字段：PROBE / NORMAL；调用方可通过 result["mode"] 指定，缺省 NORMAL
         _mode = str(result.get("mode", "NORMAL")).upper()
-        if _mode not in ("NORMAL", "PROBE"):
+        if _mode not in ("NORMAL", "PROBE", "LIVE", "SHADOW"):
             _mode = "NORMAL"
 
         cursor.execute("""

@@ -1254,7 +1254,7 @@ async def scan_and_decide(symbol: str) -> dict | None:
     _features = {
         "ema_trend": _htf_state.get("trend_strength", 0) > 0.4,
         "adx": float(exec_ctx.get("adx", 0)) > 25,
-        "structure_break": bool(exec_ctx.get("liquidity_sweep_confirmed", False)),
+        "structure_break": bool(exec_ctx.get("structure_break") or exec_ctx.get("liquidity_sweep_confirmed") or exec_ctx.get("bos_up") or exec_ctx.get("bos_down") or exec_ctx.get("choch_up") or exec_ctx.get("choch_down")),
         "momentum": abs(_exec_lq - _exec_sq) > 15 if (_exec_lq > 0 or _exec_sq > 0) else False,
         # FIX-20260913: RANGE -> True, BULL/BEAR -> direction match
         "trend_direction": (
@@ -1263,24 +1263,43 @@ async def scan_and_decide(symbol: str) -> dict | None:
             else (direction == "Short") if _regime_name == "BEAR"
             else False
         ),
-        "atr_expand": float(curr.get("ATRr_14", exec_ctx.get("atr", 0))) > float(curr.get("ATRr_14", 0)) * 1.2 if hasattr(curr, 'get') else False,
-        "squeeze_release": str(exec_ctx.get("squeeze", "")).lower() in ("release", "squeeze_release"),
-        "volume_break": float(curr.get("volume_ratio", 1)) > 1.5 if hasattr(curr, 'get') else False,
-        "bb_width_expand": False,
-        "rsi_momentum": abs(float(curr.get("rsi", 50)) - 50) > 20 if hasattr(curr, 'get') else False,
-        "macd_cross": abs(float(curr.get("MACDh_12_26_9", 0))) > 0.0001 if hasattr(curr, 'get') else False,
-        "price_acceleration": False,
-        "volume_surge": float(curr.get("volume_ratio", 1)) > 2.0 if hasattr(curr, 'get') else False,
+        "atr_expand": (
+            float(curr.get("ATRr_14", exec_ctx.get("atr", 0)) or 0)
+            > float(exec_ctx.get("atr_ma20", 0) or 0) * 1.15
+            if float(exec_ctx.get("atr_ma20", 0) or 0) > 0
+            else False
+        ),
+        "squeeze_release": bool(sqz_data.get("released")) or str(exec_ctx.get("squeeze", "")).lower() in ("release", "squeeze_release", "released"),
+        "volume_break": float(curr.get("volume_ratio", 1) or 1) > 1.5 if hasattr(curr, "get") else False,
+        "bb_width_expand": bool(sqz_data.get("released")) and float(sqz_data.get("strength") or 0) > 0,
+        "rsi_momentum": abs(float(curr.get("rsi", 50) or 50) - 50) > 20 if hasattr(curr, "get") else False,
+        # 废弃恒真 MACD 判定：改为 SQZ 动量柱翻色（兼容旧 key 名 macd_cross）
+        "macd_cross": bool(sqz_data.get("hist_cross")),
+        "sqz_hist_cross": bool(sqz_data.get("hist_cross")),
+        "sqz_hist_sign": int(sqz_data.get("hist_sign") or 0),
+        "price_acceleration": bool(sqz_data.get("hist_cross")) and abs(float(sqz_data.get("hist") or 0)) > abs(float(sqz_data.get("prev_hist") or 0)),
+        "volume_surge": float(curr.get("volume_ratio", 1) or 1) > 2.0 if hasattr(curr, "get") else False,
         "ema_alignment": _htf_state.get("regime") in ("BULL", "BEAR"),
         # ===== SQZMOM 高维特征 =====
-        "sqz_released": sqz_data["released"],
-        "sqz_duration": sqz_data["duration"],
-        "sqz_strength": sqz_data["strength"],
-        "sqz_vol_ratio": sqz_data["vol_ratio"],
-        "sqz_volume_confirmed": sqz_data["volume_confirmed"],
+        "sqz_released": bool(sqz_data.get("released")),
+        "sqz_duration": int(sqz_data.get("duration") or 0),
+        "sqz_strength": float(sqz_data.get("strength") or 0),
+        "sqz_vol_ratio": float(sqz_data.get("vol_ratio") or 1),
+        "sqz_volume_confirmed": bool(sqz_data.get("volume_confirmed")),
+        "sqz_is_squeezing": bool(sqz_data.get("is_squeezing")),
         # 【新增20260726】注入 regime 字段，供 feature_penalty 动态调整惩罚系数
         "regime": _regime_name,
     }
+
+        # ===== 【2026-09-17】SQZ 状态仅标注，不在扫描期一刀切 =====
+    # 实盘门槛下沉到 check_and_open_v6_with_routing（仅 LIVE）；RESEARCH 照常收样本
+    _sqz_rel = bool(_features.get("sqz_released"))
+    _sqz_dur = int(_features.get("sqz_duration") or 0)
+    if not _sqz_rel or _sqz_dur < 1:
+        slog.info(
+            f"[{symbol}] SQZ 未释放(仅标记): released={_sqz_rel} duration={_sqz_dur} "
+            f"strength={_features.get('sqz_strength')} → 仍进入路由(LIVE 将被拦截/降级)"
+        )
 
         # ===== 【优化5 - Statistical EV】混合历史EV =====
     _blended_ev = get_statistical_ev().blend(model_ev=ev, features=_features)
@@ -2598,6 +2617,7 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
         result["signal_id"] = research_id
         result["exit_reason"] = "RESEARCH_OBSERVE"
+        result["mode"] = "SHADOW"
         slog.info(f"[V6 分级路由 - 科研观察] {symbol} {level} 信号 ({score}分) | 实盘静默, 拍摄特征快照入云端铁盒")
         try:
             event_logger.log_event("REJECT", {
@@ -2641,12 +2661,55 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
         except Exception:
             pass
         return False
+    # ===== 【2026-09-17】SQZ 释放门槛：仅约束 LIVE，不杀 RESEARCH =====
+    # V6_REQUIRE_SQZ_RELEASE=0 可全局关闭；默认开启
+    import os as _os_sqz_live
+    _req_sqz_live = str(_os_sqz_live.environ.get("V6_REQUIRE_SQZ_RELEASE", "1")).strip().lower() not in ("0", "false", "no", "off")
+    if route in ("LIVE_FULL_TRADE", "LIVE_HALF_TRADE") and _req_sqz_live:
+        _feat_r = result.get("features") or {}
+        _rel = bool(_feat_r.get("sqz_released"))
+        _dur = int(_feat_r.get("sqz_duration") or 0)
+        if (not _rel) or (_dur < 1):
+            slog.warning(
+                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur}) → 降级 RESEARCH_SILENT"
+            )
+            route = "RESEARCH_SILENT"
+            result["action_route"] = "RESEARCH_SILENT"
+            result["v6_level"] = result.get("v6_level") or "OBSERVE_GRADE"
+            # 走科研分支：补快照，不实盘
+            research_id = f"RES_{symbol.replace('/', '')}_{int(time.time())}"
+            result["signal_id"] = research_id
+            result["exit_reason"] = "RESEARCH_OBSERVE"
+            result["mode"] = "SHADOW"
+            try:
+                async_background_task(async_record_snapshot_and_push(result, kelly_size=0.0))
+            except Exception as _sqz_rs_e:
+                slog.error(f"[V6 SQZ→RESEARCH] 快照失败: {_sqz_rs_e}")
+            try:
+                from utils.research_tracker import get_research_tracker
+                get_research_tracker().register(
+                    signal_id=research_id,
+                    symbol=symbol,
+                    direction=str(result.get("direction") or ""),
+                    entry_price=float(result.get("entry", 0.0) or 0.0),
+                    sl_price=float(result.get("sl", 0.0) or 0.0),
+                    tp1_price=float(result.get("tp1", 0.0) or 0.0),
+                )
+            except Exception as _rt_e:
+                slog.error(f"[V6 SQZ→RESEARCH] tracker: {_rt_e}")
+            try:
+                signal_deduper.mark_symbol_fired(symbol, str(result.get("direction") or ""), "RESEARCH_SILENT")
+            except Exception:
+                pass
+            return False
+
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
         result["size"] = trade_size
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
+    result["mode"] = "LIVE"
     # 【修复20260810】V6 路由实盘激活推送前必须经过统一冷却拦截。
     # 根因：此前该函数推送开单通知时未调用 is_symbol_cooled，
     #      且 sig_id 使用秒级时间戳导致 should_process 永远通过，
@@ -3698,7 +3761,9 @@ def check_and_open(result: dict | None) -> bool:
         
     # ⚡ DailyReport：记录交易
     from analytics.daily_report import daily_report
-    _mode = "PROBE" if result.get("probe_mode") else "NORMAL"
+    _mode = str(result.get("mode") or ("PROBE" if result.get("probe_mode") else "LIVE")).upper()
+    if _mode not in ("LIVE", "SHADOW", "PROBE", "NORMAL"):
+        _mode = "LIVE"
     daily_report.record_trade(mode=_mode)
     return True
 

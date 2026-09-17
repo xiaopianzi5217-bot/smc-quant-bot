@@ -590,6 +590,85 @@ def build_exec_context(df, symbol=None, timeframe="15m"):
     bullish_momentum = momentum if momentum > 0 else 0.0
     bearish_momentum = abs(momentum) if momentum < 0 else 0.0
     
+    # ===== SMC 结构：BOS / CHOCH 检测并写入 smc_structure_tracker =====
+    bos_up = False
+    bos_down = False
+    choch_up = False
+    choch_down = False
+    structure_break = False
+    try:
+        prev_close = float(df['close'].iloc[target_idx - 1]) if target_idx >= 1 else close_val
+        last_sh = float(df['high'].iloc[liq_hp[-1]]) if liq_hp else None
+        last_sl = float(df['low'].iloc[liq_lp[-1]]) if liq_lp else None
+        # BOS：收盘突破最近 swing high/low（前一根未站上/跌破）
+        if last_sh is not None and close_val > last_sh and prev_close <= last_sh:
+            bos_up = True
+        if last_sl is not None and close_val < last_sl and prev_close >= last_sl:
+            bos_down = True
+        # CHOCH：趋势结构翻转
+        if len(liq_lp) >= 2:
+            # 上升结构（更高 low）被跌破 → 看跌 CHoCH
+            sl1 = float(df['low'].iloc[liq_lp[-1]])
+            sl0 = float(df['low'].iloc[liq_lp[-2]])
+            if sl1 > sl0 and close_val < sl1 and prev_close >= sl1:
+                choch_down = True
+        if len(liq_hp) >= 2:
+            # 下降结构（更低 high）被升破 → 看涨 CHoCH
+            sh1 = float(df['high'].iloc[liq_hp[-1]])
+            sh0 = float(df['high'].iloc[liq_hp[-2]])
+            if sh1 < sh0 and close_val > sh1 and prev_close <= sh1:
+                choch_up = True
+        structure_break = bool(bos_up or bos_down or choch_up or choch_down)
+        # 流动性扫荡也记入账本
+        _regime_tag = str((regime_info or {}).get('regime', '') or '')
+        if symbol:
+            try:
+                from v6_data_engine import record_smc_structure, mitigate_smc_structures
+            except Exception:
+                try:
+                    import v6_data_engine as _v6
+                    record_smc_structure = _v6.record_smc_structure
+                    mitigate_smc_structures = _v6.mitigate_smc_structures
+                except Exception:
+                    record_smc_structure = None
+                    mitigate_smc_structures = None
+            if record_smc_structure:
+                if bos_up:
+                    record_smc_structure(symbol, timeframe, "BOS", "BULL", last_sh, _regime_tag)
+                if bos_down:
+                    record_smc_structure(symbol, timeframe, "BOS", "BEAR", last_sl, _regime_tag)
+                if choch_up:
+                    record_smc_structure(symbol, timeframe, "CHOCH", "BULL", float(df['high'].iloc[liq_hp[-1]]), _regime_tag)
+                if choch_down:
+                    record_smc_structure(symbol, timeframe, "CHOCH", "BEAR", float(df['low'].iloc[liq_lp[-1]]), _regime_tag)
+                if is_bsl_swept and bsl_level:
+                    record_smc_structure(symbol, timeframe, "SWEEP", "BEAR", float(bsl_level), _regime_tag)
+                if is_ssl_swept and ssl_level:
+                    record_smc_structure(symbol, timeframe, "SWEEP", "BULL", float(ssl_level), _regime_tag)
+                if bullish_ob is not None:
+                    _ob_mid = _range_mid(bullish_ob)
+                    if _ob_mid:
+                        record_smc_structure(symbol, timeframe, "OB", "BULL", float(_ob_mid), _regime_tag)
+                if bearish_ob is not None:
+                    _ob_mid = _range_mid(bearish_ob)
+                    if _ob_mid:
+                        record_smc_structure(symbol, timeframe, "OB", "BEAR", float(_ob_mid), _regime_tag)
+                if bullish_fvg:
+                    record_smc_structure(symbol, timeframe, "FVG", "BULL", float(bullish_fvg), _regime_tag)
+                if bearish_fvg:
+                    record_smc_structure(symbol, timeframe, "FVG", "BEAR", float(bearish_fvg), _regime_tag)
+            if mitigate_smc_structures:
+                try:
+                    mitigate_smc_structures(symbol, timeframe, close_val)
+                except Exception:
+                    pass
+    except Exception as _smc_det_e:
+        try:
+            from utils.structured_logger import slog as _slog
+            _slog.debug(f"[SMC] structure detect skip: {_smc_det_e}")
+        except Exception:
+            pass
+
     return {
         'swing_high': sh_val, 'swing_low': sl_val,
         'poc': poc, 'vah': vah, 'val': val, 'utc_hour': utc_hour,
@@ -645,4 +724,14 @@ def build_exec_context(df, symbol=None, timeframe="15m"):
         'sqzmom_bear_strength': sqzmom_bear_strength,
         'bullish_momentum': bullish_momentum,
         'bearish_momentum': bearish_momentum,
+        # BOS / CHOCH / 结构破位（供特征与仪表盘）
+        'bos_up': bool(bos_up),
+        'bos_down': bool(bos_down),
+        'choch_up': bool(choch_up),
+        'choch_down': bool(choch_down),
+        'structure_break': bool(structure_break),
+        'bos_bull': bool(bos_up),
+        'bos_bear': bool(bos_down),
+        'choch_bull': bool(choch_up),
+        'choch_bear': bool(choch_down),
     }

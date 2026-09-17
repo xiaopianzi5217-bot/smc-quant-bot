@@ -49,24 +49,18 @@ def _parse_iso(ts: str):
 def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: datetime) -> list:
     """从本地/云端 v6_research.db 读取目标日期已平仓记录，返回模拟 EXIT 事件 dict 列表。
 
-    数据源：HF 私有数据集 v6_research.db（trade_snapshots 表，真实结果）
-    策略：仅当本地 events.jsonl 无当日 EXIT 时才调用。
-          查询条件与 events.jsonl 相同的时间窗口 [start, end)，
-          过滤 exit_reason != 'OPEN' 且 pnl_r 非空。
-    防重：进程级_按目标日期 key 去重（_backfilled_date_keys），保证每日期独立执行。
-    失败/无数据静默返回 []，不影响原逻辑。
+    容错：mode 列缺失、旧库 schema、脏行均不抛到日报主流程。
     """
-    # [修复] 进程级一次性全局标记问题导致的跨日期失效：
-    #   原实现: 单个 _backfilled=True 使首日成功后其它日期永远跳过 DB backfill。
-    #   改为按目标日期 key 去重，保证每个日期独立执行 DB 兜底。
     if not hasattr(_backfill_from_cloud_v6_db, "_backfilled_date_keys"):
         _backfill_from_cloud_v6_db._backfilled_date_keys = set()
     try:
         date_key = target_date.date().isoformat() if target_date is not None else start.date().isoformat()
     except Exception:
-        date_key = str(start.date())
-    # 允许重复查询（日报/质量检查可能多次调用），不再永久跳过
-    _backfill_from_cloud_v6_db._backfilled_date_keys.add(date_key)
+        date_key = str(getattr(start, "date", lambda: start)())
+    try:
+        _backfill_from_cloud_v6_db._backfilled_date_keys.add(date_key)
+    except Exception:
+        pass
 
     db_candidates = [
         Path("data/v6_research.db"),
@@ -75,7 +69,6 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
     ]
     db_path = next((p for p in db_candidates if p.exists()), db_candidates[0])
     try:
-        # 本地库缺失/为空时，尝试拉取云端最新
         if not db_path.exists() or db_path.stat().st_size == 0:
             try:
                 from v6_data_engine import pull_database_from_hub
@@ -86,79 +79,141 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
         pass
 
     if not db_path.exists() or db_path.stat().st_size == 0:
-        slog.warning("[DailyReport] 云端兜底跳过: v6_research.db 不存在或为空")
+        try:
+            slog.warning("[DailyReport] 云端兜底跳过: v6_research.db 不存在或为空")
+        except Exception:
+            pass
         return []
 
-        # 时区说明：start/end 是 aware-UTC datetime
-        # 日历时间计算时用 timezone.utc 构造 start、end，避免 naive.timestamp() 按本地时区(UTC+8)偏移8小时
-        # 对 aware-UTC datetime 调用 .timetuple() 得到 UTC 字段，calendar.timegm 解释为 UTC epoch 一致正确
     try:
-        start_ts = calendar.timegm(start.timetuple())
-        end_ts = calendar.timegm(end.timetuple())
+        start_ts = int(calendar.timegm(start.timetuple()))
+        end_ts = int(calendar.timegm(end.timetuple()))
     except Exception:
         return []
 
+    rows = []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(str(db_path), timeout=30)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT signal_id, symbol, direction, regime, mode,
-                   exit_reason, exit_timestamp, exit_price, pnl_r,
-                   confidence, p_win_calibrated, feature_hash,
-                   max_forward_r, max_adverse_r
-            FROM trade_snapshots
-            WHERE exit_reason IS NOT NULL
-              AND exit_reason != ''
-              AND exit_reason != 'OPEN'
-                            AND exit_reason NOT IN ('MANUAL_CLEANUP_DEPRECATED', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE', 'STALE_OPEN_TIMEOUT')
-                            AND pnl_r IS NOT NULL
-              AND exit_timestamp IS NOT NULL
-              AND exit_timestamp > 0
-              AND exit_timestamp >= ?
-              AND exit_timestamp < ?
-            ORDER BY exit_timestamp ASC
-            """,
-            (start_ts, end_ts),
-        )
-        rows = cur.fetchall()
+        # 探测列，避免旧库无 mode 直接 OperationalError
+        try:
+            cur.execute("PRAGMA table_info(trade_snapshots)")
+            cols = {str(r[1]) for r in cur.fetchall()}
+        except Exception:
+            cols = set()
+        if not cols:
+            conn.close()
+            return []
+
+        base_cols = [
+            "signal_id", "symbol", "direction", "regime", "exit_reason",
+            "exit_timestamp", "exit_price", "pnl_r", "confidence",
+            "p_win_calibrated", "feature_hash", "max_forward_r", "max_adverse_r",
+        ]
+        select_cols = [c for c in base_cols if c in cols]
+        has_mode = "mode" in cols
+        if has_mode:
+            select_cols.insert(4, "mode")  # after regime
+        if "signal_id" not in cols:
+            conn.close()
+            return []
+
+        sql = f"SELECT {', '.join(select_cols)} FROM trade_snapshots WHERE 1=1"
+        params = []
+        if "exit_reason" in cols:
+            sql += " AND exit_reason IS NOT NULL AND exit_reason != '' AND exit_reason != 'OPEN'"
+            sql += """ AND exit_reason NOT IN (
+                'MANUAL_CLEANUP_DEPRECATED', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE', 'STALE_OPEN_TIMEOUT',
+                'RESEARCH_SHADOW_CLOSED', 'RESEARCH_OBSERVE', 'RESEARCH_SL', 'RESEARCH_TP1'
+            )"""
+        if "pnl_r" in cols:
+            sql += " AND pnl_r IS NOT NULL"
+        if "exit_timestamp" in cols:
+            sql += " AND exit_timestamp IS NOT NULL AND exit_timestamp > 0 AND exit_timestamp >= ? AND exit_timestamp < ?"
+            params.extend([start_ts, end_ts])
+        if has_mode:
+            sql += " AND (mode IS NULL OR UPPER(COALESCE(mode, '')) NOT IN ('SHADOW'))"
+        if "signal_id" in cols:
+            sql += " AND signal_id NOT LIKE 'RES_%' AND signal_id NOT LIKE 'RESEARCH_%'"
+        sql += " ORDER BY exit_timestamp ASC" if "exit_timestamp" in cols else ""
+
+        try:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        except Exception as _q_e:
+            # 降级：最简查询，Python 侧再过滤
+            try:
+                slog.warning(f"[DailyReport] 主查询失败，降级简查: {_q_e}")
+                simple = """
+                    SELECT * FROM trade_snapshots
+                    WHERE exit_reason IS NOT NULL AND exit_reason != 'OPEN'
+                      AND pnl_r IS NOT NULL
+                      AND exit_timestamp IS NOT NULL
+                      AND exit_timestamp >= ? AND exit_timestamp < ?
+                """
+                cur.execute(simple, (start_ts, end_ts))
+                rows = cur.fetchall()
+            except Exception as _q2:
+                slog.warning(f"[DailyReport] 简查也失败: {_q2}")
+                rows = []
         conn.close()
     except Exception as e:
-        slog.warning(f"[DailyReport] 云端 v6_research.db 兜底查询失败: {e}")
+        try:
+            slog.warning(f"[DailyReport] 云端 v6_research.db 兜底查询失败: {e}")
+        except Exception:
+            pass
         return []
 
-    if not rows:
-        slog.info("[DailyReport] 云端 v6_research.db 目标日期无已平仓记录")
-        return []
-
+    _SKIP_REASONS = {
+        "OPEN", "MANUAL_CLEANUP_DEPRECATED", "FORCE_CLOSE_UNKNOWN", "OPEN_STALE",
+        "STALE_OPEN_TIMEOUT", "RESEARCH_SHADOW_CLOSED", "RESEARCH_OBSERVE",
+        "RESEARCH_SL", "RESEARCH_TP1",
+    }
     events = []
     for row in rows:
         try:
-            _sid = str(row["signal_id"] or "")
-            if _sid.startswith(("RES_", "RESEARCH_")):
-                continue
+            def _g(key, default=None):
+                try:
+                    return row[key]
+                except Exception:
+                    try:
+                        return row[key] if key in row.keys() else default
+                    except Exception:
+                        return default
 
+            sid = str(_g("signal_id") or "")
+            if not sid or sid.startswith(("RES_", "RESEARCH_")):
+                continue
+            er = str(_g("exit_reason") or "")
+            if er in _SKIP_REASONS or not er:
+                continue
+            mode = str(_g("mode") or "").upper()
+            if mode == "SHADOW":
+                continue
+            try:
+                pr = float(_g("pnl_r"))
+            except Exception:
+                continue
             feats = {}
-            _fh = str(row["feature_hash"] or "")
+            _fh = str(_g("feature_hash") or "")
             if _fh:
-                feats["feature_hash"] = _fh[-10:]
-            _mode = str(row["mode"] or "NORMAL")
-            if _mode and _mode != "NORMAL":
-                feats["mode"] = _mode
-            if not feats:
-                feats["cloud"] = True
+                feats["feature_hash"] = _fh[-10:] if len(_fh) > 10 else _fh
             ev = {
                 "event": "EXIT",
-                "timestamp": int(row["exit_timestamp"]),
-                "trade_id": row["signal_id"],
-                "symbol": row["symbol"],
-                "profit_r": float(row["pnl_r"] or 0.0),  # 主聚合仍会过滤 |R|>10
-                "mfe": row["max_forward_r"],
-                "mae": row["max_adverse_r"],
-                "regime": row["regime"] or "UNKNOWN",
+                "trade_id": sid,
+                "signal_id": sid,
+                "symbol": _g("symbol") or "UNK",
+                "direction": _g("direction") or "",
+                "profit_r": pr,
+                "pnl_r": pr,
+                "mfe": _g("max_forward_r"),
+                "mae": _g("max_adverse_r"),
+                "regime": _g("regime") or "UNKNOWN",
                 "features": feats,
-                "ev": row["p_win_calibrated"] if row["p_win_calibrated"] is not None else row["confidence"],
+                "mode": mode or "NORMAL",
+                "exit_reason": er,
+                "ev": _g("p_win_calibrated") if _g("p_win_calibrated") is not None else _g("confidence"),
                 "cloud_backfill": True,
             }
             events.append(ev)
@@ -166,8 +221,12 @@ def _backfill_from_cloud_v6_db(target_date: datetime, start: datetime, end: date
             continue
 
     if events:
-        slog.info(f"[DailyReport] 云端 v6_research.db 兜底读取 {len(events)} 笔已平仓记录")
+        try:
+            slog.info(f"[DailyReport] 云端 v6_research.db 兜底读取 {len(events)} 笔已平仓记录")
+        except Exception:
+            pass
     return events
+
 
 
 def _day_bounds_utc8(target_date: datetime = None):
@@ -264,6 +323,12 @@ def generate_daily_report(target_date: datetime = None) -> str:
     for ev in all_events:
         tid = str(ev.get('trade_id') or ev.get('signal_id') or '')
         if tid.startswith(('RES_', 'RESEARCH_')):
+            continue
+        # 影子模式 / 科研平仓不计入实盘日报
+        _er = str(ev.get('exit_reason') or '')
+        if _er in ('RESEARCH_SHADOW_CLOSED', 'RESEARCH_OBSERVE', 'RESEARCH_SL', 'RESEARCH_TP1'):
+            continue
+        if str(ev.get('mode') or '').upper() == 'SHADOW':
             continue
         pr = float(ev.get('profit_r') if ev.get('profit_r') is not None else (ev.get('pnl_r') or 0.0))
         # 脏 R 过滤：|R|>10 不计入主指标（仍可在 note 中暴露）
