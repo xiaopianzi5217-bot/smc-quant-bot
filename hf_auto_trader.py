@@ -178,6 +178,7 @@ _V56_ENGINE = V56_5_Engine(V565Config(
         "LIQUIDITY_SWEEP",
         "ORDERBLOCK_REACTION",
         "TREND_PULLBACK",
+        "FVG_TOUCH",  # 顺势回补 FVG：提高趋势行情捕获
     ),
     allow_tier2_if_strong=True,
     strong_tier2_score=50.0,       # Tier2 分数 >= 50 即可放行
@@ -2260,6 +2261,40 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
         result["action_route"] = "ABSOLUTE_DROP"
         return result
 
+    # ===== 【2026-09-21】统一趋势偏见：写入 result，供分级/蓄势/逆势过滤 =====
+    try:
+        from strategy.trend_bias import compute_trend_bias, direction_aligned
+        _tb = compute_trend_bias(result.get("features"), result)
+        result["trend_bias"] = _tb
+        result.setdefault("features", {})
+        if isinstance(result["features"], dict):
+            result["features"]["bias_score"] = _tb.get("bias_score")
+            result["features"]["direction_bias"] = _tb.get("direction_bias")
+        slog.info(
+            f"[{symbol}] TrendBias: score={_tb.get('bias_score')} "
+            f"dir={_tb.get('direction_bias')} strength={_tb.get('bias_strength')} "
+            f"reasons={_tb.get('bias_reasons')}"
+        )
+        # 强逆偏见：LIVE 满仓降为半仓或科研（不直接杀观察样本路径以外的一切）
+        _tdir = str(result.get("direction") or "")
+        _ok_al, _why_al = direction_aligned(_tdir, _tb, min_abs=25.0)
+        result["bias_aligned"] = _ok_al
+        result["bias_align_reason"] = _why_al
+        if not _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
+            # 强逆势：禁止满仓
+            if float(score or 0) >= 70:
+                score = min(float(score), 69.0)
+                result["v6_final_score"] = score
+                slog.warning(f"[{symbol}] TrendBias 强逆势降档: {_why_al} score→{score}")
+            # 顺势加分激励（封顶 +8）
+        elif _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
+            score = min(100.0, float(score or 0) + 8.0)
+            result["v6_final_score"] = score
+            result["score"] = score
+            slog.info(f"[{symbol}] TrendBias 顺势加分 +8 → score={score:.1f}")
+    except Exception as _tb_e:
+        slog.debug(f"[{symbol}] TrendBias 跳过: {_tb_e}")
+
     if score >= 70.0:
         result["v6_level"] = "A_GRADE"
         result["action_route"] = "LIVE_FULL_TRADE"
@@ -2731,32 +2766,74 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
             pass
         return False
 
-    # ===== 【2026-09-17】SQZ 释放门槛：仅约束 LIVE，不杀 RESEARCH =====
-    # V6_REQUIRE_SQZ_RELEASE=0 可全局关闭；默认开启
+    # ===== 【2026-09-17/21】SQZ 释放门槛 + 蓄势方向偏见半仓 =====
+    # V6_REQUIRE_SQZ_RELEASE=0 关闭释放要求；默认开启
+    # V6_SQUEEZE_BIAS_HALF=0 关闭蓄势半仓；默认开启
     import os as _os_sqz_live
     _req_sqz_live = str(_os_sqz_live.environ.get("V6_REQUIRE_SQZ_RELEASE", "1")).strip().lower() not in ("0", "false", "no", "off")
+    _allow_sqz_bias = str(_os_sqz_live.environ.get("V6_SQUEEZE_BIAS_HALF", "1")).strip().lower() not in ("0", "false", "no", "off")
     if route in ("LIVE_FULL_TRADE", "LIVE_HALF_TRADE") and _req_sqz_live:
         _feat_r = result.get("features") or {}
         _rel = bool(_feat_r.get("sqz_released"))
         _dur = int(_feat_r.get("sqz_duration") or 0)
-        # 仅看 released；duration 在部分行情下恒为 0（算法回看空窗），不再与 released 绑死
         if not _rel:
-            # 【2026-09-17】未释放：禁止 LIVE，且不写 RES 快照/不注册 tracker，避免垃圾行与 HF 抖动
-            slog.warning(
-                f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur} "
-                f"strength={_feat_r.get('sqz_strength')}) → 跳过实盘与科研落库"
-            )
-            result["action_route"] = "RESEARCH_SILENT"
-            result["v6_level"] = result.get("v6_level") or "OBSERVE_GRADE"
-            result["route_outcome"] = "SKIP_SQZ_NOT_RELEASED"
-            result["opened_live"] = False
-            result["mode"] = "SHADOW"
-            return False
+            # 蓄势区：用 HTF regime + SQZ 柱方向 + 交易方向 对齐后，允许半仓 LIVE（非猜下一根 K）
+            _bias_ok = False
+            _bias_why = ""
+            try:
+                from strategy.trend_bias import compute_trend_bias, direction_aligned
+                _tb2 = result.get("trend_bias") or compute_trend_bias(_feat_r, result)
+                _score_now = float(result.get("v6_final_score") or result.get("score") or score or 0)
+                _min_score = float(_os_sqz_live.environ.get("V6_SQUEEZE_BIAS_MIN_SCORE", "52") or 52)
+                _min_bias = float(_os_sqz_live.environ.get("V6_TREND_BIAS_MIN", "25") or 25)
+                _ok_al, _why_al = direction_aligned(str(result.get("direction") or ""), _tb2, min_abs=_min_bias)
+                _score_ok = _score_now >= _min_score
+                if not _score_ok:
+                    _bias_why = f"score={_score_now:.1f}<{_min_score}"
+                elif not _ok_al:
+                    _bias_why = _why_al
+                else:
+                    _bias_ok = bool(_allow_sqz_bias)
+                    _bias_why = f"TrendBias OK {_why_al} tb={_tb2.get('bias_score')}"
+            except Exception as _bias_e:
+                _bias_ok = False
+                _bias_why = f"bias异常:{_bias_e}"
+
+            if _bias_ok:
+                route = "LIVE_HALF_TRADE"
+                result["action_route"] = "LIVE_HALF_TRADE"
+                result["v6_level"] = result.get("v6_level") or "B_GRADE"
+                result["squeeze_bias_half"] = True
+                result["mode"] = "LIVE"
+                slog.info(
+                    f"[V6 分级路由 - SQZ蓄势半仓] {symbol} 未释放但方向偏见一致 "
+                    f"dir={result.get('direction')} regime={_feat_r.get('regime')} "
+                    f"hist_sign={_feat_r.get('sqz_hist_sign')} score={float(result.get('v6_final_score') or score or 0):.1f} "
+                    f"→ LIVE_HALF_TRADE"
+                )
+                # 落入下方正常开仓链路（半仓）
+            else:
+                slog.warning(
+                    f"[V6 分级路由 - SQZ] {symbol} LIVE 未释放(released={_rel} dur={_dur} "
+                    f"strength={_feat_r.get('sqz_strength')}) → 跳过实盘 "
+                    f"({_bias_why or '蓄势偏见未通过'})"
+                )
+                result["action_route"] = "RESEARCH_SILENT"
+                result["v6_level"] = result.get("v6_level") or "OBSERVE_GRADE"
+                result["route_outcome"] = "SKIP_SQZ_NOT_RELEASED"
+                result["opened_live"] = False
+                result["mode"] = "SHADOW"
+                return False
 
     trade_size = result["base_size"]
     if route == "LIVE_HALF_TRADE":
         trade_size *= 0.5
         result["size"] = trade_size
+    # 蓄势偏见半仓再乘 0.5 → 相对满仓约 25%，降低假突破成本
+    if result.get("squeeze_bias_half"):
+        trade_size *= 0.5
+        result["size"] = trade_size
+        slog.info(f"[V6 SQZ蓄势] {symbol} 仓位再降半 → size={trade_size}")
     sig_id = f"V6_{symbol.replace('/', '')}_{int(time.time())}"
     result["signal_id"] = sig_id
     result["mode"] = "LIVE"
