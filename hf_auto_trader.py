@@ -2505,21 +2505,43 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                 _c = sqlite3.connect(str(_dbp))
                 _c.row_factory = sqlite3.Row
                 _cur = _c.cursor()
-                # 先关闭残留科研虚拟 OPEN，避免永久占坑
+                # 仅关闭「超时且 Tracker 未跟踪」的科研 OPEN，避免抢写 RESEARCH_SL
                 try:
+                    from v6_data_engine import _active_research_signal_ids
+                    _active_rs = _active_research_signal_ids()
+                    _now_rs = int(time.time())
+                    _cut_rs = _now_rs - 7200
                     _cur.execute(
                         """
-                        UPDATE trade_snapshots
-                        SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
-                            pnl_r = COALESCE(pnl_r, 0.0)
+                        SELECT signal_id FROM trade_snapshots
                         WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
                           AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
-                        """
+                          AND COALESCE(timestamp, 0) < ?
+                        """,
+                        (_cut_rs,),
                     )
-                    if _cur.rowcount:
+                    _n_closed = 0
+                    for (_sid_rs,) in _cur.fetchall():
+                        if _sid_rs in _active_rs:
+                            continue
+                        _cur.execute(
+                            """
+                            UPDATE trade_snapshots
+                            SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                                pnl_r = COALESCE(pnl_r, 0.0),
+                                exit_timestamp = COALESCE(exit_timestamp, ?)
+                            WHERE signal_id = ?
+                              AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                            """,
+                            (_now_rs, _sid_rs),
+                        )
+                        if _cur.rowcount and _cur.rowcount > 0:
+                            _n_closed += int(_cur.rowcount)
+                    if _n_closed:
                         _c.commit()
                         slog.info(
-                            f"[V6 分级路由] 清理 research.db 科研幽灵 OPEN: {_cur.rowcount} 笔"
+                            f"[V6 分级路由] 清理超时科研 OPEN: {_n_closed} 笔 "
+                            f"(skip_active={len(_active_rs)})"
                         )
                 except Exception as _cl_e:
                     slog.warning(f"[V6 分级路由] RES_ 清理跳过: {_cl_e}")

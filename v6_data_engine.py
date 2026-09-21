@@ -255,23 +255,42 @@ def cleanup_dirty_trade_snapshots() -> dict:
         )
         # 关闭科研 OPEN
         try:
+            # 与 close_research_open_snapshots 一致：仅超时且非 Tracker 活跃
             _now = int(time.time())
+            _cutoff = _now - 7200
+            _active = _active_research_signal_ids()
             cursor.execute(
                 """
-                UPDATE trade_snapshots
-                SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
-                    exit_timestamp = COALESCE(exit_timestamp, ?),
-                    exit_price = COALESCE(exit_price, entry_price, 0),
-                    pnl_r = COALESCE(pnl_r, 0.0)
+                SELECT signal_id FROM trade_snapshots
                 WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
                   AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+                  AND COALESCE(timestamp, 0) < ?
                 """,
-                (_now,),
+                (_cutoff,),
             )
-            _rc = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            _rc = 0
+            for (_sid,) in cursor.fetchall():
+                if _sid in _active:
+                    continue
+                cursor.execute(
+                    """
+                    UPDATE trade_snapshots
+                    SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                        exit_timestamp = COALESCE(exit_timestamp, ?),
+                        exit_price = COALESCE(exit_price, entry_price, 0),
+                        pnl_r = COALESCE(pnl_r, 0.0)
+                    WHERE signal_id = ?
+                      AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                    """,
+                    (_now, _sid),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    _rc += int(cursor.rowcount)
             if _rc:
                 stats["research_closed"] = _rc
-                slog.info(f"[V6 DataEngine] 清理中关闭科研 OPEN: {_rc} 笔")
+                slog.info(
+                    f"[V6 DataEngine] 清理中关闭超时科研 OPEN: {_rc} 笔 (skip_active={len(_active)})"
+                )
         except Exception as _rc_e:
             slog.warning(f"[V6 DataEngine] 科研 OPEN 清理失败: {_rc_e}")
         conn.commit()
@@ -348,33 +367,70 @@ def reconcile_stale_open_snapshots(max_age_sec: int = 14400, default_pnl_r: floa
     return closed
 
 
-def close_research_open_snapshots() -> int:
-    """关闭所有仍为 OPEN 的 RES_/RESEARCH_ 科研虚拟单，避免占坑与日报 OPEN 虚高。"""
+def _active_research_signal_ids() -> set:
+    """ResearchTracker 内存中仍在跟踪的 signal_id，清理时必须跳过。"""
+    try:
+        from utils.research_tracker import get_research_tracker
+        tr = get_research_tracker()
+        ids = set()
+        for p in tr.list_active() or []:
+            sid = (p.get("signal_id") if isinstance(p, dict) else None) or ""
+            if sid:
+                ids.add(str(sid))
+        return ids
+    except Exception:
+        return set()
+
+
+def close_research_open_snapshots(min_age_sec: int = 7200) -> int:
+    """关闭「超时且 Tracker 未跟踪」的 RES_/RESEARCH_ OPEN。
+
+    避免与 ResearchTracker 虚拟撮合抢写（否则 RESEARCH_SL 回写会未命中）。
+    """
     db_path = _get_db_path()
     if not db_path.exists():
         return 0
     closed = 0
     try:
         now = int(time.time())
-        conn = sqlite3.connect(str(db_path))
+        cutoff = now - int(min_age_sec)
+        active = _active_research_signal_ids()
+        conn = sqlite3.connect(str(db_path), timeout=30)
         cursor = conn.cursor()
         cursor.execute(
             """
-            UPDATE trade_snapshots
-            SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
-                exit_timestamp = COALESCE(exit_timestamp, ?),
-                exit_price = COALESCE(exit_price, entry_price, 0),
-                pnl_r = COALESCE(pnl_r, 0.0)
+            SELECT signal_id FROM trade_snapshots
             WHERE (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
               AND (signal_id LIKE 'RES_%' OR signal_id LIKE 'RESEARCH_%')
+              AND COALESCE(timestamp, 0) < ?
             """,
-            (now,),
+            (cutoff,),
         )
-        closed = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        rows = [r[0] for r in cursor.fetchall() if r and r[0]]
+        for sid in rows:
+            if sid in active:
+                continue
+            cursor.execute(
+                """
+                UPDATE trade_snapshots
+                SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                    exit_timestamp = COALESCE(exit_timestamp, ?),
+                    exit_price = COALESCE(exit_price, entry_price, 0),
+                    pnl_r = COALESCE(pnl_r, 0.0)
+                WHERE signal_id = ?
+                  AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
+                """,
+                (now, sid),
+            )
+            if cursor.rowcount and cursor.rowcount > 0:
+                closed += int(cursor.rowcount)
         conn.commit()
         conn.close()
         if closed:
-            slog.info(f"[V6 DataEngine] 关闭科研 OPEN 幽灵: {closed} 笔 -> RESEARCH_SHADOW_CLOSED")
+            slog.info(
+                f"[V6 DataEngine] 关闭超时科研 OPEN: {closed} 笔 "
+                f"(min_age={min_age_sec}s, skip_active={len(active)}) -> RESEARCH_SHADOW_CLOSED"
+            )
             if IS_HF_SPACE:
                 try:
                     request_push_database_to_hub()
@@ -841,13 +897,40 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
             _ma = -1.0 if _ma < 0 else min(10.0, _ma)
         conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
-        # 仅更新仍为 OPEN 的行，已平仓的禁止再改 MAE/MFE
-        cursor.execute("""
-            UPDATE trade_snapshots 
-            SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?, max_forward_r = ?, max_adverse_r = ?
-            WHERE signal_id = ? AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
-        """, (exit_reason, int(exit_timestamp or int(time.time())), exit_price or 0.0, float(pnl_r), _mf, _ma, signal_id))
-        # 【修复20260904】先读取 rowcount 再 commit，避免假「已回写」
+        # OPEN 可更新；RESEARCH_SHADOW_CLOSED 且 pnl≈0 允许被真实 RESEARCH_* 覆盖（修复幽灵清理抢写）
+        _sid = str(signal_id or "")
+        _er = str(exit_reason or "")
+        cursor.execute(
+            """
+            UPDATE trade_snapshots
+            SET exit_reason = ?, exit_timestamp = ?, exit_price = ?, pnl_r = ?,
+                max_forward_r = ?, max_adverse_r = ?
+            WHERE signal_id = ?
+              AND (
+                    exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = ''
+                 OR (
+                        exit_reason = 'RESEARCH_SHADOW_CLOSED'
+                    AND (pnl_r IS NULL OR ABS(COALESCE(pnl_r, 0)) < 0.001)
+                    AND (
+                           ? LIKE 'RES_%' OR ? LIKE 'RESEARCH_%'
+                        OR ? IN ('RESEARCH_SL','RESEARCH_TP1','RESEARCH_TP2','RESEARCH_TIMEOUT')
+                    )
+                 )
+              )
+            """,
+            (
+                exit_reason,
+                int(exit_timestamp or int(time.time())),
+                exit_price or 0.0,
+                float(pnl_r),
+                _mf,
+                _ma,
+                signal_id,
+                _sid,
+                _sid,
+                _er,
+            ),
+        )
         _rows = cursor.rowcount
         conn.commit()
         conn.close()
