@@ -126,3 +126,71 @@ def direction_aligned(trade_direction: str, bias: Dict[str, Any], min_abs: float
     if is_short and bs > 0:
         return False, f"空单逆偏见 bias={bs} ({db})"
     return False, f"未对齐 dir={trade_direction} bias={bs}"
+
+
+def size_mult_from_bias(
+    trade_direction: str,
+    bias: Dict[str, Any] | None,
+    *,
+    regime: str = "",
+) -> tuple[float, str]:
+    """按偏见强度与对齐度返回仓位乘数 (0~1) 与原因。
+
+    规则（保守、可解释）：
+    - 强逆势 |score|>=40 且反向 → 0.0（禁止 LIVE 满仓路径由调用方处理）
+    - 弱偏见 / 中性 → 0.5
+    - 中等对齐 |score| 25~50 → 0.75
+    - 强对齐 |score|>=50 → 1.0
+    - RANGE 再乘 0.75（震荡降仓）
+    """
+    bias = bias or {}
+    try:
+        bs = float(bias.get("bias_score") or 0.0)
+    except Exception:
+        bs = 0.0
+    d = str(trade_direction or "").strip().lower()
+    is_long = d in ("long", "buy")
+    is_short = d in ("short", "sell")
+    aligned = (is_long and bs >= 25) or (is_short and bs <= -25)
+    counter = (is_long and bs <= -40) or (is_short and bs >= 40)
+    if counter:
+        return 0.0, f"强逆势 bias={bs}"
+    if not aligned:
+        mult = 0.5
+        why = f"偏见弱/中性 bias={bs}"
+    elif abs(bs) >= 50:
+        mult = 1.0
+        why = f"强顺势 bias={bs}"
+    else:
+        mult = 0.75
+        why = f"中等顺势 bias={bs}"
+    reg = str(regime or bias.get("regime") or "").upper()
+    if reg in ("RANGE", "CHOP"):
+        mult *= 0.75
+        why += "+RANGE降仓"
+    mult = max(0.0, min(1.0, float(mult)))
+    return mult, why
+
+
+def bias_gate_for_live(
+    trade_direction: str,
+    bias: Dict[str, Any] | None,
+    *,
+    min_abs: float = 25.0,
+) -> tuple[bool, str]:
+    """LIVE 是否允许：强逆势直接否；其余交由分数/EV 决定。"""
+    bias = bias or {}
+    try:
+        bs = float(bias.get("bias_score") or 0.0)
+    except Exception:
+        bs = 0.0
+    d = str(trade_direction or "").strip().lower()
+    is_long = d in ("long", "buy")
+    is_short = d in ("short", "sell")
+    if is_long and bs <= -40:
+        return False, f"LIVE禁止强逆势做多 bias={bs}"
+    if is_short and bs >= 40:
+        return False, f"LIVE禁止强逆势做空 bias={bs}"
+    if abs(bs) < float(min_abs):
+        return True, f"偏见弱放行半仓路径 bias={bs}"  # 不硬杀，由 size_mult 降仓
+    return True, f"偏见门控通过 bias={bs}"

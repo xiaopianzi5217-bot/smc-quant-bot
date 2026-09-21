@@ -801,6 +801,9 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
                 ("sqz_vol_ratio", "REAL DEFAULT 1.0"),
                 ("sqz_volume_confirmed", "INTEGER DEFAULT 0"),
                 ("raw_features_json", "TEXT"),
+                ("bias_score", "REAL"),
+                ("direction_bias", "TEXT"),
+                ("bias_aligned", "INTEGER DEFAULT 0"),
             ):
                 try:
                     _ensure_column(c0, "trade_snapshots", col, defn)
@@ -815,6 +818,24 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         
         signal_id = result.get("signal_id") or f"{result['symbol']}_{int(time.time())}"
         features = result.get("features", {})
+        if not isinstance(features, dict):
+            features = {}
+        else:
+            features = dict(features)
+        # 确保 TrendBias 进入 raw_features_json（即使上游漏写）
+        try:
+            _tb = result.get("trend_bias")
+            if isinstance(_tb, dict):
+                features.setdefault("bias_score", _tb.get("bias_score"))
+                features.setdefault("direction_bias", _tb.get("direction_bias"))
+                features.setdefault("bias_strength", _tb.get("bias_strength"))
+            if result.get("bias_aligned") is not None:
+                features.setdefault("bias_aligned", bool(result.get("bias_aligned")))
+            if result.get("bias_size_mult") is not None:
+                features.setdefault("bias_size_mult", result.get("bias_size_mult"))
+        except Exception:
+            pass
+        result["features"] = features
         feat_str = ",".join([f"{k}={v}" for k, v in sorted(features.items()) if k != "regime"])
         feat_hash = hashlib.md5(feat_str.encode("utf-8")).hexdigest()[:8]
         
@@ -865,6 +886,47 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         conn.commit()
         conn.close()
         slog.info(f"[V6 DataEngine] 开单高维快照已锁定 -> {signal_id}")
+        # 补充写入 bias 列（旧库无列则 _ensure 后 UPDATE，失败静默）
+        try:
+            _bs = None
+            _dbias = None
+            _bal = None
+            if isinstance(features, dict):
+                _bs = features.get("bias_score")
+                _dbias = features.get("direction_bias")
+                _bal = features.get("bias_aligned")
+            if _bs is None and isinstance(result.get("trend_bias"), dict):
+                _bs = result["trend_bias"].get("bias_score")
+                _dbias = result["trend_bias"].get("direction_bias")
+            if _bal is None:
+                _bal = result.get("bias_aligned")
+            conn2 = sqlite3.connect(str(_get_db_path()), timeout=30)
+            c2 = conn2.cursor()
+            for col, defn in (
+                ("bias_score", "REAL"),
+                ("direction_bias", "TEXT"),
+                ("bias_aligned", "INTEGER DEFAULT 0"),
+            ):
+                try:
+                    _ensure_column(c2, "trade_snapshots", col, defn)
+                except Exception:
+                    pass
+            c2.execute(
+                "UPDATE trade_snapshots SET bias_score=?, direction_bias=?, bias_aligned=? WHERE signal_id=?",
+                (
+                    float(_bs) if _bs is not None else None,
+                    str(_dbias) if _dbias is not None else None,
+                    1 if _bal else 0,
+                    signal_id,
+                ),
+            )
+            conn2.commit()
+            conn2.close()
+        except Exception as _bias_db_e:
+            try:
+                slog.debug(f"[V6 DataEngine] bias 列回写跳过: {_bias_db_e}")
+            except Exception:
+                pass
         
         if IS_HF_SPACE:
             # 【2026-09-17】禁止开仓/科研快照同步全量 push，统一走 120s 节流线程，避免 HF 429

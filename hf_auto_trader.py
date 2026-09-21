@@ -2261,17 +2261,23 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
         result["action_route"] = "ABSOLUTE_DROP"
         return result
 
-    # ===== 【2026-09-21】统一趋势偏见：写入 result，供分级/蓄势/逆势过滤 =====
+    # ===== 【2026-09-21】统一趋势偏见：写入 result，供分级/蓄势/仓位/逆势过滤 =====
     # 注意：本函数仅有 result 入参，禁止使用未定义的 symbol
     try:
-        from strategy.trend_bias import compute_trend_bias, direction_aligned
+        from strategy.trend_bias import (
+            compute_trend_bias,
+            direction_aligned,
+            size_mult_from_bias,
+            bias_gate_for_live,
+        )
         _sym = str(result.get("symbol") or "?")
         _tb = compute_trend_bias(result.get("features"), result)
         result["trend_bias"] = _tb
-        result.setdefault("features", {})
-        if isinstance(result["features"], dict):
-            result["features"]["bias_score"] = _tb.get("bias_score")
-            result["features"]["direction_bias"] = _tb.get("direction_bias")
+        if not isinstance(result.get("features"), dict):
+            result["features"] = {}
+        result["features"]["bias_score"] = _tb.get("bias_score")
+        result["features"]["direction_bias"] = _tb.get("direction_bias")
+        result["features"]["bias_strength"] = _tb.get("bias_strength")
         slog.info(
             f"[{_sym}] TrendBias: score={_tb.get('bias_score')} "
             f"dir={_tb.get('direction_bias')} strength={_tb.get('bias_strength')} "
@@ -2281,7 +2287,27 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
         _ok_al, _why_al = direction_aligned(_tdir, _tb, min_abs=25.0)
         result["bias_aligned"] = _ok_al
         result["bias_align_reason"] = _why_al
-        if not _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
+        _gate_ok, _gate_why = bias_gate_for_live(_tdir, _tb, min_abs=25.0)
+        result["bias_gate_ok"] = _gate_ok
+        result["bias_gate_reason"] = _gate_why
+        _sm, _sm_why = size_mult_from_bias(
+            _tdir, _tb, regime=str(_tb.get("regime") or result.get("regime") or "")
+        )
+        # 与既有 size_mult 取更严（更小）
+        try:
+            _prev_sm = float(result.get("size_mult") or 1.0)
+        except Exception:
+            _prev_sm = 1.0
+        result["size_mult"] = min(_prev_sm, float(_sm) if _sm > 0 else _prev_sm)
+        result["bias_size_mult"] = float(_sm)
+        result["bias_size_reason"] = _sm_why
+        if not _gate_ok:
+            # 强逆势：不允许走满仓 LIVE；压到观察档分界以下
+            score = min(float(score or 0), 49.0)
+            result["v6_final_score"] = score
+            result["score"] = score
+            slog.warning(f"[{_sym}] TrendBias LIVE门控拒绝: {_gate_why} score→{score}")
+        elif not _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
             if float(score or 0) >= 70:
                 score = min(float(score), 69.0)
                 result["v6_final_score"] = score
@@ -2291,8 +2317,15 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
             result["v6_final_score"] = score
             result["score"] = score
             slog.info(f"[{_sym}] TrendBias 顺势加分 +8 → score={score:.1f}")
+        slog.info(
+            f"[{_sym}] TrendBias 仓位: size_mult={result.get('size_mult')} "
+            f"bias_sm={_sm} ({_sm_why})"
+        )
     except Exception as _tb_e:
-        slog.debug(f"[{result.get('symbol', '?')}] TrendBias 跳过: {_tb_e}")
+        try:
+            slog.debug(f"[{result.get('symbol', '?')}] TrendBias 跳过: {_tb_e}")
+        except Exception:
+            pass
 
     if score >= 70.0:
         result["v6_level"] = "A_GRADE"

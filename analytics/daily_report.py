@@ -248,6 +248,155 @@ def _day_bounds_utc8(target_date: datetime = None):
     return start, end, start_local.strftime("%Y-%m-%d")
 
 
+
+def _bias_stats_from_v6_db(start: datetime, end: datetime) -> dict:
+    """从 v6_research.db 统计当日已平仓单的 TrendBias 对齐表现（容错、不抛）。"""
+    out = {
+        "n_with_bias": 0,
+        "n_aligned": 0,
+        "n_aligned_win": 0,
+        "n_counter": 0,
+        "n_counter_win": 0,
+        "n_strong": 0,
+        "n_strong_win": 0,
+        "aligned_sum_r": 0.0,
+        "counter_sum_r": 0.0,
+        "strong_sum_r": 0.0,
+    }
+    try:
+        db_candidates = [
+            Path("data/v6_research.db"),
+            Path("/app/data/v6_research.db"),
+            Path(__file__).resolve().parent.parent / "data" / "v6_research.db",
+        ]
+        db_path = next((p for p in db_candidates if p.exists()), None)
+        if db_path is None:
+            return out
+        start_ts = int(calendar.timegm(start.timetuple()))
+        end_ts = int(calendar.timegm(end.timetuple()))
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        try:
+            cur.execute("PRAGMA table_info(trade_snapshots)")
+            cols = {str(r[1]) for r in cur.fetchall()}
+        except Exception:
+            conn.close()
+            return out
+        if "pnl_r" not in cols:
+            conn.close()
+            return out
+        select_parts = ["signal_id", "direction", "pnl_r", "exit_reason"]
+        for c in ("raw_features_json", "bias_score", "direction_bias", "bias_aligned", "mode", "exit_timestamp"):
+            if c in cols:
+                select_parts.append(c)
+        sql = (
+            f"SELECT {', '.join(select_parts)} FROM trade_snapshots "
+            "WHERE exit_reason IS NOT NULL AND exit_reason NOT IN ('OPEN', '') "
+            "AND pnl_r IS NOT NULL"
+        )
+        rows = []
+        try:
+            if "exit_timestamp" in cols:
+                cur.execute(
+                    sql + " AND exit_timestamp IS NOT NULL AND exit_timestamp >= ? AND exit_timestamp < ?",
+                    (start_ts, end_ts),
+                )
+            else:
+                cur.execute(sql)
+            rows = cur.fetchall()
+        except Exception:
+            try:
+                cur.execute(sql)
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
+        conn.close()
+        for row in rows:
+            try:
+                sid = str(row["signal_id"] or "")
+                reason = str(row["exit_reason"] or "").upper()
+                if sid.startswith("RES_") or "RESEARCH" in reason or "SHADOW" in reason:
+                    try:
+                        if abs(float(row["pnl_r"])) < 1e-9:
+                            continue
+                    except Exception:
+                        continue
+                if "mode" in row.keys() and str(row["mode"] or "").upper() == "SHADOW":
+                    try:
+                        if abs(float(row["pnl_r"])) < 1e-9:
+                            continue
+                    except Exception:
+                        continue
+                pnl = float(row["pnl_r"])
+                direction = str(row["direction"] or "").lower()
+                bs = None
+                dbias = None
+                aligned_flag = None
+                if "bias_score" in row.keys() and row["bias_score"] is not None:
+                    try:
+                        bs = float(row["bias_score"])
+                    except Exception:
+                        bs = None
+                if "direction_bias" in row.keys() and row["direction_bias"] is not None:
+                    dbias = str(row["direction_bias"])
+                if "bias_aligned" in row.keys() and row["bias_aligned"] is not None:
+                    try:
+                        aligned_flag = bool(int(row["bias_aligned"]))
+                    except Exception:
+                        aligned_flag = bool(row["bias_aligned"])
+                if (bs is None or dbias is None) and "raw_features_json" in row.keys() and row["raw_features_json"]:
+                    try:
+                        feat = json.loads(row["raw_features_json"])
+                        if isinstance(feat, dict):
+                            if bs is None and feat.get("bias_score") is not None:
+                                bs = float(feat.get("bias_score"))
+                            if dbias is None and feat.get("direction_bias") is not None:
+                                dbias = str(feat.get("direction_bias"))
+                            if aligned_flag is None and feat.get("bias_aligned") is not None:
+                                aligned_flag = bool(feat.get("bias_aligned"))
+                    except Exception:
+                        pass
+                if bs is None and not dbias:
+                    continue
+                out["n_with_bias"] += 1
+                is_long = direction in ("long", "buy")
+                is_short = direction in ("short", "sell")
+                if aligned_flag is None:
+                    if bs is not None:
+                        aligned_flag = (is_long and bs >= 25) or (is_short and bs <= -25)
+                    elif dbias:
+                        aligned_flag = (is_long and str(dbias).upper() == "LONG") or (
+                            is_short and str(dbias).upper() == "SHORT"
+                        )
+                    else:
+                        aligned_flag = False
+                counter = False
+                if bs is not None:
+                    counter = (is_long and bs <= -40) or (is_short and bs >= 40)
+                win = pnl > 0
+                if aligned_flag:
+                    out["n_aligned"] += 1
+                    out["aligned_sum_r"] += pnl
+                    if win:
+                        out["n_aligned_win"] += 1
+                if counter:
+                    out["n_counter"] += 1
+                    out["counter_sum_r"] += pnl
+                    if win:
+                        out["n_counter_win"] += 1
+                if bs is not None and abs(bs) >= 50:
+                    out["n_strong"] += 1
+                    out["strong_sum_r"] += pnl
+                    if win:
+                        out["n_strong_win"] += 1
+            except Exception:
+                continue
+    except Exception:
+        return out
+    return out
+
+
 def generate_daily_report(target_date: datetime = None) -> str:
     start, end, date_str = _day_bounds_utc8(target_date)
 
@@ -503,6 +652,47 @@ def generate_daily_report(target_date: datetime = None) -> str:
                 )
     except Exception:
         report.append("EV stats unavailable")
+
+    # ---- TrendBias 对齐统计 ----
+    try:
+        _bst = _bias_stats_from_v6_db(start, end)
+        report.append("")
+        report.append("TrendBias 统计:")
+        if int(_bst.get("n_with_bias") or 0) <= 0:
+            report.append("  样本不足（当日平仓无 bias_score / features）")
+        else:
+            na = int(_bst.get("n_aligned") or 0)
+            naw = int(_bst.get("n_aligned_win") or 0)
+            nc = int(_bst.get("n_counter") or 0)
+            ncw = int(_bst.get("n_counter_win") or 0)
+            ns = int(_bst.get("n_strong") or 0)
+            nsw = int(_bst.get("n_strong_win") or 0)
+            report.append(f"  含偏见字段: {_bst.get('n_with_bias')}")
+            if na > 0:
+                report.append(
+                    f"  顺势对齐: {na} 胜={naw} WR={round(100.0 * naw / na, 1)}% "
+                    f"sum_R={round(float(_bst.get('aligned_sum_r') or 0), 3)}"
+                )
+            else:
+                report.append("  顺势对齐: 0")
+            if nc > 0:
+                report.append(
+                    f"  强逆势: {nc} 胜={ncw} WR={round(100.0 * ncw / nc, 1)}% "
+                    f"sum_R={round(float(_bst.get('counter_sum_r') or 0), 3)}"
+                )
+            else:
+                report.append("  强逆势: 0")
+            if ns > 0:
+                report.append(
+                    f"  强偏见|score|>=50: {ns} 胜={nsw} WR={round(100.0 * nsw / ns, 1)}% "
+                    f"sum_R={round(float(_bst.get('strong_sum_r') or 0), 3)}"
+                )
+    except Exception as _bias_rep_e:
+        try:
+            report.append("")
+            report.append(f"TrendBias 统计: 跳过 ({_bias_rep_e})")
+        except Exception:
+            pass
 
     out = "\n".join(report)
     out_dir = Path('reports')
