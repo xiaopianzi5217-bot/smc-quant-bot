@@ -2262,8 +2262,10 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
         return result
 
     # ===== 【2026-09-21】统一趋势偏见：写入 result，供分级/蓄势/逆势过滤 =====
+    # 注意：本函数仅有 result 入参，禁止使用未定义的 symbol
     try:
         from strategy.trend_bias import compute_trend_bias, direction_aligned
+        _sym = str(result.get("symbol") or "?")
         _tb = compute_trend_bias(result.get("features"), result)
         result["trend_bias"] = _tb
         result.setdefault("features", {})
@@ -2271,29 +2273,26 @@ def evaluate_signal_v6_routing(result: dict) -> dict:
             result["features"]["bias_score"] = _tb.get("bias_score")
             result["features"]["direction_bias"] = _tb.get("direction_bias")
         slog.info(
-            f"[{symbol}] TrendBias: score={_tb.get('bias_score')} "
+            f"[{_sym}] TrendBias: score={_tb.get('bias_score')} "
             f"dir={_tb.get('direction_bias')} strength={_tb.get('bias_strength')} "
             f"reasons={_tb.get('bias_reasons')}"
         )
-        # 强逆偏见：LIVE 满仓降为半仓或科研（不直接杀观察样本路径以外的一切）
         _tdir = str(result.get("direction") or "")
         _ok_al, _why_al = direction_aligned(_tdir, _tb, min_abs=25.0)
         result["bias_aligned"] = _ok_al
         result["bias_align_reason"] = _why_al
         if not _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
-            # 强逆势：禁止满仓
             if float(score or 0) >= 70:
                 score = min(float(score), 69.0)
                 result["v6_final_score"] = score
-                slog.warning(f"[{symbol}] TrendBias 强逆势降档: {_why_al} score→{score}")
-            # 顺势加分激励（封顶 +8）
+                slog.warning(f"[{_sym}] TrendBias 强逆势降档: {_why_al} score→{score}")
         elif _ok_al and abs(float(_tb.get("bias_score") or 0)) >= 40:
             score = min(100.0, float(score or 0) + 8.0)
             result["v6_final_score"] = score
             result["score"] = score
-            slog.info(f"[{symbol}] TrendBias 顺势加分 +8 → score={score:.1f}")
+            slog.info(f"[{_sym}] TrendBias 顺势加分 +8 → score={score:.1f}")
     except Exception as _tb_e:
-        slog.debug(f"[{symbol}] TrendBias 跳过: {_tb_e}")
+        slog.debug(f"[{result.get('symbol', '?')}] TrendBias 跳过: {_tb_e}")
 
     if score >= 70.0:
         result["v6_level"] = "A_GRADE"
