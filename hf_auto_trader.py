@@ -2594,8 +2594,9 @@ def check_and_open_v6_with_routing(result: dict) -> bool:
                         _cur.execute(
                             """
                             UPDATE trade_snapshots
-                            SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
-                                pnl_r = COALESCE(pnl_r, 0.0),
+                            SET exit_reason = 'RESEARCH_SHADOW_CANCELLED',
+                                pnl_r = NULL,
+                                exit_price = COALESCE(exit_price, 0.0),
                                 exit_timestamp = COALESCE(exit_timestamp, ?)
                             WHERE signal_id = ?
                               AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
@@ -4229,15 +4230,15 @@ def _trigger_stop_loss(symbol: str, pos: dict, current_price: float, reason: str
         else:
             pnl_r = (entry - current_price) / risk
     # 硬钳制：单笔 |pnl_r| > 10 视为数据异常（通常 1R 分母错误）
-    if abs(pnl_r) > 10.0:
+    if abs(pnl_r) > 5.0:
         try:
             slog.error(
-                f"[{symbol}] 异常 pnl_r={pnl_r:.2f} 已钳制 risk={risk:.6f} "
+                f"[{symbol}] 异常 pnl_r={pnl_r:.2f} 已钳制±5 risk={risk:.6f} "
                 f"entry={entry} sl={sl} initial_risk={pos.get('initial_risk')} price={current_price}"
             )
         except Exception:
             pass
-        pnl_r = max(-10.0, min(10.0, pnl_r))
+        pnl_r = max(-5.0, min(5.0, pnl_r))
 
     max_fwd = float(pos.get("audit_forward") or 0.0)
     max_adv = float(pos.get("audit_adverse") or 0.0)

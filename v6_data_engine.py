@@ -71,6 +71,32 @@ def _get_db_path():
     return Path(DB_PATH) if not isinstance(DB_PATH, Path) else DB_PATH
 
 
+
+def _recompute_pnl_r(entry, initial_sl, exit_price, direction: str) -> float | None:
+    """用开仓快照重算 R：分母固定为 |entry - initial_sl|，禁止移动止损分母。"""
+    try:
+        entry = float(entry)
+        initial_sl = float(initial_sl)
+        exit_price = float(exit_price)
+    except (TypeError, ValueError):
+        return None
+    if entry <= 0 or exit_price <= 0:
+        return None
+    risk = abs(entry - initial_sl)
+    floor = abs(entry) * 0.0005
+    if risk < floor:
+        risk = floor
+    if risk < 1e-12:
+        return None
+    d = str(direction or "").lower()
+    if d.startswith("long") or d in ("buy", "b"):
+        raw = (exit_price - entry) / risk
+    else:
+        raw = (entry - exit_price) / risk
+    # 合理交易 R 很少超过 ±5；超出多为分母错误
+    return float(max(-5.0, min(5.0, raw)))
+
+
 def make_json_serializable(obj):
     if isinstance(obj, (np.bool_, np.bool)):
         return bool(obj)
@@ -233,18 +259,47 @@ def cleanup_dirty_trade_snapshots() -> dict:
                OR max_forward_r > 5.0 OR max_forward_r < 0.0
             """
         )
+        # 【2026-09-28】异常 R：优先用 entry/initial_sl/exit_price 重算，否则钳制到 ±5
+        _re_n = 0
+        try:
+            cursor.execute(
+                """
+                SELECT signal_id, entry_price, initial_sl, exit_price, direction, pnl_r
+                FROM trade_snapshots
+                WHERE pnl_r IS NOT NULL
+                  AND (ABS(pnl_r) > 5.0 OR pnl_r > 4.5)
+                  AND entry_price IS NOT NULL AND initial_sl IS NOT NULL
+                  AND exit_price IS NOT NULL AND exit_price > 0
+                """
+            )
+            for _sid, _ep, _sl, _xp, _dir, _old in cursor.fetchall():
+                _new = _recompute_pnl_r(_ep, _sl, _xp, _dir or "")
+                if _new is None:
+                    continue
+                if abs(float(_old) - _new) > 0.15:
+                    cursor.execute(
+                        "UPDATE trade_snapshots SET pnl_r = ? WHERE signal_id = ?",
+                        (round(_new, 4), _sid),
+                    )
+                    _re_n += 1
+        except Exception as _re_e:
+            try:
+                slog.warning(f"[V6 DataEngine] pnl 重算跳过: {_re_e}")
+            except Exception:
+                pass
         cursor.execute(
             """
             UPDATE trade_snapshots
             SET pnl_r = CASE
-                    WHEN pnl_r > 10.0 THEN 10.0
-                    WHEN pnl_r < -10.0 THEN -10.0
+                    WHEN pnl_r > 5.0 THEN 5.0
+                    WHEN pnl_r < -5.0 THEN -5.0
                     ELSE pnl_r
                 END
-            WHERE pnl_r IS NOT NULL AND (pnl_r > 10.0 OR pnl_r < -10.0)
+            WHERE pnl_r IS NOT NULL AND (pnl_r > 5.0 OR pnl_r < -5.0)
             """
         )
-        stats["clamped"] = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        stats["clamped"] = (cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0) + _re_n
+        stats["pnl_recomputed"] = _re_n
         cursor.execute(
             """
             UPDATE trade_snapshots
@@ -275,10 +330,10 @@ def cleanup_dirty_trade_snapshots() -> dict:
                 cursor.execute(
                     """
                     UPDATE trade_snapshots
-                    SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                    SET exit_reason = 'RESEARCH_SHADOW_CANCELLED',
                         exit_timestamp = COALESCE(exit_timestamp, ?),
                         exit_price = COALESCE(exit_price, entry_price, 0),
-                        pnl_r = COALESCE(pnl_r, 0.0)
+                        pnl_r = NULL
                     WHERE signal_id = ?
                       AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
                     """,
@@ -413,10 +468,10 @@ def close_research_open_snapshots(min_age_sec: int = 7200) -> int:
             cursor.execute(
                 """
                 UPDATE trade_snapshots
-                SET exit_reason = 'RESEARCH_SHADOW_CLOSED',
+                SET exit_reason = 'RESEARCH_SHADOW_CANCELLED',
                     exit_timestamp = COALESCE(exit_timestamp, ?),
                     exit_price = COALESCE(exit_price, entry_price, 0),
-                    pnl_r = COALESCE(pnl_r, 0.0)
+                    pnl_r = NULL
                 WHERE signal_id = ?
                   AND (exit_reason = 'OPEN' OR exit_reason IS NULL OR exit_reason = '')
                 """,
@@ -429,7 +484,7 @@ def close_research_open_snapshots(min_age_sec: int = 7200) -> int:
         if closed:
             slog.info(
                 f"[V6 DataEngine] 关闭超时科研 OPEN: {closed} 笔 "
-                f"(min_age={min_age_sec}s, skip_active={len(active)}) -> RESEARCH_SHADOW_CLOSED"
+                f"(min_age={min_age_sec}s, skip_active={len(active)}) -> RESEARCH_SHADOW_CANCELLED"
             )
             if IS_HF_SPACE:
                 try:
@@ -935,18 +990,15 @@ def record_open_snapshot(result: dict, kelly_size: float = 0.0):
         slog.error(f"[V6 DataEngine] 记录开单快照失败: {e}")
 
 def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd: float = 0.0, max_adv: float = 0.0, exit_timestamp: int = None, exit_price: float = None):
-    # 入库前钳制异常 R（保本后分母错误等）
-    try:
-        pnl_r = float(pnl_r)
-        if abs(pnl_r) > 10.0:
-            slog.warning(f"[V6 DataEngine] pnl_r 异常钳制 {pnl_r:.2f} -> ±10 signal_id={signal_id}")
-            pnl_r = max(-10.0, min(10.0, pnl_r))
-    except Exception:
-        pnl_r = 0.0
-
-    """横向拼接真实结局标签（冻结 MAE/MFE，禁止后续再改）"""
+    """横向拼接真实结局标签（冻结 MAE/MFE，禁止后续再改）。
+    入库前：能重算则用 entry/initial_sl/exit 重算 R；否则钳制到 ±5。
+    """
     if not signal_id:
         return
+    try:
+        pnl_r = float(pnl_r)
+    except Exception:
+        pnl_r = 0.0
     try:
         # 钳制异常 R，防止价格单位误写入导致 -159R 等溢出
         _mf = float(max_fwd or 0.0)
@@ -959,9 +1011,39 @@ def record_close_outcome(signal_id: str, pnl_r: float, exit_reason: str, max_fwd
             _ma = -1.0 if _ma < 0 else min(10.0, _ma)
         conn = sqlite3.connect(str(_get_db_path()))
         cursor = conn.cursor()
-        # OPEN 可更新；RESEARCH_SHADOW_CLOSED 且 pnl≈0 允许被真实 RESEARCH_* 覆盖（修复幽灵清理抢写）
+        # 【2026-09-28】优先用开仓快照重算 R，避免移动止损/分段累加导致虚高 R
         _sid = str(signal_id or "")
         _er = str(exit_reason or "")
+        try:
+            cursor.execute(
+                "SELECT entry_price, initial_sl, direction FROM trade_snapshots WHERE signal_id = ?",
+                (signal_id,),
+            )
+            _row = cursor.fetchone()
+            if _row is not None:
+                _ep, _isl, _dir = _row
+                _xp = exit_price
+                if _xp is None or float(_xp or 0) <= 0:
+                    _xp = None
+                if _ep and _isl and _xp:
+                    _re = _recompute_pnl_r(_ep, _isl, _xp, _dir or "")
+                    if _re is not None:
+                        if abs(float(pnl_r) - _re) > 0.25 or abs(float(pnl_r)) > 5.0:
+                            slog.warning(
+                                f"[V6 DataEngine] pnl_r 重算 {float(pnl_r):+.3f} -> {_re:+.3f} "
+                                f"sid={signal_id} entry={_ep} sl={_isl} exit={_xp}"
+                            )
+                        pnl_r = _re
+        except Exception as _rc_e:
+            slog.debug(f"[V6 DataEngine] pnl 重算跳过: {_rc_e}")
+        try:
+            pnl_r = float(pnl_r)
+            if abs(pnl_r) > 5.0:
+                slog.warning(f"[V6 DataEngine] pnl_r 异常钳制 {pnl_r:.2f} -> ±5 signal_id={signal_id}")
+                pnl_r = max(-5.0, min(5.0, pnl_r))
+        except Exception:
+            pnl_r = 0.0
+        # OPEN 可更新；RESEARCH_SHADOW_CLOSED 且 pnl≈0 允许被真实 RESEARCH_* 覆盖（修复幽灵清理抢写）
         cursor.execute(
             """
             UPDATE trade_snapshots
@@ -1045,9 +1127,9 @@ class DynamicFeatureOptimizer:
                   AND exit_reason NOT IN (
                         'OPEN', 'MANUAL_CLEANUP_DEPRECATED',
                         'STALE_OPEN_TIMEOUT', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE',
-                        'RESEARCH_SHADOW_CLOSED', ''
+                        'RESEARCH_SHADOW_CLOSED', 'RESEARCH_SHADOW_CANCELLED', 'RESEARCH_OBSERVE', ''
                   )
-                  AND abs(pnl_r) <= 10.0
+                  AND abs(pnl_r) <= 5.0
                   AND abs(pnl_r) > 1e-9
                 ORDER BY timestamp DESC LIMIT ?
             """

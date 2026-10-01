@@ -353,9 +353,11 @@ class FeedbackLoop:
                   AND exit_reason NOT IN (
                         'OPEN', 'MANUAL_CLEANUP_DEPRECATED',
                         'STALE_OPEN_TIMEOUT', 'FORCE_CLOSE_UNKNOWN', 'OPEN_STALE',
-                        'RESEARCH_SHADOW_CLOSED', ''
+                        'RESEARCH_SHADOW_CLOSED', 'RESEARCH_SHADOW_CANCELLED',
+                        'RESEARCH_OBSERVE', ''
                   )
-                  AND abs(pnl_r) <= 10.0
+                  AND (signal_id IS NULL OR (signal_id NOT LIKE 'RES_%' AND signal_id NOT LIKE 'RESEARCH_%'))
+                  AND abs(pnl_r) <= 5.0
                   AND abs(pnl_r) > 1e-9
                 ORDER BY COALESCE(exit_timestamp, timestamp) ASC
                 LIMIT 500

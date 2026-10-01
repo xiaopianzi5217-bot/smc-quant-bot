@@ -475,13 +475,13 @@ def generate_daily_report(target_date: datetime = None) -> str:
             continue
         # 影子模式 / 科研平仓不计入实盘日报
         _er = str(ev.get('exit_reason') or '')
-        if _er in ('RESEARCH_SHADOW_CLOSED', 'RESEARCH_OBSERVE', 'RESEARCH_SL', 'RESEARCH_TP1'):
+        if _er in ('RESEARCH_SHADOW_CLOSED', 'RESEARCH_SHADOW_CANCELLED', 'RESEARCH_OBSERVE', 'RESEARCH_SL', 'RESEARCH_TP1'):
             continue
         if str(ev.get('mode') or '').upper() == 'SHADOW':
             continue
         pr = float(ev.get('profit_r') if ev.get('profit_r') is not None else (ev.get('pnl_r') or 0.0))
-        # 脏 R 过滤：|R|>10 不计入主指标（仍可在 note 中暴露）
-        if abs(pr) > 10.0:
+        # 脏 R 过滤：|R|>5 不计入主指标（虚高 R / 分母错误）
+        if abs(pr) > 5.0:
             try:
                 from utils.structured_logger import slog
                 slog.warning(f"[DailyReport] 丢弃异常 profit_r={pr:.2f} tid={tid}")

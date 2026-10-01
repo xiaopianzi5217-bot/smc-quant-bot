@@ -241,11 +241,13 @@ def check_partial_close_and_trail(
     # ============================
     # 计算 R（基于ʵ际 risk，保本后仍可正ȷ计算）
     # ============================
+    # 【2026-09-28】计算盈亏 R 时永远优先 initial_risk（开仓止损距离），
+    # 禁止用 current_sl（保本后趋近 0 会把 R 炸到几十）。
     _MIN_RISK = max(abs(entry) * 0.0005, 1e-9)
-    if stage >= 1 and initial_risk > 0:
-        risk_for_r = max(initial_risk, _MIN_RISK)
+    if initial_risk > 0:
+        risk_for_r = max(float(initial_risk), _MIN_RISK)
     else:
-        risk_for_r = max(risk, _MIN_RISK)
+        risk_for_r = max(float(risk), _MIN_RISK)
 
     if str(side or "").lower().startswith("long"):
         _profit_r_raw = (current_price - entry) / risk_for_r
@@ -253,7 +255,7 @@ def check_partial_close_and_trail(
         _profit_r_raw = (entry - current_price) / risk_for_r
 
     # 【V59.8】R 倍数硬帽 -20 ~ +20，防脏值污染 EV/Outcome
-    profit_r = max(-20.0, min(20.0, _profit_r_raw))
+    profit_r = max(-5.0, min(5.0, _profit_r_raw))  # 【2026-09-28】硬帽 ±5R，防脏值
 
     # ============================
     # 1. 首先检查Ӳֹ损（无条件，即ʹ保本后Ҳ能触发）
